@@ -4,7 +4,7 @@ import TelegramBot from "node-telegram-bot-api";
 const app = express();
 
 // 🔑 التوكن
-const TOKEN = "حط_التوكن_حقك_هنا";
+const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
 const bot = new TelegramBot(TOKEN, { polling: true });
 
 // =======================
