@@ -8,48 +8,59 @@ const bot = new TelegramBot(TOKEN, { polling: true });
 
 let chatId = null;
 
+// =======================
+// 🎯 استقبال
+// =======================
 bot.on("message", (msg) => {
   chatId = msg.chat.id;
 
-  if (msg.text.includes("/start")) {
-    bot.sendMessage(chatId, "💀 AI PRO MAX SMART ACTIVE");
+  if (msg.text && msg.text.includes("/start")) {
+    bot.sendMessage(chatId, "💀 AI PRO MAX ACTIVE");
   }
 
-  if (msg.text.includes("/scan")) {
+  if (msg.text && msg.text.includes("/scan")) {
     runAI();
   }
 });
 
 // =======================
-// 📊 APIs (محسنة)
+// 📊 السوق السعودي
 // =======================
-
 async function getSaudi() {
   try {
-    const res = await fetch("https://www.tadawulgroup.sa/wps/portal/tadawul/1/issuers");
+    const res = await fetch("https://www.tadawulgroup.sa/wps/portal/tadawul/market-participants/issuers-list?locale=en");
     const data = await res.json();
-    return data?.data?.map(x => x.symbol) || [];
-  } catch {
+    return data?.issuers?.map(x => x.symbol) || [];
+  } catch (e) {
+    console.log("Saudi API Error");
     return [];
   }
 }
 
+// =======================
+// 📊 السوق الأمريكي
+// =======================
 async function getUS() {
   try {
-    const res = await fetch("https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=200");
+    const res = await fetch("https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=4000");
     const data = await res.json();
     return data?.data?.rows?.map(x => x.symbol) || [];
-  } catch {
+  } catch (e) {
+    console.log("US API Error");
     return [];
   }
 }
 
+// =======================
+// 🪙 العملات
+// =======================
 async function getCrypto() {
   try {
     const res = await fetch("https://api.binance.com/api/v3/ticker/price");
     const data = await res.json();
-    return data.map(x => x.symbol).slice(0, 100); // تقليل الضغط
-  } catch {
+    return data.map(x => x.symbol);
+  } catch (e) {
+    console.log("Crypto API Error");
     return [];
   }
 }
@@ -68,28 +79,15 @@ async function getPrice(symbol) {
 }
 
 // =======================
-// 📊 RSI تقريبي سريع
+// 📊 تحليل بسيط
 // =======================
-function fakeRSI(price) {
-  return Math.min(90, Math.max(10, (price % 100)));
-}
-
-// =======================
-// 💀 فلترة قوية
-// =======================
-function smartSignal(price, rsi) {
-
+function analyze(price) {
   if (!price) return null;
 
-  if (rsi < 30) {
-    return "💀 دخول قوي (تشبع بيع)";
-  }
+  if (price % 5 < 1) return "💀 فرصة قوية";
+  if (price % 3 < 1) return "🚀 بداية حركة";
 
-  if (rsi > 70) {
-    return "🔴 خروج (تشبع شراء)";
-  }
-
-  return null; // يمنع السبام
+  return null; // فلترة
 }
 
 // =======================
@@ -103,60 +101,65 @@ function send(msg) {
 // =======================
 // 🔥 تحليل سهم
 // =======================
-async function analyzeAsset(market, symbol, suffix="") {
-
+async function analyzeAsset(market, symbol, suffix = "") {
   const price = await getPrice(symbol + suffix);
+
   if (!price) return;
 
-  const rsi = fakeRSI(price);
-  const signal = smartSignal(price, rsi);
+  const signal = analyze(price);
 
-  if (!signal) return; // 💀 فلترة (مهم)
+  if (!signal) return;
 
-  let msg = `${market}
-
+  send(`${market}
 🟢 ${symbol}
 💰 ${price.toFixed(2)}
-RSI: ${rsi}
-
 ${signal}
-`;
-
-  send(msg);
+`);
 }
 
 // =======================
 // 🔥 تشغيل
 // =======================
 async function runAI() {
+  try {
 
-  const saudi = await getSaudi();
-  const us = await getUS();
-  const crypto = await getCrypto();
+    const saudi = await getSaudi();
+    const us = await getUS();
+    const crypto = await getCrypto();
 
-  // 🔥 تقليل الضغط (أهم شيء)
-  const saudiSample = saudi.slice(0, 50);
-  const usSample = us.slice(0, 50);
+    // ⚠️ تحديد عدد عشان ما ينهار
+    const saudiList = saudi.slice(0, 100);
+    const usList = us.slice(0, 100);
+    const cryptoList = crypto.slice(0, 100);
 
-  for (const s of saudiSample) {
-    await analyzeAsset("🇸🇦 السوق السعودي", s, ".SR");
-  }
+    for (const s of saudiList) {
+      await analyzeAsset("🇸🇦 السوق السعودي", s, ".SR");
+    }
 
-  for (const s of usSample) {
-    await analyzeAsset("🇺🇸 السوق الأمريكي", s);
-  }
+    for (const s of usList) {
+      await analyzeAsset("🇺🇸 السوق الأمريكي", s);
+    }
 
-  for (const c of crypto) {
-    send(`🪙 ${c}`); // العملات مباشرة
+    for (const c of cryptoList) {
+      send(`🪙 ${c}`);
+    }
+
+  } catch (e) {
+    console.log("RUN ERROR:", e.message);
   }
 }
 
-// كل 5 دقائق (أفضل)
-setInterval(runAI, 300000);
+// كل دقيقة
+setInterval(runAI, 60000);
 
+// =======================
+// 🌐 السيرفر
 // =======================
 app.get("/", (req, res) => {
   res.send("💀 AI PRO MAX RUNNING");
 });
 
-app.listen(3000);
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log("Server running on port " + port);
+});
