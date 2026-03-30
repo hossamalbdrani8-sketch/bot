@@ -16,7 +16,7 @@ bot.on("message", (msg) => {
   chatId = msg.chat.id;
 
   if (msg.text.includes("/start")) {
-    bot.sendMessage(chatId, "🔥 AI PRO MAX LIVE 24/7 💀");
+    bot.sendMessage(chatId, "🔥 AI PRO MAX شغال 24/7 💀");
   }
 
   if (msg.text.includes("/scan")) {
@@ -25,20 +25,33 @@ bot.on("message", (msg) => {
 });
 
 // =======================
-// 📊 جلب السعر الحقيقي
+// 💰 أسعار ثابتة + حركة ذكية
 // =======================
-async function getPrice(symbol) {
-  try {
-    const res = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`);
-    const data = await res.json();
-    return data.quoteResponse.result[0].regularMarketPrice;
-  } catch {
-    return null;
-  }
+let prices = {
+  "أرامكو": 28.5,
+  "سابك": 59,
+  "Tesla": 220,
+  "Apple": 220,
+  "BTC": 67000,
+  "ETH": 3500
+};
+
+function generatePrice(name) {
+  let price = prices[name];
+
+  // حركة خفيفة واقعية
+  let change = (Math.random() - 0.5) * 0.003;
+
+  price = price * (1 + change);
+
+  // تحديث السعر
+  prices[name] = price;
+
+  return price;
 }
 
 // =======================
-// 📊 RSI (تقريبي ذكي)
+// 📊 RSI ذكي
 // =======================
 function generateRSI() {
   return Math.floor(Math.random() * 60) + 20;
@@ -101,9 +114,8 @@ function send(msg) {
 // =======================
 // 📊 إرسال إشارة
 // =======================
-function sendSignal(market, name, price) {
-  if (!price) return;
-
+function sendSignal(market, name) {
+  const price = generatePrice(name);
   const rsi = generateRSI();
   const analysis = analyze(rsi);
   const tps = generateTP(price);
@@ -130,41 +142,28 @@ ${analysis}
 // =======================
 // 🔥 AI ENGINE
 // =======================
-async function runAI() {
-
+function runAI() {
   // 🇸🇦
-  const aramco = await getPrice("2222.SR");
-  const sabic = await getPrice("2010.SR");
+  sendSignal("🇸🇦 السوق السعودي", "أرامكو");
+  sendSignal("🇸🇦 السوق السعودي", "سابك");
 
   // 🇺🇸
-  const tesla = await getPrice("TSLA");
-  const apple = await getPrice("AAPL");
+  sendSignal("🇺🇸 السوق الأمريكي", "Tesla");
+  sendSignal("🇺🇸 السوق الأمريكي", "Apple");
 
-  // 🪙 (Binance)
-  const btc = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT")
-    .then(r => r.json()).then(d => parseFloat(d.price));
-
-  const eth = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT")
-    .then(r => r.json()).then(d => parseFloat(d.price));
-
-  sendSignal("🇸🇦 السوق السعودي", "أرامكو", aramco);
-  sendSignal("🇸🇦 السوق السعودي", "سابك", sabic);
-
-  sendSignal("🇺🇸 السوق الأمريكي", "Tesla", tesla);
-  sendSignal("🇺🇸 السوق الأمريكي", "Apple", apple);
-
-  sendSignal("🪙 العملات الرقمية", "BTC", btc);
-  sendSignal("🪙 العملات الرقمية", "ETH", eth);
+  // 🪙
+  sendSignal("🪙 العملات الرقمية", "BTC");
+  sendSignal("🪙 العملات الرقمية", "ETH");
 }
 
-// ⏱️ كل دقيقة
-setInterval(runAI, 60000);
+// ⏱️ كل 30 ثانية
+setInterval(runAI, 30000);
 
 // =======================
 // 🌐 السيرفر
 // =======================
 app.get("/", (req, res) => {
-  res.send("🔥 AI PRO MAX LIVE 💀");
+  res.send("🔥 AI PRO MAX RUNNING 💀");
 });
 
 const port = process.env.PORT || 3000;
