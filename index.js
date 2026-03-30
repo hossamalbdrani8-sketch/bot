@@ -149,8 +149,8 @@ async function runAI() {
   }
 }
 
-// كل دقيقة
-setInterval(runAI, 60000);
+// تشغيل كل 5 دقائق
+setInterval(runAI, 300000);
 
 // =======================
 // 🌐 السيرفر
