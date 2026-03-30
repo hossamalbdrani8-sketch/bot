@@ -1,15 +1,14 @@
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
+import fetch from "node-fetch";
 
 const app = express();
 
-// 🔑 التوكن
-const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
-
+const TOKEN = "حط_التوكن_حقك_هنا";
 const bot = new TelegramBot(TOKEN, { polling: true });
 
 // =======================
-// 🎯 التقاط chatId
+// 🎯 chatId
 // =======================
 let msgChatId = null;
 
@@ -17,12 +16,30 @@ bot.on("message", (msg) => {
   msgChatId = msg.chat.id;
 
   if (msg.text === "/start") {
-    bot.sendMessage(msgChatId, "🔥 AI PRO MAX شغال وجاهز");
+    bot.sendMessage(msgChatId, "🔥 AI PRO MAX شغال 24/7");
   }
 });
 
 // =======================
-// 🎯 TP + السعر
+// 📊 جلب الأسعار الحقيقية
+// =======================
+
+// كريبتو (Binance)
+async function getCryptoPrice(symbol) {
+  const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
+  const data = await res.json();
+  return parseFloat(data.price);
+}
+
+// الأسهم (Yahoo)
+async function getStockPrice(symbol) {
+  const res = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`);
+  const data = await res.json();
+  return data.quoteResponse.result[0].regularMarketPrice;
+}
+
+// =======================
+// 🎯 TP
 // =======================
 function generateTP(price) {
   return [
@@ -38,38 +55,45 @@ function generateTP(price) {
 }
 
 // =======================
-// 🧠 تحليل RSI متطور
+// 🧠 AI تحليل ذكي
 // =======================
 function analyzeMarket(asset) {
   const rsi = asset.rsi;
+  const vol = asset.volume;
 
-  if (rsi <= 20) return "💀 تشبع بيع قوي جداً (انفجار محتمل)";
-  if (rsi <= 30) return "🟢 دخول مبكر + تأكيد";
-  if (rsi <= 40) return "🚀 بداية صعود";
+  // 💀 فلترة قوية
+  if (rsi <= 30 && vol > 1000000) return "💀 دخول مؤسساتي قوي";
+  if (rsi <= 40) return "🚀 بداية انفجار";
   if (rsi <= 50) return "📈 تأكيد اتجاه";
-  if (rsi <= 60) return "🔥 استمرارية صعود";
-  if (rsi <= 70) return "⚠️ قرب تشبع";
-  if (rsi <= 80) return "🔴 تشبع شراء";
-  return "💥 قمة خطر";
+  if (rsi <= 60) return "🔥 استمرارية";
+  if (rsi >= 70) return "🔴 خروج تدريجي";
+
+  return "⏳ انتظار";
 }
 
 // =======================
-// ⚠️ وقف متحرك مع السعر
+// ⚠️ وقف متحرك ذكي
 // =======================
-let lastPrice = 0;
+let lastPrices = {};
 
-function trailingStop(price) {
-  if (price > lastPrice) {
-    lastPrice = price;
+function trailingStop(asset) {
+  const name = asset.name;
+
+  if (!lastPrices[name]) {
+    lastPrices[name] = asset.price;
   }
 
-  if (price < lastPrice * 0.97) {
-    sendSignal(`⚠️ وقف متحرك تفعل عند ${price}`);
+  if (asset.price > lastPrices[name]) {
+    lastPrices[name] = asset.price;
+  }
+
+  if (asset.price < lastPrices[name] * 0.97) {
+    sendSignal(`⚠️ وقف متحرك تفعل\n${asset.name} عند ${asset.price}`);
   }
 }
 
 // =======================
-// 📩 إرسال رسالة
+// 📩 إرسال
 // =======================
 function sendSignal(msg) {
   if (!msgChatId) return;
@@ -83,12 +107,16 @@ function sendFullSignal(title, asset) {
   if (!msgChatId) return;
 
   const analysis = analyzeMarket(asset);
+
+  // 💥 فلترة (أفضل الفرص فقط)
+  if (!analysis.includes("💀") && !analysis.includes("🚀")) return;
+
   const tps = generateTP(asset.price);
 
   let msg = `${title}
 
 🟢 ${asset.name}
-💰 السعر: ${asset.price}
+💰 السعر: ${asset.price.toFixed(2)}
 RSI: ${asset.rsi}
 ${analysis}
 
@@ -102,31 +130,61 @@ ${analysis}
 
   bot.sendMessage(msgChatId, msg);
 
-  trailingStop(asset.price);
+  trailingStop(asset);
 }
 
 // =======================
-// 📊 الأسواق
+// 📊 الأسواق (مباشر)
 // =======================
 
-function saudiMarket() {
+async function saudiMarket() {
   return [
-    { name: "أرامكو", price: 30, rsi: 28, volume: 2000000 },
-    { name: "سابك", price: 90, rsi: 35, volume: 1500000 }
+    {
+      name: "أرامكو",
+      price: await getStockPrice("2222.SR"),
+      rsi: 28,
+      volume: 2000000
+    },
+    {
+      name: "سابك",
+      price: await getStockPrice("2010.SR"),
+      rsi: 35,
+      volume: 1500000
+    }
   ];
 }
 
-function usMarket() {
+async function usMarket() {
   return [
-    { name: "Tesla", price: 250, rsi: 27, volume: 5000000 },
-    { name: "Apple", price: 180, rsi: 45, volume: 3000000 }
+    {
+      name: "Tesla",
+      price: await getStockPrice("TSLA"),
+      rsi: 27,
+      volume: 5000000
+    },
+    {
+      name: "Apple",
+      price: await getStockPrice("AAPL"),
+      rsi: 45,
+      volume: 3000000
+    }
   ];
 }
 
-function cryptoMarket() {
+async function cryptoMarket() {
   return [
-    { name: "BTC", price: 67000, rsi: 29, volume: 9000000 },
-    { name: "ETH", price: 3500, rsi: 31, volume: 7000000 }
+    {
+      name: "BTC",
+      price: await getCryptoPrice("BTCUSDT"),
+      rsi: 29,
+      volume: 9000000
+    },
+    {
+      name: "ETH",
+      price: await getCryptoPrice("ETHUSDT"),
+      rsi: 31,
+      volume: 7000000
+    }
   ];
 }
 
@@ -135,27 +193,31 @@ function cryptoMarket() {
 // =======================
 async function runAI() {
 
-  for (const s of saudiMarket()) {
+  const saudi = await saudiMarket();
+  const us = await usMarket();
+  const crypto = await cryptoMarket();
+
+  for (const s of saudi) {
     sendFullSignal("🇸🇦 السوق السعودي", s);
   }
 
-  for (const s of usMarket()) {
+  for (const s of us) {
     sendFullSignal("🇺🇸 السوق الأمريكي", s);
   }
 
-  for (const c of cryptoMarket()) {
+  for (const c of crypto) {
     sendFullSignal("🪙 العملات الرقمية", c);
   }
 }
 
-// ⏱️ كل دقيقة
+// كل دقيقة
 setInterval(runAI, 60000);
 
 // =======================
 // 🌐 السيرفر
 // =======================
 app.get("/", (req, res) => {
-  res.send("🚀 AI PRO MAX RUNNING");
+  res.send("🚀 AI PRO MAX LIVE");
 });
 
 const port = process.env.PORT || 3000;
