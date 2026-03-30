@@ -2,7 +2,8 @@ import express from "express";
 import TelegramBot from "node-telegram-bot-api";
 
 const app = express();
-const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
+
+const TOKEN = "حط_التوكن_حقك_هنا";
 const bot = new TelegramBot(TOKEN, { polling: true });
 
 let chatId = null;
@@ -11,7 +12,7 @@ bot.on("message", (msg) => {
   chatId = msg.chat.id;
 
   if (msg.text.includes("/start")) {
-    bot.sendMessage(chatId, "💀 AI PRO MAX ELITE ACTIVE");
+    bot.sendMessage(chatId, "💀 FULL REAL MARKET ACTIVE");
   }
 
   if (msg.text.includes("/scan")) {
@@ -20,113 +21,51 @@ bot.on("message", (msg) => {
 });
 
 // =======================
+// 📊 جلب السوق السعودي كامل
+// =======================
+async function getSaudi() {
+  const res = await fetch("https://www.tadawulgroup.sa/wps/portal/tadawul/market-participants/issuers-list?locale=en");
+  const data = await res.json();
+  return data.issuers.map(x => x.symbol);
+}
+
+// =======================
+// 📊 السوق الأمريكي (Nasdaq + NYSE)
+// =======================
+async function getUS() {
+  const res = await fetch("https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=4000");
+  const data = await res.json();
+  return data.data.rows.map(x => x.symbol);
+}
+
+// =======================
+// 🪙 العملات كاملة
+// =======================
+async function getCrypto() {
+  const res = await fetch("https://api.binance.com/api/v3/ticker/price");
+  const data = await res.json();
+  return data.map(x => x.symbol);
+}
+
+// =======================
 // 💰 السعر
 // =======================
-let prices = {
-  "أرامكو": 28.5,
-  "سابك": 59,
-  "Tesla": 220,
-  "Apple": 220,
-  "BTC": 67000,
-  "ETH": 3500
-};
-
-function priceMove(name) {
-  let p = prices[name];
-  let move = (Math.random() - 0.5) * 0.004;
-  p = p * (1 + move);
-  prices[name] = p;
-  return p;
-}
-
-// =======================
-// 📊 RSI ذكي
-// =======================
-let rsiMem = {};
-
-function getRSI(name, price) {
-  if (!rsiMem[name]) {
-    rsiMem[name] = { last: price, rsi: 50 };
+async function getPrice(symbol) {
+  try {
+    const res = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`);
+    const data = await res.json();
+    return data.quoteResponse.result[0]?.regularMarketPrice;
+  } catch {
+    return null;
   }
-
-  let diff = price - rsiMem[name].last;
-  let rsi = rsiMem[name].rsi;
-
-  rsi += diff > 0 ? 1.5 : -1.5;
-  rsi = Math.max(10, Math.min(90, rsi));
-
-  rsiMem[name] = { last: price, rsi };
-  return rsi;
 }
 
 // =======================
-// 🕯 تحليل شموع
+// 📊 تحليل بسيط
 // =======================
-function candleSignal(price, prev) {
-  if (!prev) return "⏳";
-
-  if (price > prev * 1.002) return "🟢 شمعة صاعدة قوية";
-  if (price < prev * 0.998) return "🔴 شمعة هابطة قوية";
-
-  return "⚖️ تذبذب";
-}
-
-// =======================
-// 💀 دايفرجنس
-// =======================
-let history = {};
-
-function divergence(name, price, rsi) {
-  if (!history[name]) {
-    history[name] = [];
-  }
-
-  history[name].push({ price, rsi });
-
-  if (history[name].length < 5) return "";
-
-  let h = history[name];
-
-  let p1 = h[h.length - 1].price;
-  let p2 = h[h.length - 3].price;
-
-  let r1 = h[h.length - 1].rsi;
-  let r2 = h[h.length - 3].rsi;
-
-  // Bullish
-  if (p1 < p2 && r1 > r2) return "💀 دايفرجنس صاعد";
-
-  // Bearish
-  if (p1 > p2 && r1 < r2) return "💀 دايفرجنس هابط";
-
-  return "";
-}
-
-// =======================
-// 🚀 انفجار
-// =======================
-function explosion(rsi, div) {
-  if (rsi < 30 && div.includes("صاعد")) {
-    return "🚀 دخول قبل الانفجار";
-  }
-
-  if (rsi > 70 && div.includes("هابط")) {
-    return "💀 تصريف قوي";
-  }
-
-  return "";
-}
-
-// =======================
-// 🎯 TP
-// =======================
-function tp(price) {
-  return [
-    price * 1.02,
-    price * 1.04,
-    price * 1.06,
-    price * 1.08
-  ];
+function analyze(price) {
+  if (!price) return "⏳";
+  return price % 2 === 0 ? "🟢 فرصة" : "🔴 حذر";
 }
 
 // =======================
@@ -138,64 +77,34 @@ function send(msg) {
 }
 
 // =======================
-// 📊 تحليل كامل
+// 🔥 تشغيل كامل السوق
 // =======================
-let prevPrice = {};
+async function runAI() {
 
-function analyzeAsset(market, name) {
+  const saudi = await getSaudi();
+  const us = await getUS();
+  const crypto = await getCrypto();
 
-  let price = priceMove(name);
-  let rsi = getRSI(name, price);
+  for (const s of saudi) {
+    const price = await getPrice(s + ".SR");
+    send(`🇸🇦 ${s} - ${price}`);
+  }
 
-  let prev = prevPrice[name];
-  prevPrice[name] = price;
+  for (const s of us) {
+    const price = await getPrice(s);
+    send(`🇺🇸 ${s} - ${price}`);
+  }
 
-  let candle = candleSignal(price, prev);
-  let div = divergence(name, price, rsi);
-  let boom = explosion(rsi, div);
-
-  let targets = tp(price);
-
-  let msg = `${market}
-
-🟢 ${name}
-💰 ${price.toFixed(2)}
-RSI: ${rsi.toFixed(1)}
-
-${candle}
-${div}
-${boom}
-
-`;
-
-  targets.forEach((t, i) => {
-    msg += `🎯 TP${i+1}: ${t.toFixed(2)}\n`;
-  });
-
-  send(msg);
+  for (const c of crypto) {
+    send(`🪙 ${c}`);
+  }
 }
 
 // =======================
-// 🔥 تشغيل
-// =======================
-function runAI() {
+setInterval(runAI, 600000);
 
-  analyzeAsset("🇸🇦 السوق السعودي", ");
-  analyzeAsset("🇸🇦 السوق السعودي", "");
-
-  analyzeAsset("🇺🇸 السوق الأمريكي",");
-  analyzeAsset("🇺🇸 السوق الأمريكي",");
-
-  analyzeAsset("🪙 العملات الرقمية",");
-  analyzeAsset("🪙 العملات الرقمية",");
-}
-
-// كل 30 ثانية
-setInterval(runAI, 30000);
-
-// =======================
 app.get("/", (req, res) => {
-  res.send("💀 AI ELITE RUNNING");
+  res.send("💀 REAL MARKET RUNNING");
 });
 
 app.listen(3000);
