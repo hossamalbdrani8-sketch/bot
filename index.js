@@ -3,121 +3,26 @@ import TelegramBot from "node-telegram-bot-api";
 
 const app = express();
 
+// 🔑 التوكن
 const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
 
 const bot = new TelegramBot(TOKEN, { polling: true });
 
-bot.on("message", (msg) => {
-  const chatId = msg.chat.id;
-  const text = msg.text;
-
-  if (text === "/start") {
-    bot.sendMessage(chatId, "🔥 البوت شغال وجاهز");
-  } else {
-    bot.sendMessage(chatId, "🤖 قلت: " + text);
-  }
-});
-
-app.get("/", (req, res) => {
-  res.send("🚀 Bot is running!");
-});
-
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log("Server running on port " + port);
-});
 // =======================
-// 🔥 AI PRO MAX SCANNER
-// =======================
-
-// تشغيل كل دقيقة
-setInterval(runScanner, 60000);
-
-// بيانات تجريبية (نستبدلها لاحقاً بسوق حقيقي)
-async function runScanner() {
-  const fakeData = [
-    { name: "BTC", rsi: 32, volume: 2000000, price: 67000 },
-    { name: "ETH", rsi: 28, volume: 3000000, price: 3500 },
-    { name: "SOL", rsi: 55, volume: 800000, price: 150 }
-  ];
-
-  for (const coin of fakeData) {
-
-    // 💀 دخول قوي (RSI + سيولة)
-    if (coin.rsi < 30 && coin.volume > 1000000) {
-      sendSignal(`💀 دخول مؤسساتي ${coin.name}\nRSI: ${coin.rsi}`);
-    }
-
-    // 🔴 خروج
-    else if (coin.rsi > 70) {
-      sendSignal(`🔴 خروج من ${coin.name}`);
-    }
-
-    // ⏳ انتظار
-    else {
-      console.log("انتظار:", coin.name);
-    }
-
-    // ⚠️ وقف متحرك
-    trailingStop(coin.price);
-  }
-}
-
-// =======================
-// 📩 إرسال إشارات
-// =======================
-
-function sendSignal(msg) {
-  const chatId = msgChatId; // نعرفه تحت
-  bot.sendMessage(chatId, msg);
-}
-
-// =======================
-// ⚠️ وقف متحرك
-// =======================
-
-let lastPrice = 0;
-
-function trailingStop(price) {
-  if (price > lastPrice) {
-    lastPrice = price;
-  }
-
-  if (price < lastPrice * 0.97) {
-    sendSignal("⚠️ وقف متحرك تفعل - خروج");
-  }
-}
-
-// =======================
-// 🎯 التقاط chatId تلقائي
-// =======================
-
-let msgChatId = null;
-
-bot.on("message", (msg) => {
-  msgChatId = msg.chat.id;
-});
-import express from "express";
-import TelegramBot from "node-telegram-bot-api";
-
-const app = express();
-
-// 🔑 التوكن
-const TOKEN = "حط_التوكن_هنا";
-
-const bot = new TelegramBot(TOKEN, { polling: true });
-
-// =======================
-// 🎯 التقاط chatId تلقائي
+// 🎯 التقاط chatId
 // =======================
 let msgChatId = null;
 
 bot.on("message", (msg) => {
   msgChatId = msg.chat.id;
+
+  if (msg.text === "/start") {
+    bot.sendMessage(msgChatId, "🔥 AI PRO MAX شغال وجاهز");
+  }
 });
 
 // =======================
-// 🎯 TP GENERATOR
+// 🎯 TP + السعر
 // =======================
 function generateTP(price) {
   return [
@@ -133,53 +38,23 @@ function generateTP(price) {
 }
 
 // =======================
-// 🧠 AI RSI ANALYSIS
+// 🧠 تحليل RSI متطور
 // =======================
 function analyzeMarket(asset) {
   const rsi = asset.rsi;
 
-  if (rsi <= 20) return "💀 تشبع بيع قوي جداً";
-  if (rsi <= 30) return "🟢 دخول ذكي مبكر";
+  if (rsi <= 20) return "💀 تشبع بيع قوي جداً (انفجار محتمل)";
+  if (rsi <= 30) return "🟢 دخول مبكر + تأكيد";
   if (rsi <= 40) return "🚀 بداية صعود";
-  if (rsi <= 50) return "📈 تأكيد اتجاه صاعد";
+  if (rsi <= 50) return "📈 تأكيد اتجاه";
   if (rsi <= 60) return "🔥 استمرارية صعود";
-  if (rsi <= 70) return "⚠️ قرب التشبع";
+  if (rsi <= 70) return "⚠️ قرب تشبع";
   if (rsi <= 80) return "🔴 تشبع شراء";
-  return "💥 قمة خطيرة";
+  return "💥 قمة خطر";
 }
 
 // =======================
-// 🇸🇦 السوق السعودي
-// =======================
-function saudiMarket() {
-  return [
-    { name: "أرامكو", price: 30, rsi: 28, volume: 2000000 },
-    { name: "سابك", price: 90, rsi: 35, volume: 1500000 }
-  ];
-}
-
-// =======================
-// 🇺🇸 السوق الأمريكي
-// =======================
-function usMarket() {
-  return [
-    { name: "Tesla", price: 250, rsi: 27, volume: 5000000 },
-    { name: "Apple", price: 180, rsi: 45, volume: 3000000 }
-  ];
-}
-
-// =======================
-// 🪙 العملات
-// =======================
-function cryptoMarket() {
-  return [
-    { name: "BTC", price: 67000, rsi: 29, volume: 9000000 },
-    { name: "ETH", price: 3500, rsi: 31, volume: 7000000 }
-  ];
-}
-
-// =======================
-// ⚠️ وقف متحرك
+// ⚠️ وقف متحرك مع السعر
 // =======================
 let lastPrice = 0;
 
@@ -189,16 +64,23 @@ function trailingStop(price) {
   }
 
   if (price < lastPrice * 0.97) {
-    sendSignal("⚠️ وقف متحرك تفعل - خروج");
+    sendSignal(`⚠️ وقف متحرك تفعل عند ${price}`);
   }
 }
 
 // =======================
-// 📩 إرسال إشارة كاملة
+// 📩 إرسال رسالة
+// =======================
+function sendSignal(msg) {
+  if (!msgChatId) return;
+  bot.sendMessage(msgChatId, msg);
+}
+
+// =======================
+// 📊 إرسال إشارة كاملة
 // =======================
 function sendFullSignal(title, asset) {
-
-  if (!msgChatId) return; // لازم ترسل رسالة أول
+  if (!msgChatId) return;
 
   const analysis = analyzeMarket(asset);
   const tps = generateTP(asset.price);
@@ -206,6 +88,7 @@ function sendFullSignal(title, asset) {
   let msg = `${title}
 
 🟢 ${asset.name}
+💰 السعر: ${asset.price}
 RSI: ${asset.rsi}
 ${analysis}
 
@@ -223,27 +106,49 @@ ${analysis}
 }
 
 // =======================
-// 🔥 تشغيل AI PRO MAX
+// 📊 الأسواق
+// =======================
+
+function saudiMarket() {
+  return [
+    { name: "أرامكو", price: 30, rsi: 28, volume: 2000000 },
+    { name: "سابك", price: 90, rsi: 35, volume: 1500000 }
+  ];
+}
+
+function usMarket() {
+  return [
+    { name: "Tesla", price: 250, rsi: 27, volume: 5000000 },
+    { name: "Apple", price: 180, rsi: 45, volume: 3000000 }
+  ];
+}
+
+function cryptoMarket() {
+  return [
+    { name: "BTC", price: 67000, rsi: 29, volume: 9000000 },
+    { name: "ETH", price: 3500, rsi: 31, volume: 7000000 }
+  ];
+}
+
+// =======================
+// 🔥 تشغيل AI
 // =======================
 async function runAI() {
 
-  // 🇸🇦
-  for (const stock of saudiMarket()) {
-    sendFullSignal("🇸🇦 السوق السعودي", stock);
+  for (const s of saudiMarket()) {
+    sendFullSignal("🇸🇦 السوق السعودي", s);
   }
 
-  // 🇺🇸
-  for (const stock of usMarket()) {
-    sendFullSignal("🇺🇸 السوق الأمريكي", stock);
+  for (const s of usMarket()) {
+    sendFullSignal("🇺🇸 السوق الأمريكي", s);
   }
 
-  // 🪙
-  for (const coin of cryptoMarket()) {
-    sendFullSignal("🪙 العملات الرقمية", coin);
+  for (const c of cryptoMarket()) {
+    sendFullSignal("🪙 العملات الرقمية", c);
   }
 }
 
-// ⏱️ تشغيل تلقائي كل دقيقة
+// ⏱️ كل دقيقة
 setInterval(runAI, 60000);
 
 // =======================
