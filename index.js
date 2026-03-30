@@ -1,6 +1,5 @@
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
-import fetch from "node-fetch";
 
 const app = express();
 
@@ -21,21 +20,32 @@ bot.on("message", (msg) => {
 });
 
 // =======================
-// 📊 جلب الأسعار الحقيقية
+// 📊 جلب الأسعار (بدون node-fetch)
 // =======================
 
-// كريبتو (Binance)
 async function getCryptoPrice(symbol) {
-  const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
-  const data = await res.json();
-  return parseFloat(data.price);
+  try {
+    const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
+    const data = await res.json();
+    return parseFloat(data.price);
+  } catch (e) {
+    console.log("Crypto API Error:", e.message);
+    return null;
+  }
 }
 
-// الأسهم (Yahoo)
 async function getStockPrice(symbol) {
-  const res = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`);
-  const data = await res.json();
-  return data.quoteResponse.result[0].regularMarketPrice;
+  try {
+    const res = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`);
+    const data = await res.json();
+
+    const result = data?.quoteResponse?.result?.[0];
+    return result?.regularMarketPrice || null;
+
+  } catch (e) {
+    console.log("Stock API Error:", e.message);
+    return null;
+  }
 }
 
 // =======================
@@ -55,13 +65,12 @@ function generateTP(price) {
 }
 
 // =======================
-// 🧠 AI تحليل ذكي
+// 🧠 AI تحليل
 // =======================
 function analyzeMarket(asset) {
   const rsi = asset.rsi;
   const vol = asset.volume;
 
-  // 💀 فلترة قوية
   if (rsi <= 30 && vol > 1000000) return "💀 دخول مؤسساتي قوي";
   if (rsi <= 40) return "🚀 بداية انفجار";
   if (rsi <= 50) return "📈 تأكيد اتجاه";
@@ -72,7 +81,7 @@ function analyzeMarket(asset) {
 }
 
 // =======================
-// ⚠️ وقف متحرك ذكي
+// ⚠️ وقف متحرك
 // =======================
 let lastPrices = {};
 
@@ -101,14 +110,15 @@ function sendSignal(msg) {
 }
 
 // =======================
-// 📊 إرسال إشارة كاملة
+// 📊 إرسال إشارة
 // =======================
 function sendFullSignal(title, asset) {
   if (!msgChatId) return;
+  if (!asset.price) return; // حماية
 
   const analysis = analyzeMarket(asset);
 
-  // 💥 فلترة (أفضل الفرص فقط)
+  // فلترة قوية 💀
   if (!analysis.includes("💀") && !analysis.includes("🚀")) return;
 
   const tps = generateTP(asset.price);
@@ -134,7 +144,7 @@ ${analysis}
 }
 
 // =======================
-// 📊 الأسواق (مباشر)
+// 📊 الأسواق
 // =======================
 
 async function saudiMarket() {
@@ -192,26 +202,22 @@ async function cryptoMarket() {
 // 🔥 تشغيل AI
 // =======================
 async function runAI() {
+  try {
+    const saudi = await saudiMarket();
+    const us = await usMarket();
+    const crypto = await cryptoMarket();
 
-  const saudi = await saudiMarket();
-  const us = await usMarket();
-  const crypto = await cryptoMarket();
+    for (const s of saudi) sendFullSignal("🇸🇦 السوق السعودي", s);
+    for (const s of us) sendFullSignal("🇺🇸 السوق الأمريكي", s);
+    for (const c of crypto) sendFullSignal("🪙 العملات الرقمية", c);
 
-  for (const s of saudi) {
-    sendFullSignal("🇸🇦 السوق السعودي", s);
-  }
-
-  for (const s of us) {
-    sendFullSignal("🇺🇸 السوق الأمريكي", s);
-  }
-
-  for (const c of crypto) {
-    sendFullSignal("🪙 العملات الرقمية", c);
+  } catch (e) {
+    console.log("AI ERROR:", e.message);
   }
 }
 
-// كل دقيقة
-setInterval(runAI, 60000);
+// ⏱️ كل 5 دقائق (أفضل)
+setInterval(runAI, 300000);
 
 // =======================
 // 🌐 السيرفر
