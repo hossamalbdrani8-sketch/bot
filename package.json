@@ -11,3 +11,4 @@
     "node-telegram-bot-api": "^0.61.0",
     "openai": "^4.0.0"
   }
+}
