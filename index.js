@@ -5,11 +5,11 @@ const app = express();
 app.use(express.json());
 
 // 🔑 TOKEN
-const TOKEN = "PUT_YOUR_TOKEN_HERE";
+const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
 const bot = new TelegramBot(TOKEN, { polling: true });
 
 // 🔑 API
-const API_KEY = "PUT_YOUR_API_KEY";
+const API_KEY = "d75o0l1r01qk56kdfon0d75o0l1r01qk56kdfong";
 
 // =======================
 let chatId = null;
@@ -23,7 +23,7 @@ bot.on("message", (msg) => {
 });
 
 // =======================
-// 🧠 تحليل
+// 🧠 تحليل (كما طلبت)
 // =======================
 function analyze(price) {
   let rsi = Math.floor(price % 100);
@@ -40,20 +40,19 @@ function analyze(price) {
   else if (rsi <= 80) { signal="🔴 بيع قوي"; zone="80"; }
   else { signal="🚨 خطر"; zone="100"; }
 
-  let entry = price;
-
+  // 🎯 أهداف + وقف
   let tp = [
-    (entry * 1.02).toFixed(2),
-    (entry * 1.04).toFixed(2),
-    (entry * 1.06).toFixed(2),
-    (entry * 1.08).toFixed(2),
-    (entry * 1.10).toFixed(2),
-    (entry * 1.12).toFixed(2),
-    (entry * 1.15).toFixed(2),
-    (entry * 1.18).toFixed(2),
+    (price * 1.02).toFixed(2),
+    (price * 1.04).toFixed(2),
+    (price * 1.06).toFixed(2),
+    (price * 1.08).toFixed(2),
+    (price * 1.10).toFixed(2),
+    (price * 1.12).toFixed(2),
+    (price * 1.15).toFixed(2),
+    (price * 1.18).toFixed(2),
   ];
 
-  let sl = (entry * 0.94).toFixed(2);
+  let sl = (price * 0.94).toFixed(2);
 
   return { rsi, signal, zone, tp, sl };
 }
@@ -78,17 +77,8 @@ async function getSA(symbol) {
 }
 
 // =======================
-// 🧾 الشعارات
+// 📦 الأسواق
 // =======================
-function getLogo(symbol) {
-  return `https://logo.clearbit.com/${symbol.replace(".SR","").toLowerCase()}.com`;
-}
-
-// =======================
-// 📦 الأسواق (قابل للتوسعة)
-// =======================
-
-// 🇸🇦 تاسي (375 سهم - تقدر تضيفهم كامل)
 const saudi = [
   ["أرامكو","2222.SR"],
   ["الراجحي","1120.SR"],
@@ -96,7 +86,6 @@ const saudi = [
   ["STC","7010.SR"]
 ];
 
-// 🇺🇸 (قابل للتوسعة إلى 12872 سهم)
 const us = [
   ["Tesla","TSLA"],
   ["Apple","AAPL"],
@@ -105,14 +94,14 @@ const us = [
 ];
 
 // =======================
-// 🎯 فلترة
+// 🎯 فلتر (كما طلبت)
 // =======================
 function filterStrong(data) {
   return data.filter(s => s.rsi <= 30 || s.rsi >= 70);
 }
 
 // =======================
-// 🎯 تنسيق
+// 🎯 تنسيق (كما طلبت)
 // =======================
 function format(s) {
   return `
@@ -129,6 +118,7 @@ RSI: ${s.rsi} → ${s.signal}
 🎯 TP6: ${s.tp[5]}
 🎯 TP7: ${s.tp[6]}
 🎯 TP8: ${s.tp[7]}
+
 🛑 SL: ${s.sl}
 ━━━━━━━━━━━━`;
 }
@@ -144,20 +134,25 @@ async function run() {
   for (let s of saudi) {
     let p = await getSA(s[1]);
     if (!p) continue;
+
     let a = analyze(p);
-    saData.push({ name:s[0], price:p, logo:getLogo(s[1]), ...a });
+    saData.push({ name:s[0], price:p, ...a });
   }
 
   let usData = [];
   for (let s of us) {
     let p = await getUS(s[1]);
     if (!p) continue;
+
     let a = analyze(p);
-    usData.push({ name:s[0], price:p, logo:getLogo(s[1]), ...a });
+    usData.push({ name:s[0], price:p, ...a });
   }
 
+  // ✅ الفلترة رجعناها
   saData = filterStrong(saData);
   usData = filterStrong(usData);
+
+  if (saData.length === 0 && usData.length === 0) return;
 
   let message = `
 💀 AI PRO MAX
@@ -170,16 +165,18 @@ ${saData.map(format).join("")}
 ━━━━━━━━━━━━
 ${usData.map(format).join("")}
 
-⚡ تحديث كل ثانية
-🔥 يعمل 24/7
+⚡ تحديث كل دقيقة
 `;
 
   bot.sendMessage(chatId, message);
 }
 
 // =======================
-// ⚡ تشغيل كل ثانية
+// ⚡ تشغيل
 // =======================
-setInterval(run, 1000);
+setInterval(run, 60000);
 
-app.listen(3000);
+// =======================
+app.listen(3000, () => {
+  console.log("🔥 BOT RUNNING...");
+});
