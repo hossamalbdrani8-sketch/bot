@@ -8,36 +8,37 @@ app.use(express.json());
 const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
 const bot = new TelegramBot(TOKEN, { polling: true });
 
+// 🔑 FINNHUB API
+const API_KEY = "d75o0l1r01qk56kdfon0d75o0l1r01qk56kdfong";
+
 let chatId = null;
 
-// =======================
-// 📩 استقبال
 // =======================
 bot.on("message", (msg) => {
   chatId = msg.chat.id;
 
   if (msg.text === "/start") {
-    bot.sendMessage(chatId, "💀 AI PRO MAX ACTIVATED");
+    bot.sendMessage(chatId, "💀 AI PRO MAX LIVE (REAL API)");
   }
 });
 
 // =======================
-// 🧠 تحليل RSI
+// 🧠 تحليل
 // =======================
 function analyze(price) {
 
   let rsi = Math.floor(price % 100);
 
-  let signal = "⚪ HOLD";
+  let signal = "⚪ محايد";
 
-  if (rsi <= 20) signal = "🟢 فرصة انفجار 💀";
+  if (rsi <= 20) signal = "🟢 شراء قوي 💀";
   else if (rsi <= 30) signal = "🟢 شراء";
   else if (rsi <= 40) signal = "🟢 شراء ضعيف";
   else if (rsi <= 50) signal = "⚪ محايد";
   else if (rsi <= 60) signal = "🔴 بيع ضعيف";
   else if (rsi <= 70) signal = "🔴 بيع";
-  else if (rsi <= 80) signal = "🔴 بيع قوي 💀";
-  else signal = "🚨 انهيار";
+  else if (rsi <= 80) signal = "🔴 بيع قوي";
+  else signal = "🚨 خطر";
 
   let tp = [];
   for (let i = 1; i <= 8; i++) {
@@ -50,113 +51,112 @@ function analyze(price) {
 }
 
 // =======================
-// 🌐 البيانات
+// 📊 Finnhub (حقيقي)
 // =======================
-async function getData() {
+async function getUS(symbol) {
   try {
-    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd");
+    const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
     const data = await res.json();
-
-    return {
-      btc: data.bitcoin.usd,
-      eth: data.ethereum.usd,
-      eurusd: (1.10 + Math.random() * 0.1).toFixed(4),
-
-      // أسهم أمريكية
-      stocks: [
-        { name: "Tesla", price: 219.52 },
-        { name: "Apple", price: 175.21 },
-        { name: "NVIDIA", price: 880.33 }
-      ]
-    };
-
+    return data.c; // السعر الحالي
   } catch {
     return null;
   }
 }
 
 // =======================
-// 🧾 تنسيق الأهداف
+// 🇸🇦 سعودي (Yahoo)
 // =======================
-function formatTP(tp) {
-  return `
-🎯 TP1: ${tp[0]}
-🎯 TP2: ${tp[1]}
-🎯 TP3: ${tp[2]}
-🎯 TP4: ${tp[3]}
-🎯 TP5: ${tp[4]}
-🎯 TP6: ${tp[5]}
-🎯 TP7: ${tp[6]}
-🎯 TP8: ${tp[7]}
-`;
+async function getSA(symbol) {
+  try {
+    const res = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`);
+    const data = await res.json();
+    return data.quoteResponse.result[0]?.regularMarketPrice || null;
+  } catch {
+    return null;
+  }
 }
 
 // =======================
-// 🔥 التشغيل
+// 🎯 تنسيق
+// =======================
+function formatStock(name, price) {
+
+  if (!price) return `❌ ${name}`;
+
+  const a = analyze(price);
+
+  return `
+🟢 ${name}
+💰 ${price}
+RSI: ${a.rsi} → ${a.signal}
+
+🎯 TP1: ${a.tp[0]}
+🎯 TP2: ${a.tp[1]}
+🎯 TP3: ${a.tp[2]}
+🎯 TP4: ${a.tp[3]}
+🎯 TP5: ${a.tp[4]}
+🎯 TP6: ${a.tp[5]}
+🎯 TP7: ${a.tp[6]}
+🎯 TP8: ${a.tp[7]}
+
+🛑 وقف: ${a.sl}
+━━━━━━━━━━━━`;
+}
+
+// =======================
+// 🚀 التشغيل الحقيقي
 // =======================
 async function run() {
 
   if (!chatId) return;
 
-  const data = await getData();
-  if (!data) return;
+  // 🇺🇸 السوق الأمريكي (API حقيقي)
+  const tsla = await getUS("TSLA");
+  const aapl = await getUS("AAPL");
+  const nvda = await getUS("NVDA");
+  const amzn = await getUS("AMZN");
+  const meta = await getUS("META");
 
-  const btc = analyze(data.btc);
-  const eth = analyze(data.eth);
+  // 🇸🇦 السوق السعودي
+  const aramco = await getSA("2222.SR");
+  const rajhi = await getSA("1120.SR");
+  const stc = await getSA("7010.SR");
+  const sabic = await getSA("2010.SR");
 
-  // 🇺🇸 السوق الأمريكي
-  let usMarket = `🇺🇸 السوق الأمريكي\n\n`;
-
-  data.stocks.forEach(s => {
-    let a = analyze(s.price);
-
-    usMarket += `
-🟢 ${s.name}
-💰 السعر: ${s.price}
-RSI: ${a.rsi} → ${a.signal}
-${formatTP(a.tp)}
-🛑 وقف: ${a.sl}
-━━━━━━━━━━━━
-`;
-  });
-
-  // 🪙 الكريبتو
-  let crypto = `
-🪙 Crypto
-
-BTC: ${data.btc}
-RSI: ${btc.rsi} → ${btc.signal}
-${formatTP(btc.tp)}
-🛑 ${btc.sl}
-
-━━━━━━━━━━━━
-
-ETH: ${data.eth}
-RSI: ${eth.rsi} → ${eth.signal}
-${formatTP(eth.tp)}
-🛑 ${eth.sl}
-`;
+  // 🪙 كريبتو
+  const cryptoRes = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd");
+  const crypto = await cryptoRes.json();
 
   let message = `
-💀 AI PRO MAX LIVE
+💀 AI PRO MAX REAL MARKET
 
 🇸🇦 السوق السعودي
-TASI: LIVE
+━━━━━━━━━━━━
+${formatStock("أرامكو", aramco)}
+${formatStock("الراجحي", rajhi)}
+${formatStock("STC", stc)}
+${formatStock("سابك", sabic)}
 
-${usMarket}
+🇺🇸 السوق الأمريكي
+━━━━━━━━━━━━
+${formatStock("Tesla", tsla)}
+${formatStock("Apple", aapl)}
+${formatStock("NVIDIA", nvda)}
+${formatStock("Amazon", amzn)}
+${formatStock("Meta", meta)}
 
-💱 العملات
-EUR/USD: ${data.eurusd}
+🪙 الكريبتو
+━━━━━━━━━━━━
+${formatStock("Bitcoin", crypto.bitcoin.usd)}
+${formatStock("Ethereum", crypto.ethereum.usd)}
 
-${crypto}
-
-⚡ تحديث تلقائي
+⚡ تحديث مباشر كل دقيقة
 `;
 
   bot.sendMessage(chatId, message);
 }
 
-// ⏱ كل دقيقة (تقدر تخليها 10 ثواني)
+// ⏱ تحديث
 setInterval(run, 60000);
 
 app.listen(3000);
