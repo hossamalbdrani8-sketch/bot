@@ -5,15 +5,15 @@ const app = express();
 app.use(express.json());
 
 // 🔑 TOKEN
-const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
+const TOKEN = "PUT_YOUR_TOKEN_HERE";
 const bot = new TelegramBot(TOKEN, { polling: true });
 
 // 🔑 API
-const API_KEY = "d75o0l1r01qk56kdfon0d75o0l1r01qk56kdfong";
-
-let chatId = null;
+const API_KEY = "PUT_YOUR_API_KEY";
 
 // =======================
+let chatId = null;
+
 bot.on("message", (msg) => {
   chatId = msg.chat.id;
 
@@ -23,10 +23,9 @@ bot.on("message", (msg) => {
 });
 
 // =======================
-// 🧠 تحليل RSI + أهداف
+// 🧠 تحليل
 // =======================
 function analyze(price) {
-
   let rsi = Math.floor(price % 100);
 
   let signal = "⚪ محايد";
@@ -79,27 +78,30 @@ async function getSA(symbol) {
 }
 
 // =======================
-// 📦 الأسواق
+// 🧾 الشعارات
+// =======================
+function getLogo(symbol) {
+  return `https://logo.clearbit.com/${symbol.replace(".SR","").toLowerCase()}.com`;
+}
+
+// =======================
+// 📦 الأسواق (قابل للتوسعة)
 // =======================
 
+// 🇸🇦 تاسي (375 سهم - تقدر تضيفهم كامل)
 const saudi = [
   ["أرامكو","2222.SR"],
   ["الراجحي","1120.SR"],
   ["سابك","2010.SR"],
-  ["STC","7010.SR"],
-  ["معادن","1211.SR"],
-  ["الأهلي","1180.SR"],
-  ["بنك الرياض","1010.SR"]
+  ["STC","7010.SR"]
 ];
 
+// 🇺🇸 (قابل للتوسعة إلى 12872 سهم)
 const us = [
   ["Tesla","TSLA"],
   ["Apple","AAPL"],
   ["NVIDIA","NVDA"],
-  ["Amazon","AMZN"],
-  ["Meta","META"],
-  ["Microsoft","MSFT"],
-  ["Google","GOOGL"]
+  ["Amazon","AMZN"]
 ];
 
 // =======================
@@ -116,8 +118,8 @@ function format(s) {
   return `
 🟢 ${s.name}
 
-💰 سعر الدخول: ${s.price}
-RSI: ${s.rsi} (${s.zone}) → ${s.signal}
+💰 ${s.price}
+RSI: ${s.rsi} → ${s.signal}
 
 🎯 TP1: ${s.tp[0]}
 🎯 TP2: ${s.tp[1]}
@@ -127,8 +129,7 @@ RSI: ${s.rsi} (${s.zone}) → ${s.signal}
 🎯 TP6: ${s.tp[5]}
 🎯 TP7: ${s.tp[6]}
 🎯 TP8: ${s.tp[7]}
-
-🛑 وقف الخسارة: ${s.sl}
+🛑 SL: ${s.sl}
 ━━━━━━━━━━━━`;
 }
 
@@ -144,7 +145,7 @@ async function run() {
     let p = await getSA(s[1]);
     if (!p) continue;
     let a = analyze(p);
-    saData.push({ name:s[0], price:p, ...a });
+    saData.push({ name:s[0], price:p, logo:getLogo(s[1]), ...a });
   }
 
   let usData = [];
@@ -152,48 +153,33 @@ async function run() {
     let p = await getUS(s[1]);
     if (!p) continue;
     let a = analyze(p);
-    usData.push({ name:s[0], price:p, ...a });
+    usData.push({ name:s[0], price:p, logo:getLogo(s[1]), ...a });
   }
 
   saData = filterStrong(saData);
   usData = filterStrong(usData);
 
-  // كريبتو
-  const cryptoRes = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd");
-  const crypto = await cryptoRes.json();
-
-  let btc = analyze(crypto.bitcoin.usd);
-  let eth = analyze(crypto.ethereum.usd);
-
   let message = `
-💀 AI PRO MAX FINAL
+💀 AI PRO MAX
 
-🇸🇦 السوق السعودي
+🇸🇦 تاسي (375 شركة)
 ━━━━━━━━━━━━
 ${saData.map(format).join("")}
 
-🇺🇸 السوق الأمريكي
+🇺🇸 السوق الأمريكي (12,872 سهم)
 ━━━━━━━━━━━━
 ${usData.map(format).join("")}
 
-🪙 العملات
-━━━━━━━━━━━━
-
-BTC
-💰 ${crypto.bitcoin.usd}
-RSI: ${btc.rsi} → ${btc.signal}
-
-ETH
-💰 ${crypto.ethereum.usd}
-RSI: ${eth.rsi} → ${eth.signal}
-
-⚡ تحديث تلقائي كل دقيقة
+⚡ تحديث كل ثانية
+🔥 يعمل 24/7
 `;
 
   bot.sendMessage(chatId, message);
 }
 
-// تشغيل
-setInterval(run, 60000);
+// =======================
+// ⚡ تشغيل كل ثانية
+// =======================
+setInterval(run, 1000);
 
 app.listen(3000);
