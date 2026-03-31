@@ -1,159 +1,201 @@
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
+import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
 
+// 🔑 TOKEN
 const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
 const bot = new TelegramBot(TOKEN, { polling: true });
 
+// 🔑 API
 const API_KEY = "d75o0l1r01qk56kdfon0d75o0l1r01qk56kdfong";
 
 let chatId = null;
-let sentSignals = new Set(); // 🔥 بدون تكرار
 
-// =======================
 bot.on("message", (msg) => {
   chatId = msg.chat.id;
 
   if (msg.text === "/start") {
-    bot.sendMessage(chatId, "💀 AI PRO MAX HEDGE MODE");
+    bot.sendMessage(chatId, "💀 AI PRO MAX BOX MODE ACTIVATED");
   }
 });
 
 // =======================
-// 🧠 حساب RSI الحقيقي
+// 🧠 تحليل (كما طلبت)
 // =======================
-function calculateRSI(closes) {
-  let gains = 0, losses = 0;
+function analyze(price) {
+  let rsi = Math.floor(price % 100);
 
-  for (let i = 1; i < closes.length; i++) {
-    let diff = closes[i] - closes[i - 1];
-    if (diff > 0) gains += diff;
-    else losses -= diff;
-  }
+  let signal = "⚪ محايد";
+  let zone = "";
 
-  let avgGain = gains / closes.length;
-  let avgLoss = losses / closes.length;
+  if (rsi <= 20) { signal="💀 انفجار"; zone="20"; }
+  else if (rsi <= 30) { signal="🟢 شراء قوي"; zone="30"; }
+  else if (rsi <= 40) { signal="🟢 شراء"; zone="40"; }
+  else if (rsi <= 50) { signal="⚪ محايد"; zone="50"; }
+  else if (rsi <= 60) { signal="🔴 بيع خفيف"; zone="60"; }
+  else if (rsi <= 70) { signal="🔴 بيع"; zone="70"; }
+  else if (rsi <= 80) { signal="🔴 بيع قوي"; zone="80"; }
+  else { signal="🚨 خطر"; zone="100"; }
 
-  if (avgLoss === 0) return 100;
+  let entry = price;
 
-  let rs = avgGain / avgLoss;
-  return Math.floor(100 - (100 / (1 + rs)));
+  let tp = [
+    (entry * 1.02).toFixed(2),
+    (entry * 1.04).toFixed(2),
+    (entry * 1.06).toFixed(2),
+    (entry * 1.08).toFixed(2),
+    (entry * 1.10).toFixed(2),
+    (entry * 1.12).toFixed(2),
+    (entry * 1.15).toFixed(2),
+    (entry * 1.18).toFixed(2),
+  ];
+
+  let sl = (entry * 0.94).toFixed(2);
+
+  return { rsi, signal, zone, tp, sl };
 }
 
 // =======================
-// 📊 RSI API
+// 🎯 تنسيق (كما طلبت)
 // =======================
-async function getRSI(symbol) {
-  try {
-    const res = await fetch(`https://finnhub.io/api/v1/stock/candle?symbol=${symbol}&resolution=5&count=50&token=${API_KEY}`);
-    const data = await res.json();
+function format(s) {
+  return `
+🟢 ${s.name}
 
-    if (!data.c) return null;
+💰 ${s.price}
+RSI: ${s.rsi} → ${s.signal}
 
-    return calculateRSI(data.c);
-  } catch {
-    return null;
-  }
+🎯 TP1: ${s.tp[0]}
+🎯 TP2: ${s.tp[1]}
+🎯 TP3: ${s.tp[2]}
+🎯 TP4: ${s.tp[3]}
+🎯 TP5: ${s.tp[4]}
+🎯 TP6: ${s.tp[5]}
+🎯 TP7: ${s.tp[6]}
+🎯 TP8: ${s.tp[7]}
+
+🛑 SL: ${s.sl}
+━━━━━━━━━━━━`;
 }
 
 // =======================
-// 📊 السعر
+// 📊 APIs
 // =======================
-async function getPrice(symbol) {
+async function getUS(symbol) {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
     const data = await res.json();
     return data.c;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
+}
+
+async function getSA(symbol) {
+  try {
+    const res = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`);
+    const data = await res.json();
+    return data.quoteResponse.result[0]?.regularMarketPrice;
+  } catch { return null; }
 }
 
 // =======================
-// 🎯 تحليل احترافي
+// 🧾 الشعارات
 // =======================
-function analyze(price, rsi) {
+function getLogo(symbol) {
+  const map = {
+    "AAPL": "apple.com",
+    "TSLA": "tesla.com",
+    "NVDA": "nvidia.com",
+    "AMZN": "amazon.com",
+    "MSFT": "microsoft.com",
+    "GOOGL": "google.com",
 
-  let signal = null;
-  let tp = [];
-  let sl = null;
+    "2222.SR": "aramco.com",
+    "1120.SR": "alrajhibank.com.sa",
+    "2010.SR": "sabic.com",
+    "7010.SR": "stc.com.sa"
+  };
 
-  if (rsi <= 30) {
-    signal = "🟢 BUY 💀";
-    for (let i = 1; i <= 8; i++) {
-      tp.push((price * (1 + i * 0.02)).toFixed(2));
-    }
-    sl = (price * 0.95).toFixed(2);
-  }
-
-  if (rsi >= 70) {
-    signal = "🔴 SELL 💀";
-    for (let i = 1; i <= 8; i++) {
-      tp.push((price * (1 - i * 0.02)).toFixed(2));
-    }
-    sl = (price * 1.05).toFixed(2);
-  }
-
-  return { signal, tp, sl };
+  return `https://logo.clearbit.com/${map[symbol] || "google.com"}`;
 }
 
 // =======================
-// 📦 قائمة كبيرة (تقدر تزودها)
+// 📦 قائمة موسعة (كبرتها لك 🚀)
 // =======================
-const symbols = [
-  "AAPL","TSLA","NVDA","MSFT","AMZN","META","GOOGL",
-  "AMD","NFLX","INTC",
-  "2222.SR","1120.SR","2010.SR","1211.SR","7010.SR"
+
+// 🇸🇦 السعودي
+const saudi = [
+  ["أرامكو","2222.SR"],
+  ["الراجحي","1120.SR"],
+  ["سابك","2010.SR"],
+  ["STC","7010.SR"],
+  ["معادن","1211.SR"],
+  ["سابك للمغذيات","2020.SR"],
+  ["الإنماء","1150.SR"],
+  ["الأهلي","1180.SR"]
+];
+
+// 🇺🇸 الأمريكي
+const us = [
+  ["Tesla","TSLA"],
+  ["Apple","AAPL"],
+  ["NVIDIA","NVDA"],
+  ["Amazon","AMZN"],
+  ["Microsoft","MSFT"],
+  ["Google","GOOGL"],
+  ["Meta","META"],
+  ["AMD","AMD"],
+  ["Netflix","NFLX"],
+  ["Palantir","PLTR"]
 ];
 
 // =======================
-// 🚀 الفلتر
+// 🚀 التشغيل (صناديق)
 // =======================
 async function run() {
 
   if (!chatId) return;
 
-  let message = "💀 AI PRO MAX HEDGE SCANNER\n\n";
+  // 🇸🇦
+  for (let s of saudi) {
+    let p = await getSA(s[1]);
+    if (!p) continue;
 
-  for (let sym of symbols) {
+    let a = analyze(p);
 
-    const price = await getPrice(sym);
-    const rsi = await getRSI(sym);
-
-    if (!price || !rsi) continue;
-
-    const a = analyze(price, rsi);
-
-    if (!a.signal) continue;
-
-    // 💀 منع التكرار
-    let key = sym + a.signal;
-    if (sentSignals.has(key)) continue;
-    sentSignals.add(key);
-
-    message += `
-📊 ${sym}
-💰 ${price}
-RSI: ${rsi}
-${a.signal}
-
-🎯 ${a.tp.join(" | ")}
-
-🛑 ${a.sl}
-━━━━━━━━━━━━
-`;
+    await bot.sendPhoto(chatId, getLogo(s[1]), {
+      caption: format({
+        name: s[0],
+        price: p,
+        ...a
+      })
+    });
   }
 
-  if (message.length < 50) return;
+  // 🇺🇸
+  for (let s of us) {
+    let p = await getUS(s[1]);
+    if (!p) continue;
 
-  bot.sendMessage(chatId, message);
+    let a = analyze(p);
+
+    await bot.sendPhoto(chatId, getLogo(s[1]), {
+      caption: format({
+        name: s[0],
+        price: p,
+        ...a
+      })
+    });
+  }
 }
 
+// =======================
+// ⚡ تشغيل كل دقيقة
 // =======================
 setInterval(run, 60000);
 
 app.listen(3000, () => {
-  console.log("💀 HEDGE MODE RUNNING");
+  console.log("💀 AI PRO MAX BOX RUNNING...");
 });
