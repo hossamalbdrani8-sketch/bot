@@ -4,179 +4,156 @@ import TelegramBot from "node-telegram-bot-api";
 const app = express();
 app.use(express.json());
 
-// 🔑 TOKEN
 const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
 const bot = new TelegramBot(TOKEN, { polling: true });
 
-// 🔑 API
 const API_KEY = "d75o0l1r01qk56kdfon0d75o0l1r01qk56kdfong";
 
-// =======================
 let chatId = null;
+let sentSignals = new Set(); // 🔥 بدون تكرار
 
+// =======================
 bot.on("message", (msg) => {
   chatId = msg.chat.id;
 
   if (msg.text === "/start") {
-    bot.sendMessage(chatId, "💀 AI PRO MAX FINAL READY");
+    bot.sendMessage(chatId, "💀 AI PRO MAX HEDGE MODE");
   }
 });
 
 // =======================
-// 🧠 تحليل (كما طلبت)
+// 🧠 حساب RSI الحقيقي
 // =======================
-function analyze(price) {
-  let rsi = Math.floor(price % 100);
+function calculateRSI(closes) {
+  let gains = 0, losses = 0;
 
-  let signal = "⚪ محايد";
-  let zone = "";
+  for (let i = 1; i < closes.length; i++) {
+    let diff = closes[i] - closes[i - 1];
+    if (diff > 0) gains += diff;
+    else losses -= diff;
+  }
 
-  if (rsi <= 20) { signal="💀 انفجار"; zone="20"; }
-  else if (rsi <= 30) { signal="🟢 شراء قوي"; zone="30"; }
-  else if (rsi <= 40) { signal="🟢 شراء"; zone="40"; }
-  else if (rsi <= 50) { signal="⚪ محايد"; zone="50"; }
-  else if (rsi <= 60) { signal="🔴 بيع خفيف"; zone="60"; }
-  else if (rsi <= 70) { signal="🔴 بيع"; zone="70"; }
-  else if (rsi <= 80) { signal="🔴 بيع قوي"; zone="80"; }
-  else { signal="🚨 خطر"; zone="100"; }
+  let avgGain = gains / closes.length;
+  let avgLoss = losses / closes.length;
 
-  // 🎯 أهداف + وقف
-  let tp = [
-    (price * 1.02).toFixed(2),
-    (price * 1.04).toFixed(2),
-    (price * 1.06).toFixed(2),
-    (price * 1.08).toFixed(2),
-    (price * 1.10).toFixed(2),
-    (price * 1.12).toFixed(2),
-    (price * 1.15).toFixed(2),
-    (price * 1.18).toFixed(2),
-  ];
+  if (avgLoss === 0) return 100;
 
-  let sl = (price * 0.94).toFixed(2);
-
-  return { rsi, signal, zone, tp, sl };
+  let rs = avgGain / avgLoss;
+  return Math.floor(100 - (100 / (1 + rs)));
 }
 
 // =======================
-// 📊 APIs
+// 📊 RSI API
 // =======================
-async function getUS(symbol) {
+async function getRSI(symbol) {
+  try {
+    const res = await fetch(`https://finnhub.io/api/v1/stock/candle?symbol=${symbol}&resolution=5&count=50&token=${API_KEY}`);
+    const data = await res.json();
+
+    if (!data.c) return null;
+
+    return calculateRSI(data.c);
+  } catch {
+    return null;
+  }
+}
+
+// =======================
+// 📊 السعر
+// =======================
+async function getPrice(symbol) {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
     const data = await res.json();
     return data.c;
-  } catch { return null; }
-}
-
-async function getSA(symbol) {
-  try {
-    const res = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`);
-    const data = await res.json();
-    return data.quoteResponse.result[0]?.regularMarketPrice;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
 // =======================
-// 📦 الأسواق
+// 🎯 تحليل احترافي
 // =======================
-const saudi = [
-  ["أرامكو","2222.SR"],
-  ["الراجحي","1120.SR"],
-  ["سابك","2010.SR"],
-  ["STC","7010.SR"]
+function analyze(price, rsi) {
+
+  let signal = null;
+  let tp = [];
+  let sl = null;
+
+  if (rsi <= 30) {
+    signal = "🟢 BUY 💀";
+    for (let i = 1; i <= 8; i++) {
+      tp.push((price * (1 + i * 0.02)).toFixed(2));
+    }
+    sl = (price * 0.95).toFixed(2);
+  }
+
+  if (rsi >= 70) {
+    signal = "🔴 SELL 💀";
+    for (let i = 1; i <= 8; i++) {
+      tp.push((price * (1 - i * 0.02)).toFixed(2));
+    }
+    sl = (price * 1.05).toFixed(2);
+  }
+
+  return { signal, tp, sl };
+}
+
+// =======================
+// 📦 قائمة كبيرة (تقدر تزودها)
+// =======================
+const symbols = [
+  "AAPL","TSLA","NVDA","MSFT","AMZN","META","GOOGL",
+  "AMD","NFLX","INTC",
+  "2222.SR","1120.SR","2010.SR","1211.SR","7010.SR"
 ];
 
-const us = [
-  ["Tesla","TSLA"],
-  ["Apple","AAPL"],
-  ["NVIDIA","NVDA"],
-  ["Amazon","AMZN"]
-];
-
 // =======================
-// 🎯 فلتر (كما طلبت)
-// =======================
-function filterStrong(data) {
-  return data.filter(s => s.rsi <= 30 || s.rsi >= 70);
-}
-
-// =======================
-// 🎯 تنسيق (كما طلبت)
-// =======================
-function format(s) {
-  return `
-🟢 ${s.name}
-
-💰 ${s.price}
-RSI: ${s.rsi} → ${s.signal}
-
-🎯 TP1: ${s.tp[0]}
-🎯 TP2: ${s.tp[1]}
-🎯 TP3: ${s.tp[2]}
-🎯 TP4: ${s.tp[3]}
-🎯 TP5: ${s.tp[4]}
-🎯 TP6: ${s.tp[5]}
-🎯 TP7: ${s.tp[6]}
-🎯 TP8: ${s.tp[7]}
-
-🛑 SL: ${s.sl}
-━━━━━━━━━━━━`;
-}
-
-// =======================
-// 🚀 التشغيل
+// 🚀 الفلتر
 // =======================
 async function run() {
 
   if (!chatId) return;
 
-  let saData = [];
-  for (let s of saudi) {
-    let p = await getSA(s[1]);
-    if (!p) continue;
+  let message = "💀 AI PRO MAX HEDGE SCANNER\n\n";
 
-    let a = analyze(p);
-    saData.push({ name:s[0], price:p, ...a });
-  }
+  for (let sym of symbols) {
 
-  let usData = [];
-  for (let s of us) {
-    let p = await getUS(s[1]);
-    if (!p) continue;
+    const price = await getPrice(sym);
+    const rsi = await getRSI(sym);
 
-    let a = analyze(p);
-    usData.push({ name:s[0], price:p, ...a });
-  }
+    if (!price || !rsi) continue;
 
-  // ✅ الفلترة رجعناها
-  saData = filterStrong(saData);
-  usData = filterStrong(usData);
+    const a = analyze(price, rsi);
 
-  if (saData.length === 0 && usData.length === 0) return;
+    if (!a.signal) continue;
 
-  let message = `
-💀 AI PRO MAX
+    // 💀 منع التكرار
+    let key = sym + a.signal;
+    if (sentSignals.has(key)) continue;
+    sentSignals.add(key);
 
-🇸🇦 تاسي (375 شركة)
+    message += `
+📊 ${sym}
+💰 ${price}
+RSI: ${rsi}
+${a.signal}
+
+🎯 ${a.tp.join(" | ")}
+
+🛑 ${a.sl}
 ━━━━━━━━━━━━
-${saData.map(format).join("")}
-
-🇺🇸 السوق الأمريكي (12,872 سهم)
-━━━━━━━━━━━━
-${usData.map(format).join("")}
-
-⚡ تحديث كل دقيقة
 `;
+  }
+
+  if (message.length < 50) return;
 
   bot.sendMessage(chatId, message);
 }
 
 // =======================
-// ⚡ تشغيل
-// =======================
 setInterval(run, 60000);
 
-// =======================
 app.listen(3000, () => {
-  console.log("🔥 BOT RUNNING...");
+  console.log("💀 HEDGE MODE RUNNING");
 });
