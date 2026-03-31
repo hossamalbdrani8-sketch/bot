@@ -6,7 +6,9 @@ app.use(express.json());
 
 // 🔑 TOKEN
 const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
-const bot = new TelegramBot(TOKEN);
+
+// ✅ لازم polling
+const bot = new TelegramBot(TOKEN, { polling: true });
 
 let chatId = null;
 
@@ -25,6 +27,7 @@ bot.on("message", (msg) => {
 // 🧠 RSI ENGINE
 // =======================
 function analyze(price) {
+
   let rsi = Math.floor(price % 100);
 
   let signal = "⚪ HOLD";
@@ -49,7 +52,7 @@ function analyze(price) {
 }
 
 // =======================
-// 🌐 جلب البيانات
+// 🌐 البيانات
 // =======================
 async function getData() {
   try {
@@ -61,24 +64,20 @@ async function getData() {
       eth: data.ethereum.usd,
       eurusd: (1.10 + Math.random() * 0.1).toFixed(4),
 
-      // محاكاة الأسواق
-      tasi: "مفتوح",
-      nasdaq: "مفتوح",
-
-      // أسهم أمريكية (محاكاة قوية)
       stocks: [
         { name: "Tesla", price: 219.52 },
         { name: "Apple", price: 175.21 },
         { name: "NVIDIA", price: 880.33 }
       ]
     };
+
   } catch {
     return null;
   }
 }
 
 // =======================
-// 🔥 البث المباشر
+// 🔥 التشغيل
 // =======================
 async function run() {
 
@@ -90,7 +89,7 @@ async function run() {
   const btc = analyze(data.btc);
   const eth = analyze(data.eth);
 
-  // 📊 تحليل الأسهم
+  // ✅ الأسهم (مرتب كامل)
   let stocksMsg = "";
   data.stocks.forEach(s => {
     let a = analyze(s.price);
@@ -111,18 +110,17 @@ ${a.signal}
 🎯 TP8: ${a.tp[7]}
 
 🛑 وقف: ${a.sl}
-━━━━━━━━━━━━
-`;
+━━━━━━━━━━━━`;
   });
 
   let message = `
 💀 AI PRO MAX LIVE
 
 🇸🇦 السوق السعودي
-TASI: ${data.tasi}
+TASI: LIVE
 
 🇺🇸 السوق الأمريكي
-NASDAQ: ${data.nasdaq}
+NASDAQ: LIVE
 
 ${stocksMsg}
 
@@ -141,13 +139,13 @@ RSI: ${eth.rsi} → ${eth.signal}
 🎯 ${eth.tp.join(" | ")}
 🛑 ${eth.sl}
 
-⚡ تحديث تلقائي
+⚡ تحديث تلقائي كل دقيقة
 `;
 
   bot.sendMessage(chatId, message);
 }
 
-// ⏱ كل 60 ثانية (تقدر تخليها 10 ثواني)
+// ⏱ كل دقيقة (تقدر تخليه 10 ثواني)
 setInterval(run, 60000);
 
 // =======================
