@@ -17,7 +17,8 @@ bot.on("message", (msg) => {
   chatId = msg.chat.id;
 
   if (msg.text === "/start") {
-    bot.sendMessage(chatId, "💀 AI PRO MAX STABLE RUNNING");
+    bot.sendMessage(chatId, "💀 AI PRO MAX SMART MONEY ACTIVATED");
+    run(); // تشغيل مباشر
   }
 });
 
@@ -82,16 +83,14 @@ RSI: ${s.rsi} → ${s.signal}
 }
 
 // =======================
-// 📊 APIs (بدون node-fetch)
+// 📊 APIs
 // =======================
 async function getUS(symbol) {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
     const data = await res.json();
     return data?.c || null;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 async function getSA(symbol) {
@@ -99,9 +98,7 @@ async function getSA(symbol) {
     const res = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`);
     const data = await res.json();
     return data?.quoteResponse?.result?.[0]?.regularMarketPrice || null;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 // =======================
@@ -114,6 +111,8 @@ function getLogo(symbol) {
     "NVDA": "nvidia.com",
     "AMZN": "amazon.com",
     "MSFT": "microsoft.com",
+    "GOOGL": "google.com",
+    "META": "meta.com",
 
     "2222.SR": "aramco.com",
     "1120.SR": "alrajhibank.com.sa",
@@ -125,24 +124,32 @@ function getLogo(symbol) {
 }
 
 // =======================
-// 📦 الأسواق
+// 📦 قوائم كبيرة
 // =======================
+
 const saudi = [
-  ["أرامكو","2222.SR"],
-  ["الراجحي","1120.SR"],
-  ["سابك","2010.SR"],
-  ["STC","7010.SR"]
+  ["أرامكو","2222.SR"],["الراجحي","1120.SR"],["سابك","2010.SR"],
+  ["STC","7010.SR"],["معادن","1211.SR"],["الإنماء","1150.SR"],
+  ["الأهلي","1180.SR"],["سافكو","2020.SR"],["بنك الرياض","1010.SR"],
+  ["المراعي","2280.SR"]
 ];
 
 const us = [
-  ["Tesla","TSLA"],
-  ["Apple","AAPL"],
-  ["NVIDIA","NVDA"],
-  ["Amazon","AMZN"]
+  ["Tesla","TSLA"],["Apple","AAPL"],["NVIDIA","NVDA"],
+  ["Amazon","AMZN"],["Microsoft","MSFT"],["Google","GOOGL"],
+  ["Meta","META"],["AMD","AMD"],["Netflix","NFLX"],
+  ["Palantir","PLTR"],["Intel","INTC"],["Uber","UBER"]
 ];
 
 // =======================
-// 🚀 التشغيل (مستقر)
+// 💀 فلترة الصناديق
+// =======================
+function filterPro(data) {
+  return data.filter(s => s.rsi <= 30 || s.rsi >= 70);
+}
+
+// =======================
+// 🚀 التشغيل
 // =======================
 let running = false;
 
@@ -152,16 +159,14 @@ async function run() {
 
   try {
 
+    let all = [];
+
     for (let s of saudi) {
       let price = await getSA(s[1]);
       let a = analyze(price);
       if (!a) continue;
 
-      await bot.sendPhoto(chatId, getLogo(s[1]), {
-        caption: format({ name:s[0], price, ...a })
-      });
-
-      await new Promise(r => setTimeout(r, 1500));
+      all.push({ name:s[0], symbol:s[1], price, ...a });
     }
 
     for (let s of us) {
@@ -169,11 +174,17 @@ async function run() {
       let a = analyze(price);
       if (!a) continue;
 
-      await bot.sendPhoto(chatId, getLogo(s[1]), {
-        caption: format({ name:s[0], price, ...a })
+      all.push({ name:s[0], symbol:s[1], price, ...a });
+    }
+
+    let strong = filterPro(all).slice(0, 10);
+
+    for (let s of strong) {
+      await bot.sendPhoto(chatId, getLogo(s.symbol), {
+        caption: format(s)
       });
 
-      await new Promise(r => setTimeout(r, 1500));
+      await new Promise(r => setTimeout(r, 1200));
     }
 
   } catch (e) {
@@ -184,7 +195,7 @@ async function run() {
 }
 
 // =======================
-// ⏱️ كل دقيقة (مستقر)
+// ⏱️ كل دقيقة
 // =======================
 setInterval(run, 60000);
 
