@@ -4,8 +4,8 @@ import TelegramBot from "node-telegram-bot-api";
 const app = express();
 app.use(express.json());
 
-// 🔑 التوكن
-const TOKEN = "PUT_YOUR_TOKEN_HERE";
+// 🔑 TOKEN
+const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
 const bot = new TelegramBot(TOKEN);
 
 // 🧠 تخزين chatId
