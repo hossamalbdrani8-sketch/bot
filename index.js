@@ -28,7 +28,7 @@ bot.on("message", (msg) => {
 });
 
 // =======================
-// 🧠 تحليل
+// 🧠 تحليل (كما طلبت)
 // =======================
 function analyze(price) {
   if (!price || isNaN(price)) return null;
@@ -65,7 +65,7 @@ function analyze(price) {
 }
 
 // =======================
-// 🎯 تنسيق
+// 🎯 تنسيق (كما طلبت)
 // =======================
 function format(s) {
   return `
@@ -129,10 +129,8 @@ function getLogo(symbol) {
 }
 
 // =======================
-// 📦 قوائم كبيرة
+// 📦 قوائم
 // =======================
-
-// 🇸🇦 السوق السعودي
 const saudi = [
   ["أرامكو","2222.SR"],["الراجحي","1120.SR"],["سابك","2010.SR"],
   ["STC","7010.SR"],["معادن","1211.SR"],["الإنماء","1150.SR"],
@@ -140,7 +138,6 @@ const saudi = [
   ["المراعي","2280.SR"],["جرير","4190.SR"],["صافولا","2050.SR"]
 ];
 
-// 🇺🇸 السوق الأمريكي
 const us = [
   ["Tesla","TSLA"],["Apple","AAPL"],["NVIDIA","NVDA"],
   ["Amazon","AMZN"],["Microsoft","MSFT"],["Google","GOOGL"],
@@ -150,10 +147,10 @@ const us = [
 ];
 
 // =======================
-// 💀 فلترة
+// 💀 فلتر مفتوح بالكامل
 // =======================
 function filterPro(data) {
-  return data.filter(s => s.rsi <= 30 || s.rsi >= 70);
+  return data; // عرض الكل 💀
 }
 
 // =======================
@@ -169,7 +166,7 @@ async function run() {
 
     let all = [];
 
-    // سعودي
+    // 🇸🇦 سعودي
     for (let s of saudi) {
       let price = await getSA(s[1]);
       if (!price) continue;
@@ -180,7 +177,7 @@ async function run() {
       all.push({ name:s[0], symbol:s[1], price, ...a });
     }
 
-    // أمريكي
+    // 🇺🇸 أمريكي
     for (let s of us) {
       let price = await getUS(s[1]);
       if (!price) continue;
@@ -191,28 +188,15 @@ async function run() {
       all.push({ name:s[0], symbol:s[1], price, ...a });
     }
 
-    // 🔥 أقوى الفرص
-    let strong = filterPro(all).slice(0, 10);
+    // 💀 السوق كامل بدون فلترة وبدون قص
+    let fullMarket = filterPro(all);
 
-    // 📊 السوق العام
-    let normal = all.slice(0, 10);
-
-    // إرسال الأقوى
-    for (let s of strong) {
+    for (let s of fullMarket) {
       await bot.sendPhoto(chatId, getLogo(s.symbol), {
-        caption: "💀 أقوى الفرص\n" + format(s)
+        caption: "💀 السوق كامل\n" + format(s)
       });
 
-      await new Promise(r => setTimeout(r, 1200));
-    }
-
-    // إرسال السوق
-    for (let s of normal) {
-      await bot.sendPhoto(chatId, getLogo(s.symbol), {
-        caption: "📊 السوق\n" + format(s)
-      });
-
-      await new Promise(r => setTimeout(r, 1200));
+      await new Promise(r => setTimeout(r, 800));
     }
 
   } catch (e) {
