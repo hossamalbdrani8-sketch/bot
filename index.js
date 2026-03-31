@@ -7,6 +7,9 @@ const app = express();
 const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
 const bot = new TelegramBot(TOKEN, { polling: true });
 
+// 🔑 API المدفوع (حطه هنا)
+const API_KEY = "PUT_YOUR_API_KEY_HERE";
+
 let chatId = null;
 
 // =======================
@@ -16,7 +19,7 @@ bot.on("message", (msg) => {
   chatId = msg.chat.id;
 
   if (msg.text?.includes("/start")) {
-    bot.sendMessage(chatId, "💀 AI PRO MAX FULL MARKET ACTIVE");
+    bot.sendMessage(chatId, "💀 AI PRO MAX ELITE ACTIVE");
   }
 
   if (msg.text?.includes("/scan")) {
@@ -25,53 +28,28 @@ bot.on("message", (msg) => {
 });
 
 // =======================
-// 📊 جلب السوق كامل
+// 📊 جلب السوق (API)
 // =======================
 
-// 🇸🇦 السوق السعودي
-async function getSaudi() {
-  const res = await fetch("https://www.tadawulgroup.sa/wps/portal/tadawul/market-participants/issuers-list?locale=en");
+// 🇸🇦
+async function getSaudiMarket() {
+  const res = await fetch(`https://YOUR_API/saudi?apikey=${API_KEY}`);
   const data = await res.json();
-
-  return data.issuers.map(x => ({
-    symbol: x.symbol + ".SR",
-    name: x.nameEn
-  }));
+  return data; // [{symbol,name,price,state}]
 }
 
-// 🇺🇸 السوق الأمريكي
-async function getUS() {
-  const res = await fetch("https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=4000");
+// 🇺🇸
+async function getUSMarket() {
+  const res = await fetch(`https://YOUR_API/us?apikey=${API_KEY}`);
   const data = await res.json();
-
-  return data.data.rows.map(x => ({
-    symbol: x.symbol,
-    name: x.name
-  }));
+  return data;
 }
 
-// 🪙 العملات
-async function getCrypto() {
-  const res = await fetch("https://api.binance.com/api/v3/ticker/price");
+// 🪙
+async function getCryptoMarket() {
+  const res = await fetch(`https://YOUR_API/crypto?apikey=${API_KEY}`);
   const data = await res.json();
-
-  return data.map(x => ({
-    symbol: x.symbol,
-    name: x.symbol
-  }));
-}
-
-// =======================
-// 💰 السعر الحقيقي
-// =======================
-async function getPrice(symbol) {
-  try {
-    const res = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`);
-    const data = await res.json();
-    return data.quoteResponse.result[0]?.regularMarketPrice;
-  } catch {
-    return null;
-  }
+  return data;
 }
 
 // =======================
@@ -79,7 +57,7 @@ async function getPrice(symbol) {
 // =======================
 let history = {};
 
-function rsiCalc(symbol, price) {
+function calcRSI(symbol, price) {
 
   if (!history[symbol]) history[symbol] = [];
   history[symbol].push(price);
@@ -100,7 +78,7 @@ function rsiCalc(symbol, price) {
 }
 
 // =======================
-// 💀 تحليل + انفجار
+// 💀 تحليل AI
 // =======================
 function analyze(rsi) {
 
@@ -131,32 +109,33 @@ function send(msg) {
 }
 
 // =======================
-// 🔥 فلترة قوية (AI)
+// 🧠 فلترة قوية
 // =======================
-function strongSignal(rsi) {
+function strong(rsi) {
   return rsi < 35 || rsi > 70;
 }
 
 // =======================
-// 🔥 تحليل سهم
+// 🔥 تحليل أصل
 // =======================
-async function process(asset, marketFlag) {
+function process(asset, flag) {
 
-  const price = await getPrice(asset.symbol);
-  if (!price) return;
+  const price = asset.price;
+  const rsi = calcRSI(asset.symbol, price);
 
-  const rsi = rsiCalc(asset.symbol, price);
-
-  if (!strongSignal(rsi)) return; // 💀 فلترة
+  if (!strong(rsi)) return;
 
   const signal = analyze(rsi);
 
-  let msg = `${marketFlag} ${asset.name}
+  let session = asset.state || "MARKET";
 
-💰 ${price.toFixed(2)}
+  let msg = `${flag} ${asset.name}
+
+💰 ${price}
 RSI: ${rsi.toFixed(1)}
 
 ${signal}
+📊 الحالة: ${session}
 `;
 
   targets(price).forEach((t,i)=>{
@@ -167,37 +146,33 @@ ${signal}
 }
 
 // =======================
-// 🔥 تشغيل السوق
+// 🔥 تشغيل كامل
 // =======================
 async function runAI() {
 
   try {
 
-    console.log("RUNNING AI...");
+    console.log("AI RUNNING...");
 
-    for (let s of saudi) {
-      await process(s, "🇸🇦");
-    }
+    const saudi = await getSaudiMarket();
+    const us = await getUSMarket();
+    const crypto = await getCryptoMarket();
 
-    for (let s of us) {
-      await process(s, "🇺🇸");
-    }
-
-    for (let c of crypto) {
-      await process(c, "🪙");
-    }
+    saudi.forEach(s => process(s, "🇸🇦"));
+    us.forEach(s => process(s, "🇺🇸"));
+    crypto.forEach(s => process(s, "🪙"));
 
   } catch (e) {
-    console.log("AI ERROR:", e.message);
+    console.log("ERROR:", e.message);
   }
 }
 
-// ⏱️ كل 5 دقائق (أفضل)
-setInterval(runAI, 300000);
+// ⏱️ كل دقيقتين
+setInterval(runAI, 120000);
 
 // =======================
 app.get("/", (req, res) => {
-  res.send("💀 AI PRO MAX FULL MARKET RUNNING");
+  res.send("💀 AI PRO MAX ELITE RUNNING");
 });
 
 app.listen(3000);
