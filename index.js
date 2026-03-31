@@ -167,22 +167,28 @@ ${signal}
 }
 
 // =======================
-// 🔥 تشغيل السوق كامل
+// 🔥 تشغيل السوق
 // =======================
 async function runAI() {
 
   try {
 
-    const saudi = await getSaudi();
-    const us = await getUS();
-    const crypto = await getCrypto();
+    console.log("RUNNING AI...");
 
-    for (let s of saudi) await process(s, "🇸🇦");
-    for (let s of us) await process(s, "🇺🇸");
-    for (let c of crypto) await process(c, "🪙");
+    for (let s of saudi) {
+      await process(s, "🇸🇦");
+    }
+
+    for (let s of us) {
+      await process(s, "🇺🇸");
+    }
+
+    for (let c of crypto) {
+      await process(c, "🪙");
+    }
 
   } catch (e) {
-    console.log("ERROR:", e.message);
+    console.log("AI ERROR:", e.message);
   }
 }
 
