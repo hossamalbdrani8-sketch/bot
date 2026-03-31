@@ -17,8 +17,13 @@ bot.on("message", (msg) => {
   chatId = msg.chat.id;
 
   if (msg.text === "/start") {
-    bot.sendMessage(chatId, "💀 AI PRO MAX SMART MONEY ACTIVATED");
-    run(); // تشغيل مباشر
+    bot.sendMessage(chatId, "💀 AI PRO MAX FULL MARKET ACTIVATED");
+    run();
+  }
+
+  if (msg.text === "/scan") {
+    bot.sendMessage(chatId, "🚀 جاري فحص السوق كامل...");
+    run();
   }
 });
 
@@ -127,22 +132,25 @@ function getLogo(symbol) {
 // 📦 قوائم كبيرة
 // =======================
 
+// 🇸🇦 السوق السعودي
 const saudi = [
   ["أرامكو","2222.SR"],["الراجحي","1120.SR"],["سابك","2010.SR"],
   ["STC","7010.SR"],["معادن","1211.SR"],["الإنماء","1150.SR"],
   ["الأهلي","1180.SR"],["سافكو","2020.SR"],["بنك الرياض","1010.SR"],
-  ["المراعي","2280.SR"]
+  ["المراعي","2280.SR"],["جرير","4190.SR"],["صافولا","2050.SR"]
 ];
 
+// 🇺🇸 السوق الأمريكي
 const us = [
   ["Tesla","TSLA"],["Apple","AAPL"],["NVIDIA","NVDA"],
   ["Amazon","AMZN"],["Microsoft","MSFT"],["Google","GOOGL"],
   ["Meta","META"],["AMD","AMD"],["Netflix","NFLX"],
-  ["Palantir","PLTR"],["Intel","INTC"],["Uber","UBER"]
+  ["Palantir","PLTR"],["Intel","INTC"],["Uber","UBER"],
+  ["Disney","DIS"],["Nike","NKE"]
 ];
 
 // =======================
-// 💀 فلترة الصناديق
+// 💀 فلترة
 // =======================
 function filterPro(data) {
   return data.filter(s => s.rsi <= 30 || s.rsi >= 70);
@@ -161,27 +169,47 @@ async function run() {
 
     let all = [];
 
+    // سعودي
     for (let s of saudi) {
       let price = await getSA(s[1]);
+      if (!price) continue;
+
       let a = analyze(price);
       if (!a) continue;
 
       all.push({ name:s[0], symbol:s[1], price, ...a });
     }
 
+    // أمريكي
     for (let s of us) {
       let price = await getUS(s[1]);
+      if (!price) continue;
+
       let a = analyze(price);
       if (!a) continue;
 
       all.push({ name:s[0], symbol:s[1], price, ...a });
     }
 
+    // 🔥 أقوى الفرص
     let strong = filterPro(all).slice(0, 10);
 
+    // 📊 السوق العام
+    let normal = all.slice(0, 10);
+
+    // إرسال الأقوى
     for (let s of strong) {
       await bot.sendPhoto(chatId, getLogo(s.symbol), {
-        caption: format(s)
+        caption: "💀 أقوى الفرص\n" + format(s)
+      });
+
+      await new Promise(r => setTimeout(r, 1200));
+    }
+
+    // إرسال السوق
+    for (let s of normal) {
+      await bot.sendPhoto(chatId, getLogo(s.symbol), {
+        caption: "📊 السوق\n" + format(s)
       });
 
       await new Promise(r => setTimeout(r, 1200));
@@ -195,7 +223,7 @@ async function run() {
 }
 
 // =======================
-// ⏱️ كل دقيقة
+// ⏱️ تحديث
 // =======================
 setInterval(run, 60000);
 
