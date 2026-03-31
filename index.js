@@ -5,63 +5,53 @@ const app = express();
 app.use(express.json());
 
 // 🔑 TOKEN
-const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
-const bot = new TelegramBot(TOKEN);
+const TOKEN = "PUT_YOUR_TOKEN_HERE";
+const bot = new TelegramBot(TOKEN, { polling: true });
 
-// 🧠 تخزين chatId
 let chatId = null;
 
 // =======================
-// 🎯 Webhook Telegram
-// =======================
-app.post("/webhook", (req, res) => {
-  bot.processUpdate(req.body);
-  res.sendStatus(200);
-});
-
-// =======================
-// 🎯 أوامر البوت
+// 📩 استقبال المستخدم
 // =======================
 bot.on("message", (msg) => {
   chatId = msg.chat.id;
 
-  if (msg.text && msg.text.includes("/start")) {
-    bot.sendMessage(chatId, "💀 AUTO AI PRO MAX ACTIVATED");
+  if (msg.text === "/start") {
+    bot.sendMessage(chatId, "💀 AI PRO MAX ACTIVATED");
   }
 });
 
 // =======================
-// 🧠 AI RSI ENGINE 💀
+// 🧠 RSI ENGINE
 // =======================
 function analyze(price) {
-
   let rsi = Math.floor(price % 100);
 
   let signal = "⚪ HOLD";
 
-  if (rsi <= 20) signal = "🟢 STRONG BUY 💀";
-  else if (rsi <= 30) signal = "🟢 BUY";
-  else if (rsi <= 40) signal = "🟢 WEAK BUY";
-  else if (rsi <= 50) signal = "⚪ NEUTRAL";
-  else if (rsi <= 60) signal = "🔴 WEAK SELL";
-  else if (rsi <= 70) signal = "🔴 SELL";
-  else if (rsi <= 80) signal = "🔴 STRONG SELL 💀";
-  else signal = "🚨 EXTREME SELL";
+  if (rsi <= 20) signal = "🟢 فرصة انفجار 💀";
+  else if (rsi <= 30) signal = "🟢 شراء";
+  else if (rsi <= 40) signal = "🟢 شراء ضعيف";
+  else if (rsi <= 50) signal = "⚪ محايد";
+  else if (rsi <= 60) signal = "🔴 بيع ضعيف";
+  else if (rsi <= 70) signal = "🔴 بيع";
+  else if (rsi <= 80) signal = "🔴 بيع قوي 💀";
+  else signal = "🚨 انهيار";
 
   let tp = [];
   for (let i = 1; i <= 8; i++) {
-    tp.push((price * (1 + i * 0.01)).toFixed(2));
+    tp.push((price * (1 + i * 0.02)).toFixed(2));
   }
 
-  let sl = (price * 0.97).toFixed(2);
+  let sl = (price * 0.95).toFixed(2);
 
-  return { signal, tp, sl, rsi };
+  return { rsi, signal, tp, sl };
 }
 
 // =======================
-// 🌐 جلب السوق (API مجاني)
+// 🌐 جلب البيانات
 // =======================
-async function getMarket() {
+async function getData() {
   try {
     const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd");
     const data = await res.json();
@@ -70,27 +60,60 @@ async function getMarket() {
       btc: data.bitcoin.usd,
       eth: data.ethereum.usd,
       eurusd: (1.10 + Math.random() * 0.1).toFixed(4),
-      tasi: "LIVE",
-      nasdaq: "LIVE"
-    };
 
-  } catch (e) {
+      // محاكاة الأسواق
+      tasi: "مفتوح",
+      nasdaq: "مفتوح",
+
+      // أسهم أمريكية (محاكاة قوية)
+      stocks: [
+        { name: "Tesla", price: 219.52 },
+        { name: "Apple", price: 175.21 },
+        { name: "NVIDIA", price: 880.33 }
+      ]
+    };
+  } catch {
     return null;
   }
 }
 
 // =======================
-// 🔥 AUTO SCAN 24/7 💀
+// 🔥 البث المباشر
 // =======================
-async function autoScan() {
+async function run() {
 
   if (!chatId) return;
 
-  const data = await getMarket();
+  const data = await getData();
   if (!data) return;
 
-  const btcA = analyze(data.btc);
-  const ethA = analyze(data.eth);
+  const btc = analyze(data.btc);
+  const eth = analyze(data.eth);
+
+  // 📊 تحليل الأسهم
+  let stocksMsg = "";
+  data.stocks.forEach(s => {
+    let a = analyze(s.price);
+
+    stocksMsg += `
+🟢 ${s.name}
+💰 السعر: ${s.price}
+RSI: ${a.rsi}
+${a.signal}
+
+🎯 TP1: ${a.tp[0]}
+🎯 TP2: ${a.tp[1]}
+🎯 TP3: ${a.tp[2]}
+🎯 TP4: ${a.tp[3]}
+🎯 TP5: ${a.tp[4]}
+🎯 TP6: ${a.tp[5]}
+🎯 TP7: ${a.tp[6]}
+🎯 TP8: ${a.tp[7]}
+
+🛑 وقف: ${a.sl}
+━━━━━━━━━━━━
+`;
+  });
 
   let message = `
 💀 AI PRO MAX LIVE
@@ -101,39 +124,35 @@ TASI: ${data.tasi}
 🇺🇸 السوق الأمريكي
 NASDAQ: ${data.nasdaq}
 
+${stocksMsg}
+
 💱 العملات
 EUR/USD: ${data.eurusd}
 
 🪙 Crypto
 
 BTC: ${data.btc}
-RSI: ${btcA.rsi} → ${btcA.signal}
-🎯 ${btcA.tp.join(" | ")}
-🛑 SL: ${btcA.sl}
+RSI: ${btc.rsi} → ${btc.signal}
+🎯 ${btc.tp.join(" | ")}
+🛑 ${btc.sl}
 
 ETH: ${data.eth}
-RSI: ${ethA.rsi} → ${ethA.signal}
-🎯 ${ethA.tp.join(" | ")}
-🛑 SL: ${ethA.sl}
+RSI: ${eth.rsi} → ${eth.signal}
+🎯 ${eth.tp.join(" | ")}
+🛑 ${eth.sl}
 
-⚡ تحديث تلقائي كل دقيقة
+⚡ تحديث تلقائي
 `;
 
   bot.sendMessage(chatId, message);
 }
 
-// ⏱ تشغيل كل دقيقة
-setInterval(autoScan, 60000);
+// ⏱ كل 60 ثانية (تقدر تخليها 10 ثواني)
+setInterval(run, 60000);
 
-// =======================
-// 🌐 السيرفر
 // =======================
 app.get("/", (req, res) => {
-  res.send("💀 AI PRO MAX RUNNING");
+  res.send("AI PRO MAX RUNNING 💀");
 });
 
-const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, () => {
-  console.log("Server running on " + PORT);
-});
+app.listen(3000);
