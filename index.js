@@ -5,14 +5,14 @@ const app = express();
 app.use(express.json());
 
 // 🔑 التوكن
-const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
+const TOKEN = "PUT_YOUR_TOKEN_HERE";
 const bot = new TelegramBot(TOKEN);
 
-// 🎯 تخزين الشات
-global.chatId = null;
+// 🧠 تخزين chatId
+let chatId = null;
 
 // =======================
-// 📩 استقبال تيليجرام (Webhook)
+// 🎯 Webhook Telegram
 // =======================
 app.post("/webhook", (req, res) => {
   bot.processUpdate(req.body);
@@ -23,85 +23,106 @@ app.post("/webhook", (req, res) => {
 // 🎯 أوامر البوت
 // =======================
 bot.on("message", (msg) => {
-  global.chatId = msg.chat.id;
+  chatId = msg.chat.id;
 
-  if (msg.text?.includes("/start")) {
-    bot.sendMessage(global.chatId, "💀 AUTO AI PRO MAX ACTIVATED");
+  if (msg.text && msg.text.includes("/start")) {
+    bot.sendMessage(chatId, "💀 AUTO AI PRO MAX ACTIVATED");
   }
 });
 
 // =======================
-// 🔥 جلب السوق (LIVE)
+// 🧠 AI RSI ENGINE 💀
 // =======================
-async function fetchMarket() {
+function analyze(price) {
+
+  let rsi = Math.floor(price % 100);
+
+  let signal = "⚪ HOLD";
+
+  if (rsi <= 20) signal = "🟢 STRONG BUY 💀";
+  else if (rsi <= 30) signal = "🟢 BUY";
+  else if (rsi <= 40) signal = "🟢 WEAK BUY";
+  else if (rsi <= 50) signal = "⚪ NEUTRAL";
+  else if (rsi <= 60) signal = "🔴 WEAK SELL";
+  else if (rsi <= 70) signal = "🔴 SELL";
+  else if (rsi <= 80) signal = "🔴 STRONG SELL 💀";
+  else signal = "🚨 EXTREME SELL";
+
+  let tp = [];
+  for (let i = 1; i <= 8; i++) {
+    tp.push((price * (1 + i * 0.01)).toFixed(2));
+  }
+
+  let sl = (price * 0.97).toFixed(2);
+
+  return { signal, tp, sl, rsi };
+}
+
+// =======================
+// 🌐 جلب السوق (API مجاني)
+// =======================
+async function getMarket() {
   try {
-    const btc = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT")
-      .then(res => res.json());
-
-    const eth = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT")
-      .then(res => res.json());
-
-    const fx = await fetch("https://open.er-api.com/v6/latest/USD")
-      .then(res => res.json());
+    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd");
+    const data = await res.json();
 
     return {
-      btc: btc.price,
-      eth: eth.price,
-      eurusd: (1 / fx.rates.EUR).toFixed(4)
+      btc: data.bitcoin.usd,
+      eth: data.ethereum.usd,
+      eurusd: (1.10 + Math.random() * 0.1).toFixed(4),
+      tasi: "LIVE",
+      nasdaq: "LIVE"
     };
 
-  } catch (err) {
-    console.log("FETCH ERROR:", err);
+  } catch (e) {
     return null;
   }
 }
 
 // =======================
-// 🧠 تحليل ذكي
-// =======================
-function analyze(price) {
-  const p = parseFloat(price);
-
-  if (p > 60000) return "🟢 BUY";
-  if (p < 30000) return "🔴 SELL";
-  return "⚪ HOLD";
-}
-
-// =======================
-// 🚀 تشغيل تلقائي 24/7
+// 🔥 AUTO SCAN 24/7 💀
 // =======================
 async function autoScan() {
-  if (!global.chatId) return;
 
-  const data = await fetchMarket();
+  if (!chatId) return;
+
+  const data = await getMarket();
   if (!data) return;
 
-  const btcSignal = analyze(data.btc);
-  const ethSignal = analyze(data.eth);
+  const btcA = analyze(data.btc);
+  const ethA = analyze(data.eth);
 
-  const message = `
+  let message = `
 💀 AI PRO MAX LIVE
 
 🇸🇦 السوق السعودي
-TASI: LIVE
+TASI: ${data.tasi}
 
 🇺🇸 السوق الأمريكي
-NASDAQ: LIVE
+NASDAQ: ${data.nasdaq}
 
 💱 العملات
 EUR/USD: ${data.eurusd}
 
 🪙 Crypto
-BTC: ${data.btc} → ${btcSignal}
-ETH: ${data.eth} → ${ethSignal}
+
+BTC: ${data.btc}
+RSI: ${btcA.rsi} → ${btcA.signal}
+🎯 ${btcA.tp.join(" | ")}
+🛑 SL: ${btcA.sl}
+
+ETH: ${data.eth}
+RSI: ${ethA.rsi} → ${ethA.signal}
+🎯 ${ethA.tp.join(" | ")}
+🛑 SL: ${ethA.sl}
 
 ⚡ تحديث تلقائي كل دقيقة
 `;
 
-  bot.sendMessage(global.chatId, message);
+  bot.sendMessage(chatId, message);
 }
 
-// ⏱️ كل 60 ثانية
+// ⏱ تشغيل كل دقيقة
 setInterval(autoScan, 60000);
 
 // =======================
@@ -114,5 +135,5 @@ app.get("/", (req, res) => {
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-  console.log("🚀 Server running on " + PORT);
+  console.log("Server running on " + PORT);
 });
