@@ -4,67 +4,39 @@ import TelegramBot from "node-telegram-bot-api";
 const app = express();
 app.use(express.json());
 
-// 🔑 التوكن (خلاص حطيته لك)
+// 🔑 التوكن
 const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
-const bot = new TelegramBot(TOKEN, { polling: true });
 
-// 🎯 chatId
-let chatId = null;
+// ❌ بدون polling
+const bot = new TelegramBot(TOKEN);
 
 // =======================
-// 📩 استقبال من تيليجرام
+// 🎯 استقبال (Webhook)
+// =======================
+app.post("/webhook", (req, res) => {
+  bot.processUpdate(req.body);
+  res.sendStatus(200);
+});
+
+// =======================
+// 🎯 أوامر البوت
 // =======================
 bot.on("message", (msg) => {
-  chatId = msg.chat.id;
+  const chatId = msg.chat.id;
 
   if (msg.text && msg.text.includes("/start")) {
     bot.sendMessage(chatId, "💀 AI PRO MAX CONNECTED");
   }
-});
 
-// =======================
-// 🔥 استقبال من TradingView
-// =======================
-app.post("/webhook", (req, res) => {
-  const data = req.body;
-
-  if (!chatId) {
-    return res.send("No chatId yet");
+  if (msg.text && msg.text.includes("/scan")) {
+    bot.sendMessage(chatId, "🚀 جاري الفحص...");
   }
-
-  let message = `
-🚨 AI PRO MAX SIGNAL
-
-📊 ${data.symbol}
-💰 السعر: ${data.price}
-RSI: ${data.rsi}
-
-${data.signal}
-
-🎯 TP1: ${data.tp1}
-🎯 TP2: ${data.tp2}
-🎯 TP3: ${data.tp3}
-🎯 TP4: ${data.tp4}
-🎯 TP5: ${data.tp5}
-🎯 TP6: ${data.tp6}
-🎯 TP7: ${data.tp7}
-🎯 TP8: ${data.tp8}
-`;
-
-  bot.sendMessage(chatId, message);
-
-  res.send("OK");
 });
 
 // =======================
-// 🌐 سيرفر
+// 🌐 السيرفر
 // =======================
-app.get("/", (req, res) => {
-  res.send("💀 AI PRO MAX RUNNING");
-});
-
-const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, () => {
-  console.log("Server running on port " + PORT);
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log("🚀 Server running on " + port);
 });
