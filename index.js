@@ -7,11 +7,11 @@ app.use(express.json());
 // 🔑 التوكن
 const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
 
-// ❌ بدون polling
+// تشغيل البوت بدون polling
 const bot = new TelegramBot(TOKEN);
 
 // =======================
-// 🎯 استقبال (Webhook)
+// 🎯 Webhook endpoint
 // =======================
 app.post("/webhook", (req, res) => {
   bot.processUpdate(req.body);
@@ -24,11 +24,11 @@ app.post("/webhook", (req, res) => {
 bot.on("message", (msg) => {
   const chatId = msg.chat.id;
 
-  if (msg.text && msg.text.includes("/start")) {
+  if (msg.text?.includes("/start")) {
     bot.sendMessage(chatId, "💀 AI PRO MAX CONNECTED");
   }
 
-  if (msg.text && msg.text.includes("/scan")) {
+  if (msg.text?.includes("/scan")) {
     bot.sendMessage(chatId, "🚀 جاري الفحص...");
   }
 });
@@ -36,7 +36,12 @@ bot.on("message", (msg) => {
 // =======================
 // 🌐 السيرفر
 // =======================
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log("🚀 Server running on " + port);
+const PORT = process.env.PORT || 8080;
+
+app.get("/", (req, res) => {
+  res.send("Bot is running 💀");
+});
+
+app.listen(PORT, () => {
+  console.log("🚀 Server running on " + PORT);
 });
