@@ -6,14 +6,12 @@ app.use(express.json());
 
 // 🔑 TOKEN
 const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
-
-// ✅ لازم polling
 const bot = new TelegramBot(TOKEN, { polling: true });
 
 let chatId = null;
 
 // =======================
-// 📩 استقبال المستخدم
+// 📩 استقبال
 // =======================
 bot.on("message", (msg) => {
   chatId = msg.chat.id;
@@ -24,7 +22,7 @@ bot.on("message", (msg) => {
 });
 
 // =======================
-// 🧠 RSI ENGINE
+// 🧠 تحليل RSI
 // =======================
 function analyze(price) {
 
@@ -64,6 +62,7 @@ async function getData() {
       eth: data.ethereum.usd,
       eurusd: (1.10 + Math.random() * 0.1).toFixed(4),
 
+      // أسهم أمريكية
       stocks: [
         { name: "Tesla", price: 219.52 },
         { name: "Apple", price: 175.21 },
@@ -74,6 +73,22 @@ async function getData() {
   } catch {
     return null;
   }
+}
+
+// =======================
+// 🧾 تنسيق الأهداف
+// =======================
+function formatTP(tp) {
+  return `
+🎯 TP1: ${tp[0]}
+🎯 TP2: ${tp[1]}
+🎯 TP3: ${tp[2]}
+🎯 TP4: ${tp[3]}
+🎯 TP5: ${tp[4]}
+🎯 TP6: ${tp[5]}
+🎯 TP7: ${tp[6]}
+🎯 TP8: ${tp[7]}
+`;
 }
 
 // =======================
@@ -89,29 +104,38 @@ async function run() {
   const btc = analyze(data.btc);
   const eth = analyze(data.eth);
 
-  // ✅ الأسهم (مرتب كامل)
-  let stocksMsg = "";
+  // 🇺🇸 السوق الأمريكي
+  let usMarket = `🇺🇸 السوق الأمريكي\n\n`;
+
   data.stocks.forEach(s => {
     let a = analyze(s.price);
 
-    stocksMsg += `
+    usMarket += `
 🟢 ${s.name}
 💰 السعر: ${s.price}
-RSI: ${a.rsi}
-${a.signal}
-
-🎯 TP1: ${a.tp[0]}
-🎯 TP2: ${a.tp[1]}
-🎯 TP3: ${a.tp[2]}
-🎯 TP4: ${a.tp[3]}
-🎯 TP5: ${a.tp[4]}
-🎯 TP6: ${a.tp[5]}
-🎯 TP7: ${a.tp[6]}
-🎯 TP8: ${a.tp[7]}
-
+RSI: ${a.rsi} → ${a.signal}
+${formatTP(a.tp)}
 🛑 وقف: ${a.sl}
-━━━━━━━━━━━━`;
+━━━━━━━━━━━━
+`;
   });
+
+  // 🪙 الكريبتو
+  let crypto = `
+🪙 Crypto
+
+BTC: ${data.btc}
+RSI: ${btc.rsi} → ${btc.signal}
+${formatTP(btc.tp)}
+🛑 ${btc.sl}
+
+━━━━━━━━━━━━
+
+ETH: ${data.eth}
+RSI: ${eth.rsi} → ${eth.signal}
+${formatTP(eth.tp)}
+🛑 ${eth.sl}
+`;
 
   let message = `
 💀 AI PRO MAX LIVE
@@ -119,38 +143,20 @@ ${a.signal}
 🇸🇦 السوق السعودي
 TASI: LIVE
 
-🇺🇸 السوق الأمريكي
-NASDAQ: LIVE
-
-${stocksMsg}
+${usMarket}
 
 💱 العملات
 EUR/USD: ${data.eurusd}
 
-🪙 Crypto
+${crypto}
 
-BTC: ${data.btc}
-RSI: ${btc.rsi} → ${btc.signal}
-🎯 ${btc.tp.join(" | ")}
-🛑 ${btc.sl}
-
-ETH: ${data.eth}
-RSI: ${eth.rsi} → ${eth.signal}
-🎯 ${eth.tp.join(" | ")}
-🛑 ${eth.sl}
-
-⚡ تحديث تلقائي كل دقيقة
+⚡ تحديث تلقائي
 `;
 
   bot.sendMessage(chatId, message);
 }
 
-// ⏱ كل دقيقة (تقدر تخليه 10 ثواني)
+// ⏱ كل دقيقة (تقدر تخليها 10 ثواني)
 setInterval(run, 60000);
-
-// =======================
-app.get("/", (req, res) => {
-  res.send("AI PRO MAX RUNNING 💀");
-});
 
 app.listen(3000);
