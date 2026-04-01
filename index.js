@@ -1,5 +1,6 @@
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
+import fetch from "node-fetch"; // ✅ تم إصلاح المشكلة
 
 const app = express();
 app.use(express.json());
@@ -17,62 +18,60 @@ bot.on("message", (msg) => {
   chatId = msg.chat.id;
 
   if (msg.text === "/start") {
-    bot.sendMessage(chatId, "💀 AI PRO MAX FULL MARKET ACTIVATED");
+    bot.sendMessage(chatId, "💀 AI PRO MAX FULL MARKET (TASI + US + CRYPTO)");
     run();
   }
 
   if (msg.text === "/scan") {
-    bot.sendMessage(chatId, "🚀 جاري فحص السوق كامل...");
+    bot.sendMessage(chatId, "🚀 فحص السوق كامل...");
     run();
   }
 });
 
 // =======================
-// 🧠 تحليل
+// 🧠 تحليل + زخم ⚡️
 // =======================
-function analyze(price) {
-  if (price === null || price === undefined || isNaN(price)) return null;
+function analyze(price, prev) {
+  if (!price || !prev) return null;
 
-  let rsi = Math.floor(price % 100);
+  let change = ((price - prev) / prev) * 100;
 
   let signal = "⚪ محايد";
+  let emoji = "";
 
-  if (rsi <= 20) signal="💀 انفجار";
-  else if (rsi <= 30) signal="🟢 شراء قوي";
-  else if (rsi <= 40) signal="🟢 شراء";
-  else if (rsi <= 50) signal="⚪ محايد";
-  else if (rsi <= 60) signal="🔴 بيع خفيف";
-  else if (rsi <= 70) signal="🔴 بيع";
-  else if (rsi <= 80) signal="🔴 بيع قوي";
-  else signal="🚨 خطر";
-
-  let entry = price;
+  if (change > 2) {
+    signal = "💀 دخول قوي";
+    emoji = "⚡️";
+  } else if (change > 1) {
+    signal = "🟢 فرصة";
+  } else if (change < -2) {
+    signal = "🔴 تصريف";
+    emoji = "⚡️";
+  }
 
   let tp = [
-    (entry * 1.02).toFixed(2),
-    (entry * 1.04).toFixed(2),
-    (entry * 1.06).toFixed(2),
-    (entry * 1.08).toFixed(2),
-    (entry * 1.10).toFixed(2),
-    (entry * 1.12).toFixed(2),
-    (entry * 1.15).toFixed(2),
-    (entry * 1.18).toFixed(2),
+    (price * 1.02).toFixed(2),
+    (price * 1.04).toFixed(2),
+    (price * 1.06).toFixed(2),
+    (price * 1.08).toFixed(2),
+    (price * 1.10).toFixed(2),
+    (price * 1.12).toFixed(2),
+    (price * 1.15).toFixed(2),
+    (price * 1.18).toFixed(2),
   ];
 
-  let sl = (entry * 0.94).toFixed(2);
+  let sl = (price * 0.95).toFixed(2);
 
-  return { rsi, signal, tp, sl };
+  return { signal, tp, sl, emoji, change };
 }
 
 // =======================
-// 🎯 تنسيق
-// =======================
 function format(s) {
   return `
-🟢 ${s.name}
+${s.emoji} ${s.name}
 
 💰 ${s.price}
-RSI: ${s.rsi} → ${s.signal}
+📊 ${s.signal} (${s.change.toFixed(2)}%)
 
 🎯 TP1: ${s.tp[0]}
 🎯 TP2: ${s.tp[1]}
@@ -90,91 +89,52 @@ RSI: ${s.rsi} → ${s.signal}
 // =======================
 // 📊 APIs
 // =======================
-async function getUS(symbol) {
+async function getQuote(symbol) {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
     const data = await res.json();
-    return data?.c || null;
+    return { price: data.c, prev: data.pc };
   } catch { return null; }
 }
 
+// 🇸🇦 تاسي (Yahoo)
 async function getSA(symbol) {
   try {
     const res = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`);
     const data = await res.json();
-    return data?.quoteResponse?.result?.[0]?.regularMarketPrice || null;
-  } catch { return null; }
-}
-
-// 💰 كريبتو
-async function getCrypto(symbol) {
-  try {
-    const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
-    const data = await res.json();
-    return data?.c || null;
+    let p = data?.quoteResponse?.result?.[0];
+    if (!p) return null;
+    return { price: p.regularMarketPrice, prev: p.regularMarketPreviousClose };
   } catch { return null; }
 }
 
 // =======================
-// 🧾 الشعارات
+// 💀 الأسواق
 // =======================
-function getLogo(symbol) {
-  const map = {
-    "AAPL": "apple.com",
-    "TSLA": "tesla.com",
-    "NVDA": "nvidia.com",
-    "AMZN": "amazon.com",
-    "MSFT": "microsoft.com",
-    "GOOGL": "google.com",
-    "META": "meta.com",
 
-    "BTC": "bitcoin.org",
-    "ETH": "ethereum.org",
-    "SOL": "solana.com",
-    "XRP": "ripple.com",
-    "BNB": "binance.com",
-
-    "2222.SR": "aramco.com",
-    "1120.SR": "alrajhibank.com.sa",
-    "2010.SR": "sabic.com",
-    "7010.SR": "stc.com.sa"
-  };
-
-  return `https://logo.clearbit.com/${map[symbol] || "google.com"}`;
-}
-
-// =======================
-// 📦 قوائم
-// =======================
 const saudi = [
-  ["أرامكو","2222.SR"],["الراجحي","1120.SR"],["سابك","2010.SR"],
-  ["STC","7010.SR"],["معادن","1211.SR"],["الإنماء","1150.SR"],
-  ["الأهلي","1180.SR"],["سافكو","2020.SR"],["بنك الرياض","1010.SR"],
-  ["المراعي","2280.SR"],["جرير","4190.SR"],["صافولا","2050.SR"]
+"2222.SR","1120.SR","2010.SR","7010.SR","1211.SR","1150.SR",
+"1180.SR","2020.SR","1010.SR","2280.SR","4190.SR","2050.SR"
 ];
 
-const us = [
-  ["Tesla","TSLA"],["Apple","AAPL"],["NVIDIA","NVDA"],
-  ["Amazon","AMZN"],["Microsoft","MSFT"],["Google","GOOGL"],
-  ["Meta","META"],["AMD","AMD"],["Netflix","NFLX"],
-  ["Palantir","PLTR"],["Intel","INTC"],["Uber","UBER"],
-  ["Disney","DIS"],["Nike","NKE"]
-];
-
-// 💰 العملات
-const crypto = [
-  ["BTC","BINANCE:BTCUSDT"],
-  ["ETH","BINANCE:ETHUSDT"],
-  ["SOL","BINANCE:SOLUSDT"],
-  ["XRP","BINANCE:XRPUSDT"],
-  ["BNB","BINANCE:BNBUSDT"]
-];
-
-// =======================
-function filterPro(data) {
-  return data;
+// 🇺🇸
+async function getUSSymbols() {
+  try {
+    const res = await fetch(`https://finnhub.io/api/v1/stock/symbol?exchange=US&token=${API_KEY}`);
+    return await res.json();
+  } catch { return []; }
 }
 
+// 💰
+async function getCryptoSymbols() {
+  try {
+    const res = await fetch(`https://finnhub.io/api/v1/crypto/symbol?exchange=BINANCE&token=${API_KEY}`);
+    return await res.json();
+  } catch { return []; }
+}
+
+// =======================
+// 🚀 تشغيل
 // =======================
 let running = false;
 
@@ -186,51 +146,45 @@ async function run() {
 
     let all = [];
 
-    // 🇸🇦
+    // 🇸🇦 سعودي
     for (let s of saudi) {
-      let price = await getSA(s[1]);
-      if (!price) continue;
+      let q = await getSA(s);
+      if (!q) continue;
 
-      let a = analyze(price);
+      let a = analyze(q.price, q.prev);
       if (!a) continue;
 
-      all.push({ name:s[0], symbol:s[1], price, ...a });
+      all.push({ name:s, price:q.price, ...a });
     }
 
-    // 🇺🇸
-    for (let s of us) {
-      let price = await getUS(s[1]);
-      if (!price) continue;
+    // 🇺🇸 أمريكي
+    let us = await getUSSymbols();
+    for (let s of us.slice(0,150)) {
+      let q = await getQuote(s.symbol);
+      if (!q) continue;
 
-      let a = analyze(price);
+      let a = analyze(q.price, q.prev);
       if (!a) continue;
 
-      all.push({ name:s[0], symbol:s[1], price, ...a });
+      all.push({ name:s.description || s.symbol, price:q.price, ...a });
     }
 
     // 💰 كريبتو
-    for (let s of crypto) {
-      let price = await getCrypto(s[1]);
-      if (!price) continue;
+    let crypto = await getCryptoSymbols();
+    for (let c of crypto.slice(0,80)) {
+      let q = await getQuote(c.symbol);
+      if (!q) continue;
 
-      let a = analyze(price);
+      let a = analyze(q.price, q.prev);
       if (!a) continue;
 
-      all.push({ name:s[0], symbol:s[0], price, ...a });
+      all.push({ name:c.displaySymbol, price:q.price, ...a });
     }
 
-    let fullMarket = filterPro(all);
-
-    if (fullMarket.length === 0) {
-      bot.sendMessage(chatId, "⚠️ لا توجد بيانات حالياً");
-    }
-
-    for (let s of fullMarket) {
-      await bot.sendPhoto(chatId, getLogo(s.symbol), {
-        caption: "💀 السوق كامل\n" + format(s)
-      });
-
-      await new Promise(r => setTimeout(r, 700));
+    // إرسال
+    for (let s of all) {
+      await bot.sendMessage(chatId, "💀 MARKET FLOW\n" + format(s));
+      await new Promise(r => setTimeout(r, 300));
     }
 
   } catch (e) {
@@ -243,10 +197,6 @@ async function run() {
 // =======================
 setInterval(run, 60000);
 
-app.get("/", (req, res) => {
-  res.send("💀 AI PRO MAX RUNNING");
-});
-
 app.listen(3000, () => {
-  console.log("🔥 SERVER STARTED");
+  console.log("🔥 FULL MARKET RUNNING");
 });
