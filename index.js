@@ -1,6 +1,5 @@
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
-import fetch from "node-fetch"; 
 
 const app = express();
 app.use(express.json());
@@ -97,7 +96,6 @@ async function getQuote(symbol) {
   } catch { return null; }
 }
 
-// 🇸🇦 تاسي (Yahoo)
 async function getSA(symbol) {
   try {
     const res = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`);
@@ -109,15 +107,11 @@ async function getSA(symbol) {
 }
 
 // =======================
-// 💀 الأسواق
-// =======================
-
 const saudi = [
 "2222.SR","1120.SR","2010.SR","7010.SR","1211.SR","1150.SR",
 "1180.SR","2020.SR","1010.SR","2280.SR","4190.SR","2050.SR"
 ];
 
-// 🇺🇸
 async function getUSSymbols() {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/stock/symbol?exchange=US&token=${API_KEY}`);
@@ -125,7 +119,6 @@ async function getUSSymbols() {
   } catch { return []; }
 }
 
-// 💰
 async function getCryptoSymbols() {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/crypto/symbol?exchange=BINANCE&token=${API_KEY}`);
@@ -133,8 +126,6 @@ async function getCryptoSymbols() {
   } catch { return []; }
 }
 
-// =======================
-// 🚀 تشغيل
 // =======================
 let running = false;
 
@@ -146,7 +137,6 @@ async function run() {
 
     let all = [];
 
-    // 🇸🇦 سعودي
     for (let s of saudi) {
       let q = await getSA(s);
       if (!q) continue;
@@ -157,7 +147,6 @@ async function run() {
       all.push({ name:s, price:q.price, ...a });
     }
 
-    // 🇺🇸 أمريكي
     let us = await getUSSymbols();
     for (let s of us.slice(0,150)) {
       let q = await getQuote(s.symbol);
@@ -169,7 +158,6 @@ async function run() {
       all.push({ name:s.description || s.symbol, price:q.price, ...a });
     }
 
-    // 💰 كريبتو
     let crypto = await getCryptoSymbols();
     for (let c of crypto.slice(0,80)) {
       let q = await getQuote(c.symbol);
@@ -181,7 +169,6 @@ async function run() {
       all.push({ name:c.displaySymbol, price:q.price, ...a });
     }
 
-    // إرسال
     for (let s of all) {
       await bot.sendMessage(chatId, "💀 MARKET FLOW\n" + format(s));
       await new Promise(r => setTimeout(r, 300));
@@ -197,6 +184,8 @@ async function run() {
 // =======================
 setInterval(run, 60000);
 
-app.listen(3000, () => {
-  console.log("🔥 FULL MARKET RUNNING");
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log("🔥 FULL MARKET RUNNING ON " + PORT);
 });
