@@ -94,16 +94,16 @@ async function getUS(symbol) {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
     const data = await res.json();
-    return data?.c ?? 0;
-  } catch { return 0; }
+    return data?.c || null;
+  } catch { return null; }
 }
 
 async function getSA(symbol) {
   try {
     const res = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`);
     const data = await res.json();
-    return data?.quoteResponse?.result?.[0]?.regularMarketPrice ?? 0;
-  } catch { return 0; }
+    return data?.quoteResponse?.result?.[0]?.regularMarketPrice || null;
+  } catch { return null; }
 }
 
 // 💰 كريبتو
@@ -111,8 +111,8 @@ async function getCrypto(symbol) {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
     const data = await res.json();
-    return data?.c ?? 0;
-  } catch { return 0; }
+    return data?.c || null;
+  } catch { return null; }
 }
 
 // =======================
@@ -128,6 +128,12 @@ function getLogo(symbol) {
     "GOOGL": "google.com",
     "META": "meta.com",
 
+    "BTC": "bitcoin.org",
+    "ETH": "ethereum.org",
+    "SOL": "solana.com",
+    "XRP": "ripple.com",
+    "BNB": "binance.com",
+
     "2222.SR": "aramco.com",
     "1120.SR": "alrajhibank.com.sa",
     "2010.SR": "sabic.com",
@@ -138,7 +144,7 @@ function getLogo(symbol) {
 }
 
 // =======================
-// 📦 الأسواق
+// 📦 قوائم
 // =======================
 const saudi = [
   ["أرامكو","2222.SR"],["الراجحي","1120.SR"],["سابك","2010.SR"],
@@ -165,14 +171,10 @@ const crypto = [
 ];
 
 // =======================
-// 💀 فلتر
-// =======================
 function filterPro(data) {
   return data;
 }
 
-// =======================
-// 🚀 التشغيل
 // =======================
 let running = false;
 
@@ -187,6 +189,8 @@ async function run() {
     // 🇸🇦
     for (let s of saudi) {
       let price = await getSA(s[1]);
+      if (!price) continue;
+
       let a = analyze(price);
       if (!a) continue;
 
@@ -196,6 +200,8 @@ async function run() {
     // 🇺🇸
     for (let s of us) {
       let price = await getUS(s[1]);
+      if (!price) continue;
+
       let a = analyze(price);
       if (!a) continue;
 
@@ -205,16 +211,18 @@ async function run() {
     // 💰 كريبتو
     for (let s of crypto) {
       let price = await getCrypto(s[1]);
+      if (!price) continue;
+
       let a = analyze(price);
       if (!a) continue;
 
-      all.push({ name:s[0], symbol:s[1], price, ...a });
+      all.push({ name:s[0], symbol:s[0], price, ...a });
     }
 
     let fullMarket = filterPro(all);
 
     if (fullMarket.length === 0) {
-      bot.sendMessage(chatId, "⚠️ لا توجد بيانات الآن");
+      bot.sendMessage(chatId, "⚠️ لا توجد بيانات حالياً");
     }
 
     for (let s of fullMarket) {
