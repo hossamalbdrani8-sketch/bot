@@ -1,6 +1,6 @@
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
-import fetch from "node-fetch"; // ✅ تم إصلاح المشكلة
+import fetch from "node-fetch"; 
 
 const app = express();
 app.use(express.json());
