@@ -1,5 +1,6 @@
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
+
 const app = express();
 app.use(express.json());
 
@@ -8,7 +9,7 @@ const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
 const bot = new TelegramBot(TOKEN, { polling: true });
 
 // 🔑 API
-const API_KEY = "d75o0l1r01qk56kdfon0d75o0l1r01qk56kdfong";
+const API_KEY = "d75o0l1r01qk56kdfon0l1r01qk56kdfong";
 
 let chatId = null;
 
@@ -16,7 +17,7 @@ bot.on("message", (msg) => {
   chatId = msg.chat.id;
 
   if (msg.text === "/start") {
-    bot.sendMessage(chatId, "💀 AI PRO MAX FULL MARKET (TASI + US + CRYPTO)");
+    bot.sendMessage(chatId, "💀 AI PRO MAX FULL MARKET (SMART MONEY)");
     run();
   }
 
@@ -27,24 +28,30 @@ bot.on("message", (msg) => {
 });
 
 // =======================
-// 🧠 تحليل + زخم ⚡️
+// 🧠 تحليل + صناع السوق 💀
 // =======================
 function analyze(price, prev) {
-  if (!price || !prev) return null;
+  if (!price || !prev || prev === 0) return null;
 
   let change = ((price - prev) / prev) * 100;
 
   let signal = "⚪ محايد";
   let emoji = "";
+  let smart = "";
 
-  if (change > 2) {
-    signal = "💀 دخول قوي";
+  if (change > 3) {
+    signal = "💀 دخول صانع سوق";
     emoji = "⚡️";
-  } else if (change > 1) {
-    signal = "🟢 فرصة";
-  } else if (change < -2) {
-    signal = "🔴 تصريف";
+    smart = "🔥 Smart Money";
+  } 
+  else if (change > 1.5) {
+    signal = "🟢 تجميع";
+    smart = "📈 Accumulation";
+  } 
+  else if (change < -3) {
+    signal = "🔴 تصريف قوي";
     emoji = "⚡️";
+    smart = "📉 Distribution";
   }
 
   let tp = [
@@ -60,7 +67,7 @@ function analyze(price, prev) {
 
   let sl = (price * 0.95).toFixed(2);
 
-  return { signal, tp, sl, emoji, change };
+  return { signal, tp, sl, emoji, change, smart };
 }
 
 // =======================
@@ -70,6 +77,7 @@ ${s.emoji} ${s.name}
 
 💰 ${s.price}
 📊 ${s.signal} (${s.change.toFixed(2)}%)
+${s.smart ? "🧠 " + s.smart : ""}
 
 🎯 TP1: ${s.tp[0]}
 🎯 TP2: ${s.tp[1]}
@@ -91,6 +99,7 @@ async function getQuote(symbol) {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
     const data = await res.json();
+    if (!data || !data.c || !data.pc) return null;
     return { price: data.c, prev: data.pc };
   } catch { return null; }
 }
@@ -103,6 +112,13 @@ async function getSA(symbol) {
     if (!p) return null;
     return { price: p.regularMarketPrice, prev: p.regularMarketPreviousClose };
   } catch { return null; }
+}
+
+// =======================
+// 🧾 شعار
+// =======================
+function getLogo(symbol) {
+  return `https://logo.clearbit.com/${symbol.replace(".SR","").toLowerCase()}.com`;
 }
 
 // =======================
@@ -136,6 +152,7 @@ async function run() {
 
     let all = [];
 
+    // 🇸🇦
     for (let s of saudi) {
       let q = await getSA(s);
       if (!q) continue;
@@ -143,9 +160,10 @@ async function run() {
       let a = analyze(q.price, q.prev);
       if (!a) continue;
 
-      all.push({ name:s, price:q.price, ...a });
+      all.push({ name:s, symbol:s, price:q.price, ...a });
     }
 
+    // 🇺🇸
     let us = await getUSSymbols();
     for (let s of us.slice(0,150)) {
       let q = await getQuote(s.symbol);
@@ -154,9 +172,10 @@ async function run() {
       let a = analyze(q.price, q.prev);
       if (!a) continue;
 
-      all.push({ name:s.description || s.symbol, price:q.price, ...a });
+      all.push({ name:s.description || s.symbol, symbol:s.symbol, price:q.price, ...a });
     }
 
+    // 💰
     let crypto = await getCryptoSymbols();
     for (let c of crypto.slice(0,80)) {
       let q = await getQuote(c.symbol);
@@ -165,12 +184,16 @@ async function run() {
       let a = analyze(q.price, q.prev);
       if (!a) continue;
 
-      all.push({ name:c.displaySymbol, price:q.price, ...a });
+      all.push({ name:c.displaySymbol, symbol:c.symbol, price:q.price, ...a });
     }
 
+    // 🚀 إرسال مع شعار
     for (let s of all) {
-      await bot.sendMessage(chatId, "💀 MARKET FLOW\n" + format(s));
-      await new Promise(r => setTimeout(r, 300));
+      await bot.sendPhoto(chatId, getLogo(s.symbol), {
+        caption: "💀 MARKET FLOW\n" + format(s)
+      });
+
+      await new Promise(r => setTimeout(r, 250));
     }
 
   } catch (e) {
@@ -186,5 +209,5 @@ setInterval(run, 60000);
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-  console.log("🔥 FULL MARKET RUNNING ON " + PORT);
+  console.log("🔥 FULL MARKET RUNNING");
 });
