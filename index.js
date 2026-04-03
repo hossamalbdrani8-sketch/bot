@@ -1,6 +1,5 @@
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
-import fetch from "node-fetch"; // ✅ إصلاح مهم
 
 const app = express();
 app.use(express.json());
@@ -9,8 +8,8 @@ app.use(express.json());
 const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
 const bot = new TelegramBot(TOKEN, { polling: true });
 
-// 🔑 API
-const API_KEY = "d75o0l1r01qk56kdfon0l1r01qk56kdfong";
+// 🔑 API (تأكد ما فيه تكرار غلط)
+const API_KEY = "d75o0l1r01qk56kdfong";
 
 let chatId = null;
 
@@ -28,8 +27,6 @@ bot.on("message", (msg) => {
   }
 });
 
-// =======================
-// 🧠 تحليل
 // =======================
 function analyze(price, prev) {
   if (!price || !prev || prev === 0 || price <= 0) return null;
@@ -72,8 +69,6 @@ function analyze(price, prev) {
 }
 
 // =======================
-// 📩 تنسيق (تم إصلاحه)
-// =======================
 function format(s) {
   return `
 ${s.market}
@@ -97,8 +92,6 @@ ${s.smart ? "🧠 " + s.smart : ""}
 }
 
 // =======================
-// 📊 APIs
-// =======================
 async function getQuote(symbol) {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
@@ -119,8 +112,6 @@ async function getSA(symbol) {
 }
 
 // =======================
-// 🧾 شعار + حماية
-// =======================
 function getLogo(symbol) {
   return `https://logo.clearbit.com/${symbol.replace(".SR","").toLowerCase()}.com`;
 }
@@ -135,8 +126,7 @@ async function safeSend(chatId, symbol, text) {
 
 // =======================
 const saudi = [
-"2222.SR","1120.SR","2010.SR","7010.SR","1211.SR","1150.SR",
-"1180.SR","2020.SR","1010.SR","2280.SR","4190.SR","2050.SR"
+"2222.SR","1120.SR","2010.SR","7010.SR"
 ];
 
 async function getUSSymbols() {
@@ -164,7 +154,6 @@ async function run() {
 
     let all = [];
 
-    // 🇸🇦
     for (let s of saudi) {
       let q = await getSA(s);
       if (!q) continue;
@@ -173,17 +162,16 @@ async function run() {
       if (!a) continue;
 
       all.push({ 
-        name:s, 
-        symbol:s, 
+        name:s,
+        symbol:s,
         market:"🇸🇦 السوق السعودي",
-        price:q.price, 
-        ...a 
+        price:q.price,
+        ...a
       });
     }
 
-    // 🇺🇸
     let us = await getUSSymbols();
-    for (let s of us.slice(0,150)) {
+    for (let s of us.slice(0,50)) {
       let q = await getQuote(s.symbol);
       if (!q) continue;
 
@@ -191,35 +179,16 @@ async function run() {
       if (!a) continue;
 
       all.push({ 
-        name:s.description || s.symbol, 
-        symbol:s.symbol, 
+        name:s.symbol,
+        symbol:s.symbol,
         market:"🇺🇸 السوق الأمريكي",
-        price:q.price, 
-        ...a 
-      });
-    }
-
-    // 💰
-    let crypto = await getCryptoSymbols();
-    for (let c of crypto.slice(0,80)) {
-      let q = await getQuote(c.symbol);
-      if (!q) continue;
-
-      let a = analyze(q.price, q.prev);
-      if (!a) continue;
-
-      all.push({ 
-        name:c.displaySymbol, 
-        symbol:c.symbol, 
-        market:"💰 العملات الرقمية",
-        price:q.price, 
-        ...a 
+        price:q.price,
+        ...a
       });
     }
 
     for (let s of all) {
-      await safeSend(chatId, s.symbol, "💀 MARKET FLOW\n" + format(s));
-      await new Promise(r => setTimeout(r, 250));
+      await safeSend(chatId, s.symbol, format(s));
     }
 
   } catch (e) {
@@ -229,11 +198,8 @@ async function run() {
   running = false;
 }
 
-// =======================
 setInterval(run, 60000);
 
-const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, () => {
-  console.log("🔥 FULL MARKET RUNNING");
+app.listen(3000, () => {
+  console.log("🔥 RUNNING");
 });
