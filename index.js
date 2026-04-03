@@ -1,6 +1,5 @@
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
-import fetch from "node-fetch"; // ✅ حل مشكلة fetch
 
 const app = express();
 app.use(express.json());
@@ -155,6 +154,7 @@ async function run() {
 
     let all = [];
 
+    // 🇸🇦 تاسي
     for (let s of saudi) {
       let q = await getSA(s);
       if (!q) continue;
@@ -171,10 +171,9 @@ async function run() {
       });
     }
 
+    // 🇺🇸 أمريكي
     let us = await getUSSymbols();
-
-    // ✅ قلل الضغط عشان API ما يوقف
-    for (let s of us.slice(0,20)) {
+    for (let s of us.slice(0,15)) {
       let q = await getQuote(s.symbol);
       if (!q) continue;
 
@@ -190,13 +189,29 @@ async function run() {
       });
     }
 
-    // 💀 فلترة كسر العظم
-    for (let s of all) {
+    // 🪙 كريبتو (تم تفعيله ✅)
+    let crypto = await getCryptoSymbols();
+    for (let c of crypto.slice(0,10)) {
+      let q = await getQuote(c.symbol);
+      if (!q) continue;
 
+      let a = analyze(q.price, q.prev);
+      if (!a) continue;
+
+      all.push({
+        name:c.symbol,
+        symbol:c.symbol,
+        market:"🪙 العملات الرقمية",
+        price:q.price,
+        ...a
+      });
+    }
+
+    // 💀 فلترة قوية
+    for (let s of all) {
       if (s.change > 3 || s.change < -3) {
         await safeSend(chatId, s.symbol, format(s));
       }
-
     }
 
   } catch (e) {
@@ -207,6 +222,10 @@ async function run() {
 }
 
 setInterval(run, 60000);
+
+app.get("/", (req, res) => {
+  res.send("OK");
+});
 
 app.listen(3000, () => {
   console.log("🔥 RUNNING");
