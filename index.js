@@ -1,5 +1,6 @@
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
+import fetch from "node-fetch"; // ✅ إصلاح مهم
 
 const app = express();
 app.use(express.json());
@@ -28,7 +29,7 @@ bot.on("message", (msg) => {
 });
 
 // =======================
-// 🧠 تحليل + صناع السوق 💀
+// 🧠 تحليل
 // =======================
 function analyze(price, prev) {
   if (!price || !prev || prev === 0 || price <= 0) return null;
@@ -71,8 +72,11 @@ function analyze(price, prev) {
 }
 
 // =======================
+// 📩 تنسيق (تم إصلاحه)
+// =======================
 function format(s) {
   return `
+${s.market}
 ${s.emoji} ${s.name}
 
 💰 ${s.price}
@@ -115,7 +119,7 @@ async function getSA(symbol) {
 }
 
 // =======================
-// 🧾 شعار + حماية 💀
+// 🧾 شعار + حماية
 // =======================
 function getLogo(symbol) {
   return `https://logo.clearbit.com/${symbol.replace(".SR","").toLowerCase()}.com`;
@@ -160,6 +164,7 @@ async function run() {
 
     let all = [];
 
+    // 🇸🇦
     for (let s of saudi) {
       let q = await getSA(s);
       if (!q) continue;
@@ -167,9 +172,16 @@ async function run() {
       let a = analyze(q.price, q.prev);
       if (!a) continue;
 
-      all.push({ name:s, symbol:s, price:q.price, ...a });
+      all.push({ 
+        name:s, 
+        symbol:s, 
+        market:"🇸🇦 السوق السعودي",
+        price:q.price, 
+        ...a 
+      });
     }
 
+    // 🇺🇸
     let us = await getUSSymbols();
     for (let s of us.slice(0,150)) {
       let q = await getQuote(s.symbol);
@@ -178,9 +190,16 @@ async function run() {
       let a = analyze(q.price, q.prev);
       if (!a) continue;
 
-      all.push({ name:s.description || s.symbol, symbol:s.symbol, price:q.price, ...a });
+      all.push({ 
+        name:s.description || s.symbol, 
+        symbol:s.symbol, 
+        market:"🇺🇸 السوق الأمريكي",
+        price:q.price, 
+        ...a 
+      });
     }
 
+    // 💰
     let crypto = await getCryptoSymbols();
     for (let c of crypto.slice(0,80)) {
       let q = await getQuote(c.symbol);
@@ -189,7 +208,13 @@ async function run() {
       let a = analyze(q.price, q.prev);
       if (!a) continue;
 
-      all.push({ name:c.displaySymbol, symbol:c.symbol, price:q.price, ...a });
+      all.push({ 
+        name:c.displaySymbol, 
+        symbol:c.symbol, 
+        market:"💰 العملات الرقمية",
+        price:q.price, 
+        ...a 
+      });
     }
 
     for (let s of all) {
