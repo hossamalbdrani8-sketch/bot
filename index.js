@@ -1,5 +1,6 @@
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
+import fetch from "node-fetch"; // ✅ مهم جداً (كان سبب الكراش)
 
 const app = express();
 app.use(express.json());
@@ -8,6 +9,8 @@ app.use(express.json());
 const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
 const bot = new TelegramBot(TOKEN, { polling: true });
 
+// 🔑 API
+const API_KEY = "d75o0l1r01qk56kdfong";
 
 let chatId = null;
 
@@ -92,9 +95,13 @@ ${s.smart ? "🧠 " + s.smart : ""}
 // =======================
 async function getQuote(symbol) {
   try {
+    if (!symbol) return null;
+
     const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
     const data = await res.json();
+
     if (!data || !data.c || !data.pc) return null;
+
     return { price: data.c, prev: data.pc };
   } catch { return null; }
 }
@@ -103,9 +110,14 @@ async function getSA(symbol) {
   try {
     const res = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`);
     const data = await res.json();
+
     let p = data?.quoteResponse?.result?.[0];
     if (!p) return null;
-    return { price: p.regularMarketPrice, prev: p.regularMarketPreviousClose };
+
+    return {
+      price: p.regularMarketPrice,
+      prev: p.regularMarketPreviousClose
+    };
   } catch { return null; }
 }
 
@@ -134,13 +146,6 @@ async function getUSSymbols() {
   } catch { return []; }
 }
 
-async function getCryptoSymbols() {
-  try {
-    const res = await fetch(`https://finnhub.io/api/v1/crypto/symbol?exchange=BINANCE&token=${API_KEY}`);
-    return await res.json();
-  } catch { return []; }
-}
-
 // =======================
 let running = false;
 
@@ -152,7 +157,6 @@ async function run() {
 
     let all = [];
 
-    // 🇸🇦 تاسي
     for (let s of saudi) {
       let q = await getSA(s);
       if (!q) continue;
@@ -169,9 +173,11 @@ async function run() {
       });
     }
 
-    // 🇺🇸 أمريكي
     let us = await getUSSymbols();
-    for (let s of us.slice(0,15)) {
+
+    for (let s of us.slice(0,50)) {
+      if (!s.symbol) continue;
+
       let q = await getQuote(s.symbol);
       if (!q) continue;
 
@@ -187,29 +193,8 @@ async function run() {
       });
     }
 
-    // 🪙 كريبتو (تم تفعيله ✅)
-    let crypto = await getCryptoSymbols();
-    for (let c of crypto.slice(0,10)) {
-      let q = await getQuote(c.symbol);
-      if (!q) continue;
-
-      let a = analyze(q.price, q.prev);
-      if (!a) continue;
-
-      all.push({
-        name:c.symbol,
-        symbol:c.symbol,
-        market:"🪙 العملات الرقمية",
-        price:q.price,
-        ...a
-      });
-    }
-
-    // 💀 فلترة قوية
     for (let s of all) {
-      if (s.change > 3 || s.change < -3) {
-        await safeSend(chatId, s.symbol, format(s));
-      }
+      await safeSend(chatId, s.symbol, format(s));
     }
 
   } catch (e) {
@@ -220,10 +205,6 @@ async function run() {
 }
 
 setInterval(run, 60000);
-
-app.get("/", (req, res) => {
-  res.send("OK");
-});
 
 app.listen(3000, () => {
   console.log("🔥 RUNNING");
