@@ -1,5 +1,6 @@
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
+import fetch from "node-fetch"; // ✅ حل مشكلة fetch
 
 const app = express();
 app.use(express.json());
@@ -8,7 +9,7 @@ app.use(express.json());
 const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
 const bot = new TelegramBot(TOKEN, { polling: true });
 
-// 🔑 API (تأكد ما فيه تكرار غلط)
+// 🔑 API
 const API_KEY = "d75o0l1r01qk56kdfong";
 
 let chatId = null;
@@ -171,7 +172,9 @@ async function run() {
     }
 
     let us = await getUSSymbols();
-    for (let s of us.slice(0,50)) {
+
+    // ✅ قلل الضغط عشان API ما يوقف
+    for (let s of us.slice(0,20)) {
       let q = await getQuote(s.symbol);
       if (!q) continue;
 
@@ -187,8 +190,13 @@ async function run() {
       });
     }
 
+    // 💀 فلترة كسر العظم
     for (let s of all) {
-      await safeSend(chatId, s.symbol, format(s));
+
+      if (s.change > 3 || s.change < -3) {
+        await safeSend(chatId, s.symbol, format(s));
+      }
+
     }
 
   } catch (e) {
