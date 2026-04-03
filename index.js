@@ -31,7 +31,7 @@ bot.on("message", (msg) => {
 // 🧠 تحليل + صناع السوق 💀
 // =======================
 function analyze(price, prev) {
-  if (!price || !prev || prev === 0) return null;
+  if (!price || !prev || prev === 0 || price <= 0) return null;
 
   let change = ((price - prev) / prev) * 100;
 
@@ -40,16 +40,16 @@ function analyze(price, prev) {
   let smart = "";
 
   if (change > 3) {
-    signal = "💀 دخول صانع سوق";
+    signal = "💰 دخول مؤسسات فعلي";
     emoji = "⚡️";
     smart = "🔥 Smart Money";
   } 
   else if (change > 1.5) {
-    signal = "🟢 تجميع";
+    signal = "🧠 تجميع صامت";
     smart = "📈 Accumulation";
   } 
   else if (change < -3) {
-    signal = "🔴 تصريف قوي";
+    signal = "🚨 تصريف ذكي";
     emoji = "⚡️";
     smart = "📉 Distribution";
   }
@@ -115,10 +115,18 @@ async function getSA(symbol) {
 }
 
 // =======================
-// 🧾 شعار
+// 🧾 شعار + حماية 💀
 // =======================
 function getLogo(symbol) {
   return `https://logo.clearbit.com/${symbol.replace(".SR","").toLowerCase()}.com`;
+}
+
+async function safeSend(chatId, symbol, text) {
+  try {
+    await bot.sendPhoto(chatId, getLogo(symbol), { caption: text });
+  } catch {
+    await bot.sendMessage(chatId, text);
+  }
 }
 
 // =======================
@@ -152,7 +160,6 @@ async function run() {
 
     let all = [];
 
-    // 🇸🇦
     for (let s of saudi) {
       let q = await getSA(s);
       if (!q) continue;
@@ -163,7 +170,6 @@ async function run() {
       all.push({ name:s, symbol:s, price:q.price, ...a });
     }
 
-    // 🇺🇸
     let us = await getUSSymbols();
     for (let s of us.slice(0,150)) {
       let q = await getQuote(s.symbol);
@@ -175,7 +181,6 @@ async function run() {
       all.push({ name:s.description || s.symbol, symbol:s.symbol, price:q.price, ...a });
     }
 
-    // 💰
     let crypto = await getCryptoSymbols();
     for (let c of crypto.slice(0,80)) {
       let q = await getQuote(c.symbol);
@@ -187,12 +192,8 @@ async function run() {
       all.push({ name:c.displaySymbol, symbol:c.symbol, price:q.price, ...a });
     }
 
-    // 🚀 إرسال مع شعار
     for (let s of all) {
-      await bot.sendPhoto(chatId, getLogo(s.symbol), {
-        caption: "💀 MARKET FLOW\n" + format(s)
-      });
-
+      await safeSend(chatId, s.symbol, "💀 MARKET FLOW\n" + format(s));
       await new Promise(r => setTimeout(r, 250));
     }
 
