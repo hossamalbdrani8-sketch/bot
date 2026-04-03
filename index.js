@@ -1,6 +1,5 @@
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
-import fetch from "node-fetch"; // ✅ مهم جداً (كان سبب الكراش)
 
 const app = express();
 app.use(express.json());
@@ -103,7 +102,9 @@ async function getQuote(symbol) {
     if (!data || !data.c || !data.pc) return null;
 
     return { price: data.c, prev: data.pc };
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
 async function getSA(symbol) {
@@ -118,7 +119,9 @@ async function getSA(symbol) {
       price: p.regularMarketPrice,
       prev: p.regularMarketPreviousClose
     };
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
 // =======================
@@ -143,7 +146,9 @@ async function getUSSymbols() {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/stock/symbol?exchange=US&token=${API_KEY}`);
     return await res.json();
-  } catch { return []; }
+  } catch {
+    return [];
+  }
 }
 
 // =======================
