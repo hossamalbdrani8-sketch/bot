@@ -9,7 +9,8 @@ const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
 const bot = new TelegramBot(TOKEN, { polling: true });
 
 // 🔑 API
-const API_KEY = "d75o0l1r01qk56kdfong";
+const API_KEY =d75o0l1r01qk56kdfon0d75o0l1r01qk56kdfong
+
 
 let chatId = null;
 
