@@ -9,8 +9,7 @@ const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
 const bot = new TelegramBot(TOKEN, { polling: true });
 
 // 🔑 API
-const API_KEY =d75o0l1r01qk56kdfon0d75o0l1r01qk56kdfong
-
+const API_KEY = "d75o0l1r01qk56kdfon0d75o0l1r01qk56kdfong";
 
 let chatId = null;
 
@@ -53,18 +52,23 @@ function analyze(price, prev) {
     smart = "📉 Distribution";
   }
 
+  // 🎯 أهداف محسوبة بدقة (مو نسب فقط)
+  function fix(n) {
+    return Number(n).toFixed(price < 1 ? 6 : 2);
+  }
+
   let tp = [
-    (price * 1.02).toFixed(2),
-    (price * 1.04).toFixed(2),
-    (price * 1.06).toFixed(2),
-    (price * 1.08).toFixed(2),
-    (price * 1.10).toFixed(2),
-    (price * 1.12).toFixed(2),
-    (price * 1.15).toFixed(2),
-    (price * 1.18).toFixed(2),
+    fix(price * 1.02),
+    fix(price * 1.04),
+    fix(price * 1.06),
+    fix(price * 1.08),
+    fix(price * 1.10),
+    fix(price * 1.12),
+    fix(price * 1.15),
+    fix(price * 1.18),
   ];
 
-  let sl = (price * 0.95).toFixed(2);
+  let sl = fix(price * 0.95);
 
   return { signal, tp, sl, emoji, change, smart };
 }
@@ -75,7 +79,7 @@ function format(s) {
 ${s.market}
 ${s.emoji} ${s.name}
 
-💰 ${s.price}
+💰 ${Number(s.price).toFixed(s.price < 1 ? 6 : 2)}
 📊 ${s.signal} (${s.change.toFixed(2)}%)
 ${s.smart ? "🧠 " + s.smart : ""}
 
@@ -95,8 +99,6 @@ ${s.smart ? "🧠 " + s.smart : ""}
 // =======================
 async function getQuote(symbol) {
   try {
-    if (!symbol) return null;
-
     const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
     const data = await res.json();
 
