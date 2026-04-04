@@ -52,7 +52,6 @@ function analyze(price, prev) {
     smart = "📉 Distribution";
   }
 
-  // 🎯 أهداف محسوبة بدقة (مو نسب فقط)
   function fix(n) {
     return Number(n).toFixed(price < 1 ? 6 : 2);
   }
@@ -128,6 +127,17 @@ async function getSA(symbol) {
 }
 
 // =======================
+// 🔥 العملات (FIX مهم)
+async function getCryptoSymbols() {
+  try {
+    const res = await fetch(`https://finnhub.io/api/v1/crypto/symbol?exchange=BINANCE&token=${API_KEY}`);
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+// =======================
 function getLogo(symbol) {
   return `https://logo.clearbit.com/${symbol.replace(".SR","").toLowerCase()}.com`;
 }
@@ -165,6 +175,7 @@ async function run() {
 
     let all = [];
 
+    // 🇸🇦 سعودي
     for (let s of saudi) {
       let q = await getSA(s);
       if (!q) continue;
@@ -181,8 +192,8 @@ async function run() {
       });
     }
 
+    // 🇺🇸 أمريكي
     let us = await getUSSymbols();
-
     for (let s of us.slice(0,50)) {
       if (!s.symbol) continue;
 
@@ -201,8 +212,30 @@ async function run() {
       });
     }
 
+    // 💰 كريبتو (🔥 هذا كان ناقص)
+    let crypto = await getCryptoSymbols();
+    for (let c of crypto.slice(0,40)) {
+      if (!c.symbol) continue;
+
+      let q = await getQuote(c.symbol);
+      if (!q) continue;
+
+      let a = analyze(q.price, q.prev);
+      if (!a) continue;
+
+      all.push({
+        name:c.displaySymbol || c.symbol,
+        symbol:c.symbol,
+        market:"💰 العملات الرقمية",
+        price:q.price,
+        ...a
+      });
+    }
+
+    // 🚀 إرسال
     for (let s of all) {
       await safeSend(chatId, s.symbol, format(s));
+      await new Promise(r => setTimeout(r, 200));
     }
 
   } catch (e) {
@@ -212,6 +245,7 @@ async function run() {
   running = false;
 }
 
+// =======================
 setInterval(run, 60000);
 
 app.listen(3000, () => {
