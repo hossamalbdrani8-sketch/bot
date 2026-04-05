@@ -36,20 +36,24 @@ function analyze(price, prev) {
   let signal = "⚪ محايد";
   let emoji = "";
   let smart = "";
+  let type = "🐠 مضاربين"; // افتراضي
 
   if (change > 3) {
     signal = "💰 دخول مؤسسات فعلي";
     emoji = "⚡️";
     smart = "🔥 Smart Money";
+    type = "🦈 هوامير"; // قوي
   } 
   else if (change > 1.5) {
     signal = "🧠 تجميع صامت";
     smart = "📈 Accumulation";
+    type = "🐠 مضاربين";
   } 
   else if (change < -3) {
     signal = "🚨 تصريف ذكي";
     emoji = "⚡️";
     smart = "📉 Distribution";
+    type = "🦈 هوامير";
   }
 
   function fix(n) {
@@ -69,13 +73,15 @@ function analyze(price, prev) {
 
   let sl = fix(price * 0.95);
 
-  return { signal, tp, sl, emoji, change, smart };
+  return { signal, tp, sl, emoji, change, smart, type };
 }
 
 // =======================
 function format(s) {
   return `
 ${s.market}
+${s.type}
+
 ${s.emoji} ${s.name}
 
 💰 ${Number(s.price).toFixed(s.price < 1 ? 6 : 2)}
@@ -127,7 +133,7 @@ async function getSA(symbol) {
 }
 
 // =======================
-// 🔥 العملات (FIX مهم)
+// 💰 العملات (الإضافة المهمة)
 async function getCryptoSymbols() {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/crypto/symbol?exchange=BINANCE&token=${API_KEY}`);
@@ -175,7 +181,7 @@ async function run() {
 
     let all = [];
 
-    // 🇸🇦 سعودي
+    // 🇸🇦
     for (let s of saudi) {
       let q = await getSA(s);
       if (!q) continue;
@@ -192,7 +198,7 @@ async function run() {
       });
     }
 
-    // 🇺🇸 أمريكي
+    // 🇺🇸
     let us = await getUSSymbols();
     for (let s of us.slice(0,50)) {
       if (!s.symbol) continue;
@@ -212,7 +218,7 @@ async function run() {
       });
     }
 
-    // 💰 كريبتو (🔥 هذا كان ناقص)
+    // 💰 كريبتو
     let crypto = await getCryptoSymbols();
     for (let c of crypto.slice(0,40)) {
       if (!c.symbol) continue;
@@ -245,7 +251,6 @@ async function run() {
   running = false;
 }
 
-// =======================
 setInterval(run, 60000);
 
 app.listen(3000, () => {
