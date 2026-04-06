@@ -17,9 +17,7 @@ const bot = new TelegramBot(TOKEN, {
 });
 
 // 🔑 API
-const API_KEY = "d75o0l1r01qk56kdfon0d75o0l1r01qk56kdfong";
-
-let chatId = null;
+const API_KEY = "d7a0311r01qspme6c44gd7a0311r01qspme6c450";
 let memory = {};
 let running = false;
 
