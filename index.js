@@ -4,7 +4,7 @@ import TelegramBot from "node-telegram-bot-api";
 const app = express();
 app.use(express.json());
 
-// 🔑 TOKEN (كما هو)
+// 🔑 TOKEN 
 const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
 
 // 💀 اتصال قوي ثابت
@@ -16,7 +16,7 @@ const bot = new TelegramBot(TOKEN, {
   }
 });
 
-// 🔑 API (تم تحديثه)
+// 🔑 API 
 const API_KEY = "d79vdtpr01qspme69nvgd79vdtpr01qspme69o00";
 
 let chatId = null;
