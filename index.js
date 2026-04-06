@@ -58,33 +58,27 @@ function analyze(price, prev, symbol) {
   let smart = "";
   let type = "🐠 مضاربين";
   let entry = "⏳ انتظر";
-  let decision = "❌ ممنوع الدخول"; // 💀 الجديد
+  let decision = "❌ ممنوع الدخول";
 
   if (!memory[symbol]) {
     memory[symbol] = {
       price: price,
       low: price,
-      high: price,
-      lastBreak: false
+      high: price
     };
   }
 
   let prevData = memory[symbol];
 
-  if (price < prevData.low) {
-    prevData.low = price;
-  }
-
-  if (price > prevData.high) {
-    prevData.high = price;
-  }
+  if (price < prevData.low) prevData.low = price;
+  if (price > prevData.high) prevData.high = price;
 
   let fromLow = ((price - prevData.low) / prevData.low) * 100;
-
   let breakHigh = price > prevData.high * 0.995;
 
   let flow = price > prevData.price ? "💹 سيولة مستمرة" : "⚠️ ضعف السيولة";
 
+  // 🔥 إشارات
   if (change > 3) {
     signal = "💰 دخول مؤسسات فعلي";
     emoji = "⚡️";
@@ -102,44 +96,25 @@ function analyze(price, prev, symbol) {
     type = "🦈 هوامير";
   }
 
+  // 💀 دخول ذكي
   if (fromLow > 2 && fromLow < 6 && change > 0.5) {
     entry = "💀 دخول من القاع";
   }
 
   if (fromLow >= 6 && change > 2 && flow.includes("💹")) {
-    entry = "🚀 انطلاق موجة قوية";
+    entry = "🚀 انطلاق موجة";
   }
 
   if (fromLow > 3 && breakHigh && flow.includes("💹") && change > 2) {
-    entry = "💀🔥 دخول احترافي مؤكد";
+    entry = "💀🔥 دخول احترافي";
   }
 
-  // =======================
-  // 💀 القرار الذكي التلقائي
-  // =======================
-
-  // 💀 دخول كامل
-  if (
-    type === "🦈 هوامير" &&
-    flow.includes("💹") &&
-    change > 2 &&
-    fromLow > 2
-  ) {
+  // 💀 القرار النهائي
+  if (type === "🦈 هوامير" && flow.includes("💹") && change > 2 && fromLow > 2) {
     decision = "💀 ادخل الآن بكامل السيولة";
-  }
-
-  // ⚠️ دخول جزئي
-  else if (
-    flow.includes("💹") &&
-    change > 1 &&
-    fromLow > 1
-  ) {
+  } 
+  else if (flow.includes("💹") && change > 1) {
     decision = "⚠️ دخول جزئي";
-  }
-
-  // ❌ ممنوع
-  else {
-    decision = "❌ ممنوع الدخول";
   }
 
   function fix(n) {
@@ -169,8 +144,7 @@ function analyze(price, prev, symbol) {
 
   return {
     signal, tp, sl, emoji, change, smart,
-    type, entry, flow, tpStatus, fromLow,
-    decision // 💀 الجديد
+    type, entry, flow, tpStatus, fromLow, decision
   };
 }
 
