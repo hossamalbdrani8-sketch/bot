@@ -5,7 +5,7 @@ const app = express();
 app.use(express.json());
 
 // 🔑 TOKEN
-const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
+const TOKEN = "d75o0l1r01qk56kdfon0d75o0l1r01qk56kdfong";
 
 // 💀 اتصال قوي ثابت
 const bot = new TelegramBot(TOKEN, {
