@@ -207,4 +207,115 @@ ${s.decision} 💀
 ━━━━━━━━━━━━`;
 }
 
+// =======================
+async function getQuote(symbol) {
+  try {
+    const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
+    const data = await res.json();
+    if (!data || !data.c || !data.pc) return null;
+    return { price: data.c, prev: data.pc };
+  } catch {
+    return null;
+  }
+}
 
+async function getSA(symbol) {
+  try {
+    const res = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`);
+    const data = await res.json();
+    let p = data?.quoteResponse?.result?.[0];
+    if (!p) return null;
+    return { price: p.regularMarketPrice, prev: p.regularMarketPreviousClose };
+  } catch {
+    return null;
+  }
+}
+
+async function getCryptoSymbols() {
+  try {
+    const res = await fetch(`https://finnhub.io/api/v1/crypto/symbol?exchange=BINANCE&token=${API_KEY}`);
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+// =======================
+function getLogo(symbol) {
+  return `https://logo.clearbit.com/${symbol.replace(".SR","").toLowerCase()}.com`;
+}
+
+async function safeSend(chatId, symbol, text) {
+  try {
+    await bot.sendPhoto(chatId, getLogo(symbol), { caption: text });
+  } catch {
+    await bot.sendMessage(chatId, text);
+  }
+}
+
+// =======================
+const saudi = ["2222.SR","1120.SR","2010.SR","7010.SR"];
+
+async function getUSSymbols() {
+  try {
+    const res = await fetch(`https://finnhub.io/api/v1/stock/symbol?exchange=US&token=${API_KEY}`);
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+// =======================
+async function run() {
+  if (!chatId || running) return;
+  running = true;
+
+  try {
+    let all = [];
+
+    for (let s of saudi) {
+      let q = await getSA(s);
+      if (!q) continue;
+      let a = analyze(q.price, q.prev, s);
+      if (!a) continue;
+      all.push({ name:s, symbol:s, market:"🇸🇦 السوق السعودي", price:q.price, ...a });
+    }
+
+    let us = await getUSSymbols();
+    for (let s of us.slice(0,50)) {
+      if (!s.symbol) continue;
+      let q = await getQuote(s.symbol);
+      if (!q) continue;
+      let a = analyze(q.price, q.prev, s.symbol);
+      if (!a) continue;
+      all.push({ name:s.symbol, symbol:s.symbol, market:"🇺🇸 السوق الأمريكي", price:q.price, ...a });
+    }
+
+    let crypto = await getCryptoSymbols();
+    for (let c of crypto.slice(0,40)) {
+      if (!c.symbol) continue;
+      let q = await getQuote(c.symbol);
+      if (!q) continue;
+      let a = analyze(q.price, q.prev, c.symbol);
+      if (!a) continue;
+      all.push({ name:c.displaySymbol || c.symbol, symbol:c.symbol, market:"💰 العملات الرقمية", price:q.price, ...a });
+    }
+
+    for (let s of all) {
+      await safeSend(chatId, s.symbol, format(s));
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+  } catch (e) {
+    console.log("ERROR:", e.message);
+  }
+
+  running = false;
+}
+
+// 💀 تشغيل دائم
+setInterval(run, 60000);
+
+app.listen(3000, () => {
+  console.log("🔥 AI PRO MAX ELITE ULTIMATE RUNNING");
+});
