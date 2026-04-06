@@ -16,8 +16,8 @@ const bot = new TelegramBot(TOKEN, {
   }
 });
 
-// 🔑 API 
-const API_KEY = "d7a0311r01qspme6c44gd7a0311r01qspme6c450";
+// 🔑 API
+const API_KEY = "d75o0l1r01qk56kdfon0d75o0l1r01qk56kdfong";
 
 let chatId = null;
 let memory = {};
@@ -59,6 +59,7 @@ function analyze(price, prev, symbol) {
   let type = "🐠 مضاربين";
   let entry = "⏳ انتظر";
 
+  // 🧠 الذاكرة الذكية
   if (!memory[symbol]) {
     memory[symbol] = {
       price: price,
@@ -70,14 +71,26 @@ function analyze(price, prev, symbol) {
 
   let prevData = memory[symbol];
 
-  if (price < prevData.low) prevData.low = price;
-  if (price > prevData.high) prevData.high = price;
+  // تحديث القاع
+  if (price < prevData.low) {
+    prevData.low = price;
+  }
 
+  // تحديث القمة
+  if (price > prevData.high) {
+    prevData.high = price;
+  }
+
+  // 📉 نسبة الارتداد من القاع
   let fromLow = ((price - prevData.low) / prevData.low) * 100;
+
+  // 📈 كسر القمة
   let breakHigh = price > prevData.high * 0.995;
 
+  // 💹 السيولة
   let flow = price > prevData.price ? "💹 سيولة مستمرة" : "⚠️ ضعف السيولة";
 
+  // 🔥 تحليل الهوامير
   if (change > 3) {
     signal = "💰 دخول مؤسسات فعلي";
     emoji = "⚡️";
@@ -95,14 +108,17 @@ function analyze(price, prev, symbol) {
     type = "🦈 هوامير";
   }
 
+  // 💀 الدخول الذكي
   if (fromLow > 2 && fromLow < 6 && change > 0.5) {
     entry = "💀 دخول من القاع";
   }
 
+  // 🚀 انطلاقة قوية
   if (fromLow >= 6 && change > 2 && flow.includes("💹")) {
     entry = "🚀 انطلاق موجة قوية";
   }
 
+  // 🔥 أقوى إشارة (قاع + كسر + سيولة)
   if (fromLow > 3 && breakHigh && flow.includes("💹") && change > 2) {
     entry = "💀🔥 دخول احترافي مؤكد";
   }
@@ -126,6 +142,7 @@ function analyze(price, prev, symbol) {
   let tpStatus = tpRaw.map(v => price >= v);
   let sl = fix(price * 0.95);
 
+  // تحديث الذاكرة
   memory[symbol] = {
     price,
     low: prevData.low,
@@ -235,6 +252,7 @@ async function run() {
   try {
     let all = [];
 
+    // 🇸🇦
     for (let s of saudi) {
       let q = await getSA(s);
       if (!q) continue;
@@ -243,6 +261,7 @@ async function run() {
       all.push({ name:s, symbol:s, market:"🇸🇦 السوق السعودي", price:q.price, ...a });
     }
 
+    // 🇺🇸
     let us = await getUSSymbols();
     for (let s of us.slice(0,50)) {
       if (!s.symbol) continue;
@@ -253,6 +272,7 @@ async function run() {
       all.push({ name:s.symbol, symbol:s.symbol, market:"🇺🇸 السوق الأمريكي", price:q.price, ...a });
     }
 
+    // 💰
     let crypto = await getCryptoSymbols();
     for (let c of crypto.slice(0,40)) {
       if (!c.symbol) continue;
