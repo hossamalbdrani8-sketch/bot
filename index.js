@@ -4,7 +4,7 @@ import TelegramBot from "node-telegram-bot-api";
 const app = express();
 app.use(express.json());
 
-// 🔑 TOKEN
+// 🔑 TOKEN (كما هو)
 const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
 
 // 💀 اتصال قوي ثابت
@@ -16,7 +16,7 @@ const bot = new TelegramBot(TOKEN, {
   }
 });
 
-// 🔑 API
+// 🔑 API (تم تحديثه)
 const API_KEY = "d79vdtpr01qspme69nvgd79vdtpr01qspme69o00";
 
 let chatId = null;
@@ -78,7 +78,7 @@ function analyze(price, prev, symbol) {
 
   let flow = price > prevData.price ? "💹 سيولة مستمرة" : "⚠️ ضعف السيولة";
 
-  // 🔥 إشارات
+  // 🔥 تحليل
   if (change > 3) {
     signal = "💰 دخول مؤسسات فعلي";
     emoji = "⚡️";
@@ -96,25 +96,30 @@ function analyze(price, prev, symbol) {
     type = "🦈 هوامير";
   }
 
-  // 💀 دخول ذكي
+  // 💀 دخول
   if (fromLow > 2 && fromLow < 6 && change > 0.5) {
     entry = "💀 دخول من القاع";
   }
 
   if (fromLow >= 6 && change > 2 && flow.includes("💹")) {
-    entry = "🚀 انطلاق موجة";
+    entry = "🚀 انطلاق موجة قوية";
   }
 
   if (fromLow > 3 && breakHigh && flow.includes("💹") && change > 2) {
-    entry = "💀🔥 دخول احترافي";
+    entry = "💀🔥 دخول احترافي مؤكد";
   }
 
-  // 💀 القرار النهائي
+  // =======================
+  // 💀 القرار الذكي
+  // =======================
   if (type === "🦈 هوامير" && flow.includes("💹") && change > 2 && fromLow > 2) {
     decision = "💀 ادخل الآن بكامل السيولة";
   } 
-  else if (flow.includes("💹") && change > 1) {
+  else if (flow.includes("💹") && change > 1 && fromLow > 1) {
     decision = "⚠️ دخول جزئي";
+  } 
+  else {
+    decision = "❌ ممنوع الدخول";
   }
 
   function fix(n) {
@@ -248,48 +253,4 @@ async function run() {
     let all = [];
 
     for (let s of saudi) {
-      let q = await getSA(s);
-      if (!q) continue;
-      let a = analyze(q.price, q.prev, s);
-      if (!a) continue;
-      all.push({ name:s, symbol:s, market:"🇸🇦 السوق السعودي", price:q.price, ...a });
-    }
-
-    let us = await getUSSymbols();
-    for (let s of us.slice(0,50)) {
-      if (!s.symbol) continue;
-      let q = await getQuote(s.symbol);
-      if (!q) continue;
-      let a = analyze(q.price, q.prev, s.symbol);
-      if (!a) continue;
-      all.push({ name:s.symbol, symbol:s.symbol, market:"🇺🇸 السوق الأمريكي", price:q.price, ...a });
-    }
-
-    let crypto = await getCryptoSymbols();
-    for (let c of crypto.slice(0,40)) {
-      if (!c.symbol) continue;
-      let q = await getQuote(c.symbol);
-      if (!q) continue;
-      let a = analyze(q.price, q.prev, c.symbol);
-      if (!a) continue;
-      all.push({ name:c.displaySymbol || c.symbol, symbol:c.symbol, market:"💰 العملات الرقمية", price:q.price, ...a });
-    }
-
-    for (let s of all) {
-      await safeSend(chatId, s.symbol, format(s));
-      await new Promise(r => setTimeout(r, 200));
-    }
-
-  } catch (e) {
-    console.log("ERROR:", e.message);
-  }
-
-  running = false;
-}
-
-// 💀 تشغيل دائم
-setInterval(run, 60000);
-
-app.listen(3000, () => {
-  console.log("🔥 AI PRO MAX ELITE ULTIMATE RUNNING");
-});
+      let q = await get
