@@ -7,8 +7,7 @@ app.use(express.json());
 // 🔑 TOKEN
 const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
 
-     
-/اتصال قوي ثابت
+// 💀 اتصال قوي ثابت
 const bot = new TelegramBot(TOKEN, {
   polling: {
     interval: 300,
