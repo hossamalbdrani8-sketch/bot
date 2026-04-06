@@ -1,105 +1,99 @@
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
 
-const app = express(); 
+const app = express();
 app.use(express.json());
 
-// 🔑 TOKEN
+// 🔑 // 🔑 TOKEN
 const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
 const bot = new TelegramBot(TOKEN, { polling: true });
+con
+co
 
 // 🔑 API
 const API_KEY = "d75o0l1r01qk56kdfon0d75o0l1r01qk56kdfong";
 
 let chatId = null;
 
-// 🧠 تخزين البيانات السابقة (ذكاء)
+// 🧠 تخزين آخر سعر لكل سهم (لمتابعة الموجة)
 let memory = {};
 
 bot.on("message", (msg) => {
   chatId = msg.chat.id;
 
   if (msg.text === "/start") {
-    bot.sendMessage(chatId, "💀 AI PRO MAX ELITE MODE");
+    bot.sendMessage(chatId, "💀 AI PRO MAX (WAVE MODE)");
     run();
   }
 
   if (msg.text === "/scan") {
-    bot.sendMessage(chatId, "🚀 فحص السوق...");
+    bot.sendMessage(chatId, "🚀 تحليل الموجات...");
     run();
   }
 });
 
 // =======================
-function analyze(price, prev, symbol) {
-  if (!price || !prev || prev === 0 || price <= 0) return null;
+// 🧠 تحليل + موجات
+// =======================
+function analyze(symbol, price, prev) {
+  if (!price || !prev || prev === 0) return null;
 
   let change = ((price - prev) / prev) * 100;
 
   let signal = "⚪ محايد";
-  let emoji = "";
   let smart = "";
   let type = "🐠 مضاربين";
-  let entry = "⏳ انتظر";
 
-  // 🧠 تتبع السيولة
-  let prevData = memory[symbol] || {};
-  let flow = "";
+  if (change > 3) {
+    signal = "💰 دخول مؤسسات";
+    smart = "🔥 Smart Money";
+    type = "🦈 هوامير";
+  } else if (change < -3) {
+    signal = "🚨 تصريف";
+    type = "🦈 هوامير";
+  } else if (change > 1.5) {
+    signal = "🧠 تجميع";
+  }
 
-  if (prevData.price) {
-    if (price > prevData.price) {
-      flow = "💹 سيولة مستمرة";
-    } else {
-      flow = "⚠️ ضعف السيولة";
+  // 🧠 تحليل الموجة
+  let wave = "⚪ غير واضح";
+
+  if (!memory[symbol]) {
+    wave = "🚀 بداية موجة";
+  } else {
+    let last = memory[symbol];
+
+    if (price > last * 1.03) {
+      wave = "🔥 استمرار موجة";
+    } 
+    else if (price < last * 0.97) {
+      wave = "⚠️ قرب التصريف";
+    } 
+    else {
+      wave = "⏳ تذبذب";
     }
   }
 
-  memory[symbol] = { price };
-
-  // 🔥 تحليل ذكي
-  if (change > 3) {
-    signal = "💰 دخول مؤسسات فعلي";
-    emoji = "⚡️";
-    smart = "🔥 Smart Money";
-    type = "🦈 هوامير";
-    entry = "✅ دخول فعلي";
-  } 
-  else if (change > 1.5) {
-    signal = "🧠 تجميع صامت";
-    smart = "📈 Accumulation";
-    entry = "⏳ قرب الدخول";
-  } 
-  else if (change < -3) {
-    signal = "🚨 تصريف ذكي";
-    emoji = "⚡️";
-    smart = "📉 Distribution";
-    type = "🦈 هوامير";
-    entry = "❌ خروج";
-  }
+  memory[symbol] = price;
 
   function fix(n) {
     return Number(n).toFixed(price < 1 ? 6 : 2);
   }
 
-  let tpRaw = [
-    price * 1.02,
-    price * 1.04,
-    price * 1.06,
-    price * 1.08,
-    price * 1.10,
-    price * 1.12,
-    price * 1.15,
-    price * 1.18,
+  let tp = [
+    fix(price * 1.02),
+    fix(price * 1.04),
+    fix(price * 1.06),
+    fix(price * 1.08),
+    fix(price * 1.10),
+    fix(price * 1.12),
+    fix(price * 1.15),
+    fix(price * 1.18),
   ];
-
-  let tp = tpRaw.map(v => fix(v));
-
-  // ✅ تحقق الأهداف
-  let tpStatus = tpRaw.map(v => price >= v);
 
   let sl = fix(price * 0.95);
 
-  return { signal, tp, sl, emoji, change, smart, type, entry, flow, tpStatus };
+  return { signal, tp, sl, change, smart, type, wave };
 }
 
 // =======================
@@ -108,26 +102,24 @@ function format(s) {
 ${s.market}
 ${s.type}
 
-${s.emoji} ${s.name}
+${s.name}
 
 💰 ${Number(s.price).toFixed(s.price < 1 ? 6 : 2)}
 📊 ${s.signal} (${s.change.toFixed(2)}%)
 ${s.smart ? "🧠 " + s.smart : ""}
 
-🎯 TP1: ${s.tp[0]} ${s.tpStatus[0] ? "✅" : ""}
-🎯 TP2: ${s.tp[1]} ${s.tpStatus[1] ? "✅" : ""}
-🎯 TP3: ${s.tp[2]} ${s.tpStatus[2] ? "✅" : ""}
-🎯 TP4: ${s.tp[3]} ${s.tpStatus[3] ? "✅" : ""}
-🎯 TP5: ${s.tp[4]} ${s.tpStatus[4] ? "✅" : ""}
-🎯 TP6: ${s.tp[5]} ${s.tpStatus[5] ? "✅" : ""}
-🎯 TP7: ${s.tp[6]} ${s.tpStatus[6] ? "✅" : ""}
-🎯 TP8: ${s.tp[7]} ${s.tpStatus[7] ? "✅" : ""}
+🌊 ${s.wave}
+
+🎯 TP1: ${s.tp[0]}
+🎯 TP2: ${s.tp[1]}
+🎯 TP3: ${s.tp[2]}
+🎯 TP4: ${s.tp[3]}
+🎯 TP5: ${s.tp[4]}
+🎯 TP6: ${s.tp[5]}
+🎯 TP7: ${s.tp[6]}
+🎯 TP8: ${s.tp[7]}
 
 🛑 SL: ${s.sl}
-
-${s.entry}
-${s.flow}
-
 ━━━━━━━━━━━━`;
 }
 
@@ -136,67 +128,9 @@ async function getQuote(symbol) {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
     const data = await res.json();
-
     if (!data || !data.c || !data.pc) return null;
-
     return { price: data.c, prev: data.pc };
-  } catch {
-    return null;
-  }
-}
-
-async function getSA(symbol) {
-  try {
-    const res = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`);
-    const data = await res.json();
-
-    let p = data?.quoteResponse?.result?.[0];
-    if (!p) return null;
-
-    return {
-      price: p.regularMarketPrice,
-      prev: p.regularMarketPreviousClose
-    };
-  } catch {
-    return null;
-  }
-}
-
-// =======================
-async function getCryptoSymbols() {
-  try {
-    const res = await fetch(`https://finnhub.io/api/v1/crypto/symbol?exchange=BINANCE&token=${API_KEY}`);
-    return await res.json();
-  } catch {
-    return [];
-  }
-}
-
-// =======================
-function getLogo(symbol) {
-  return `https://logo.clearbit.com/${symbol.replace(".SR","").toLowerCase()}.com`;
-}
-
-async function safeSend(chatId, symbol, text) {
-  try {
-    await bot.sendPhoto(chatId, getLogo(symbol), { caption: text });
-  } catch {
-    await bot.sendMessage(chatId, text);
-  }
-}
-
-// =======================
-const saudi = [
-"2222.SR","1120.SR","2010.SR","7010.SR"
-];
-
-async function getUSSymbols() {
-  try {
-    const res = await fetch(`https://finnhub.io/api/v1/stock/symbol?exchange=US&token=${API_KEY}`);
-    return await res.json();
-  } catch {
-    return [];
-  }
+  } catch { return null; }
 }
 
 // =======================
@@ -208,51 +142,27 @@ async function run() {
 
   try {
 
-    let all = [];
+    let symbols = ["AAPL","TSLA","NVDA","META","AMD"];
 
-    for (let s of saudi) {
-      let q = await getSA(s);
+    for (let sym of symbols) {
+      let q = await getQuote(sym);
       if (!q) continue;
 
-      let a = analyze(q.price, q.prev, s);
+      let a = analyze(sym, q.price, q.prev);
       if (!a) continue;
 
-      all.push({ name:s, symbol:s, market:"🇸🇦 السوق السعودي", price:q.price, ...a });
-    }
+      await bot.sendMessage(chatId, format({
+        name:sym,
+        market:"🇺🇸 السوق الأمريكي",
+        price:q.price,
+        ...a
+      }));
 
-    let us = await getUSSymbols();
-    for (let s of us.slice(0,50)) {
-      if (!s.symbol) continue;
-
-      let q = await getQuote(s.symbol);
-      if (!q) continue;
-
-      let a = analyze(q.price, q.prev, s.symbol);
-      if (!a) continue;
-
-      all.push({ name:s.symbol, symbol:s.symbol, market:"🇺🇸 السوق الأمريكي", price:q.price, ...a });
-    }
-
-    let crypto = await getCryptoSymbols();
-    for (let c of crypto.slice(0,40)) {
-      if (!c.symbol) continue;
-
-      let q = await getQuote(c.symbol);
-      if (!q) continue;
-
-      let a = analyze(q.price, q.prev, c.symbol);
-      if (!a) continue;
-
-      all.push({ name:c.displaySymbol || c.symbol, symbol:c.symbol, market:"💰 العملات الرقمية", price:q.price, ...a });
-    }
-
-    for (let s of all) {
-      await safeSend(chatId, s.symbol, format(s));
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise(r => setTimeout(r, 300));
     }
 
   } catch (e) {
-    console.log("ERROR:", e.message);
+    console.log(e);
   }
 
   running = false;
@@ -261,5 +171,5 @@ async function run() {
 setInterval(run, 60000);
 
 app.listen(3000, () => {
-  console.log("🔥 AI PRO MAX ELITE RUNNING");
+  console.log("💀 WAVE MODE RUNNING");
 });
