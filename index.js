@@ -6,7 +6,7 @@ app.use(express.json());
 
 // 🔑 TOKEN
 const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
-const bot = new TelegramBot(TOKEN, { polling: true });
+
 
 
 // 💀 تحسين الاتصال (ما يفصل)
