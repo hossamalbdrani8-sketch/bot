@@ -4,7 +4,7 @@ import TelegramBot from "node-telegram-bot-api";
 const app = express();
 app.use(express.json());
 
-// 🔑 TOKEN 
+// 🔑 TOKEN
 const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
 
 // 💀 اتصال قوي ثابت
@@ -16,9 +16,8 @@ const bot = new TelegramBot(TOKEN, {
   }
 });
 
-// 🔑 API 
-const API_KEY = "d79vdtpr01qspme69nvgd79vdtpr01qspme69o00";
-
+// 🔑 API
+const API_KEY =  "d79vdtpr01qspme69nvgd79vdtpr01qspme69o00";
 let chatId = null;
 let memory = {};
 let running = false;
@@ -58,27 +57,39 @@ function analyze(price, prev, symbol) {
   let smart = "";
   let type = "🐠 مضاربين";
   let entry = "⏳ انتظر";
-  let decision = "❌ ممنوع الدخول";
 
+  // 🧠 الذاكرة الذكية
   if (!memory[symbol]) {
     memory[symbol] = {
       price: price,
       low: price,
-      high: price
+      high: price,
+      lastBreak: false
     };
   }
 
   let prevData = memory[symbol];
 
-  if (price < prevData.low) prevData.low = price;
-  if (price > prevData.high) prevData.high = price;
+  // تحديث القاع
+  if (price < prevData.low) {
+    prevData.low = price;
+  }
 
+  // تحديث القمة
+  if (price > prevData.high) {
+    prevData.high = price;
+  }
+
+  // 📉 نسبة الارتداد من القاع
   let fromLow = ((price - prevData.low) / prevData.low) * 100;
+
+  // 📈 كسر القمة
   let breakHigh = price > prevData.high * 0.995;
 
+  // 💹 السيولة
   let flow = price > prevData.price ? "💹 سيولة مستمرة" : "⚠️ ضعف السيولة";
 
-  // 🔥 تحليل
+  // 🔥 تحليل الهوامير
   if (change > 3) {
     signal = "💰 دخول مؤسسات فعلي";
     emoji = "⚡️";
@@ -96,30 +107,19 @@ function analyze(price, prev, symbol) {
     type = "🦈 هوامير";
   }
 
-  // 💀 دخول
+  // 💀 الدخول الذكي
   if (fromLow > 2 && fromLow < 6 && change > 0.5) {
     entry = "💀 دخول من القاع";
   }
 
+  // 🚀 انطلاقة قوية
   if (fromLow >= 6 && change > 2 && flow.includes("💹")) {
     entry = "🚀 انطلاق موجة قوية";
   }
 
+  // 🔥 أقوى إشارة (قاع + كسر + سيولة)
   if (fromLow > 3 && breakHigh && flow.includes("💹") && change > 2) {
     entry = "💀🔥 دخول احترافي مؤكد";
-  }
-
-  // =======================
-  // 💀 القرار الذكي
-  // =======================
-  if (type === "🦈 هوامير" && flow.includes("💹") && change > 2 && fromLow > 2) {
-    decision = "💀 ادخل الآن بكامل السيولة";
-  } 
-  else if (flow.includes("💹") && change > 1 && fromLow > 1) {
-    decision = "⚠️ دخول جزئي";
-  } 
-  else {
-    decision = "❌ ممنوع الدخول";
   }
 
   function fix(n) {
@@ -141,15 +141,16 @@ function analyze(price, prev, symbol) {
   let tpStatus = tpRaw.map(v => price >= v);
   let sl = fix(price * 0.95);
 
+  // تحديث الذاكرة
   memory[symbol] = {
     price,
     low: prevData.low,
-    high: prevData.high
+    high: price > prevData.high ? price : prevData.high
   };
 
   return {
     signal, tp, sl, emoji, change, smart,
-    type, entry, flow, tpStatus, fromLow, decision
+    type, entry, flow, tpStatus, fromLow
   };
 }
 
@@ -180,8 +181,6 @@ ${s.smart ? "🧠 " + s.smart : ""}
 
 ${s.entry}
 ${s.flow}
-
-${s.decision} 💀
 
 ━━━━━━━━━━━━`;
 }
@@ -252,5 +251,52 @@ async function run() {
   try {
     let all = [];
 
+    // 🇸🇦
     for (let s of saudi) {
-      let q = await get
+      let q = await getSA(s);
+      if (!q) continue;
+      let a = analyze(q.price, q.prev, s);
+      if (!a) continue;
+      all.push({ name:s, symbol:s, market:"🇸🇦 السوق السعودي", price:q.price, ...a });
+    }
+
+    // 🇺🇸
+    let us = await getUSSymbols();
+    for (let s of us.slice(0,50)) {
+      if (!s.symbol) continue;
+      let q = await getQuote(s.symbol);
+      if (!q) continue;
+      let a = analyze(q.price, q.prev, s.symbol);
+      if (!a) continue;
+      all.push({ name:s.symbol, symbol:s.symbol, market:"🇺🇸 السوق الأمريكي", price:q.price, ...a });
+    }
+
+    // 💰
+    let crypto = await getCryptoSymbols();
+    for (let c of crypto.slice(0,40)) {
+      if (!c.symbol) continue;
+      let q = await getQuote(c.symbol);
+      if (!q) continue;
+      let a = analyze(q.price, q.prev, c.symbol);
+      if (!a) continue;
+      all.push({ name:c.displaySymbol || c.symbol, symbol:c.symbol, market:"💰 العملات الرقمية", price:q.price, ...a });
+    }
+
+    for (let s of all) {
+      await safeSend(chatId, s.symbol, format(s));
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+  } catch (e) {
+    console.log("ERROR:", e.message);
+  }
+
+  running = false;
+}
+
+// 💀 تشغيل دائم
+setInterval(run, 60000);
+
+app.listen(3000, () => {
+  console.log("🔥 AI PRO MAX ELITE ULTIMATE RUNNING");
+});
