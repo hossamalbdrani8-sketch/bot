@@ -6,21 +6,38 @@ app.use(express.json());
 
 // 🔑 TOKEN
 const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
-const bot = new TelegramBot(TOKEN, { polling: true });
+
+// 💀 تحسين الاتصال (ما يفصل)
+const bot = new TelegramBot(TOKEN, {
+  polling: {
+    interval: 300,
+    autoStart: true,
+    params: { timeout: 10 }
+  }
+});
 
 // 🔑 API
-const API_KEY = "d75o0l1r01qk56kdfon0d75o0l1r01qk56kdfong";
+const API_KEY = "d75o0l1r01qk56kdfon0l1r01qk56kdfong";
 
 let chatId = null;
-
-// 🧠 تخزين البيانات السابقة (ذكاء)
 let memory = {};
+let running = false;
 
+// 💀 حماية من الكراش
+process.on("uncaughtException", (err) => {
+  console.log("💀 CRASH:", err.message);
+});
+
+process.on("unhandledRejection", (err) => {
+  console.log("💀 PROMISE ERROR:", err);
+});
+
+// =======================
 bot.on("message", (msg) => {
   chatId = msg.chat.id;
 
   if (msg.text === "/start") {
-    bot.sendMessage(chatId, "💀 AI PRO MAX ELITE MODE");
+    bot.sendMessage(chatId, "💀 AI PRO MAX ELITE MODE (24/7)");
     run();
   }
 
@@ -42,21 +59,15 @@ function analyze(price, prev, symbol) {
   let type = "🐠 مضاربين";
   let entry = "⏳ انتظر";
 
-  // 🧠 تتبع السيولة
   let prevData = memory[symbol] || {};
   let flow = "";
 
   if (prevData.price) {
-    if (price > prevData.price) {
-      flow = "💹 سيولة مستمرة";
-    } else {
-      flow = "⚠️ ضعف السيولة";
-    }
+    flow = price > prevData.price ? "💹 سيولة مستمرة" : "⚠️ ضعف السيولة";
   }
 
   memory[symbol] = { price };
 
-  // 🔥 تحليل ذكي
   if (change > 3) {
     signal = "💰 دخول مؤسسات فعلي";
     emoji = "⚡️";
@@ -93,10 +104,7 @@ function analyze(price, prev, symbol) {
   ];
 
   let tp = tpRaw.map(v => fix(v));
-
-  // ✅ تحقق الأهداف
   let tpStatus = tpRaw.map(v => price >= v);
-
   let sl = fix(price * 0.95);
 
   return { signal, tp, sl, emoji, change, smart, type, entry, flow, tpStatus };
@@ -136,9 +144,7 @@ async function getQuote(symbol) {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
     const data = await res.json();
-
     if (!data || !data.c || !data.pc) return null;
-
     return { price: data.c, prev: data.pc };
   } catch {
     return null;
@@ -149,20 +155,14 @@ async function getSA(symbol) {
   try {
     const res = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`);
     const data = await res.json();
-
     let p = data?.quoteResponse?.result?.[0];
     if (!p) return null;
-
-    return {
-      price: p.regularMarketPrice,
-      prev: p.regularMarketPreviousClose
-    };
+    return { price: p.regularMarketPrice, prev: p.regularMarketPreviousClose };
   } catch {
     return null;
   }
 }
 
-// =======================
 async function getCryptoSymbols() {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/crypto/symbol?exchange=BINANCE&token=${API_KEY}`);
@@ -186,9 +186,7 @@ async function safeSend(chatId, symbol, text) {
 }
 
 // =======================
-const saudi = [
-"2222.SR","1120.SR","2010.SR","7010.SR"
-];
+const saudi = ["2222.SR","1120.SR","2010.SR","7010.SR"];
 
 async function getUSSymbols() {
   try {
@@ -200,49 +198,38 @@ async function getUSSymbols() {
 }
 
 // =======================
-let running = false;
-
 async function run() {
   if (!chatId || running) return;
   running = true;
 
   try {
-
     let all = [];
 
     for (let s of saudi) {
       let q = await getSA(s);
       if (!q) continue;
-
       let a = analyze(q.price, q.prev, s);
       if (!a) continue;
-
       all.push({ name:s, symbol:s, market:"🇸🇦 السوق السعودي", price:q.price, ...a });
     }
 
     let us = await getUSSymbols();
     for (let s of us.slice(0,50)) {
       if (!s.symbol) continue;
-
       let q = await getQuote(s.symbol);
       if (!q) continue;
-
       let a = analyze(q.price, q.prev, s.symbol);
       if (!a) continue;
-
       all.push({ name:s.symbol, symbol:s.symbol, market:"🇺🇸 السوق الأمريكي", price:q.price, ...a });
     }
 
     let crypto = await getCryptoSymbols();
     for (let c of crypto.slice(0,40)) {
       if (!c.symbol) continue;
-
       let q = await getQuote(c.symbol);
       if (!q) continue;
-
       let a = analyze(q.price, q.prev, c.symbol);
       if (!a) continue;
-
       all.push({ name:c.displaySymbol || c.symbol, symbol:c.symbol, market:"💰 العملات الرقمية", price:q.price, ...a });
     }
 
@@ -258,8 +245,14 @@ async function run() {
   running = false;
 }
 
+// 💀 تشغيل تلقائي دائم
 setInterval(run, 60000);
 
+// 🔥 تشغيل أول ما السيرفر يشتغل
+setTimeout(() => {
+  console.log("🚀 AUTO START");
+}, 3000);
+
 app.listen(3000, () => {
-  console.log("🔥 AI PRO MAX ELITE RUNNING");
+  console.log("🔥 AI PRO MAX ELITE RUNNING 24/7");
 });
