@@ -4,7 +4,6 @@ import TelegramBot from "node-telegram-bot-api";
 const app = express();
 app.use(express.json());
 
-
 // 🔑 TOKEN
 const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
 
@@ -18,8 +17,8 @@ const bot = new TelegramBot(TOKEN, {
 });
 
 // 🔑 API
-const "d7a0311r01qspme6c44gd7a0311r01qspme6c450";
-// 💀 مهم جدا
+const API_KEY = "d75o0l1r01qk56kdfon0d75o0l1r01qk56kdfong";
+
 let chatId = null;
 let memory = {};
 let running = false;
@@ -60,46 +59,66 @@ function analyze(price, prev, symbol) {
   let type = "🐠 مضاربين";
   let entry = "⏳ انتظر";
 
+  // 🧠 الذاكرة الذكية
   if (!memory[symbol]) {
     memory[symbol] = {
-      price,
+      price: price,
       low: price,
-      high: price
+      high: price,
+      lastBreak: false
     };
   }
 
   let prevData = memory[symbol];
 
-  if (price < prevData.low) prevData.low = price;
-  if (price > prevData.high) prevData.high = price;
+  // تحديث القاع
+  if (price < prevData.low) {
+    prevData.low = price;
+  }
 
+  // تحديث القمة
+  if (price > prevData.high) {
+    prevData.high = price;
+  }
+
+  // 📉 نسبة الارتداد من القاع
   let fromLow = ((price - prevData.low) / prevData.low) * 100;
+
+  // 📈 كسر القمة
   let breakHigh = price > prevData.high * 0.995;
+
+  // 💹 السيولة
   let flow = price > prevData.price ? "💹 سيولة مستمرة" : "⚠️ ضعف السيولة";
 
+  // 🔥 تحليل الهوامير
   if (change > 3) {
     signal = "💰 دخول مؤسسات فعلي";
     emoji = "⚡️";
     smart = "🔥 Smart Money";
     type = "🦈 هوامير";
-  } else if (change > 1.5) {
+  } 
+  else if (change > 1.5) {
     signal = "🧠 تجميع صامت";
     smart = "📈 Accumulation";
-  } else if (change < -3) {
+  } 
+  else if (change < -3) {
     signal = "🚨 تصريف ذكي";
     emoji = "⚡️";
     smart = "📉 Distribution";
     type = "🦈 هوامير";
   }
 
+  // 💀 الدخول الذكي
   if (fromLow > 2 && fromLow < 6 && change > 0.5) {
     entry = "💀 دخول من القاع";
   }
 
+  // 🚀 انطلاقة قوية
   if (fromLow >= 6 && change > 2 && flow.includes("💹")) {
     entry = "🚀 انطلاق موجة قوية";
   }
 
+  // 🔥 أقوى إشارة (قاع + كسر + سيولة)
   if (fromLow > 3 && breakHigh && flow.includes("💹") && change > 2) {
     entry = "💀🔥 دخول احترافي مؤكد";
   }
@@ -119,14 +138,15 @@ function analyze(price, prev, symbol) {
     price * 1.18,
   ];
 
-  let tp = tpRaw.map(fix);
+  let tp = tpRaw.map(v => fix(v));
   let tpStatus = tpRaw.map(v => price >= v);
   let sl = fix(price * 0.95);
 
+  // تحديث الذاكرة
   memory[symbol] = {
     price,
     low: prevData.low,
-    high: prevData.high
+    high: price > prevData.high ? price : prevData.high
   };
 
   return {
@@ -178,30 +198,94 @@ async function getQuote(symbol) {
   }
 }
 
+async function getSA(symbol) {
+  try {
+    const res = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`);
+    const data = await res.json();
+    let p = data?.quoteResponse?.result?.[0];
+    if (!p) return null;
+    return { price: p.regularMarketPrice, prev: p.regularMarketPreviousClose };
+  } catch {
+    return null;
+  }
+}
+
+async function getCryptoSymbols() {
+  try {
+    const res = await fetch(`https://finnhub.io/api/v1/crypto/symbol?exchange=BINANCE&token=${API_KEY}`);
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+// =======================
+function getLogo(symbol) {
+  return `https://logo.clearbit.com/${symbol.replace(".SR","").toLowerCase()}.com`;
+}
+
+async function safeSend(chatId, symbol, text) {
+  try {
+    await bot.sendPhoto(chatId, getLogo(symbol), { caption: text });
+  } catch {
+    await bot.sendMessage(chatId, text);
+  }
+}
+
+// =======================
+const saudi = ["2222.SR","1120.SR","2010.SR","7010.SR"];
+
+async function getUSSymbols() {
+  try {
+    const res = await fetch(`https://finnhub.io/api/v1/stock/symbol?exchange=US&token=${API_KEY}`);
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
 // =======================
 async function run() {
-  if (running) return; // 💀 بدون chatId شرط
+  if (!chatId || running) return;
   running = true;
 
   try {
-    let symbols = ["AAPL","TSLA","NVDA","AMD","META"];
+    let all = [];
 
-    for (let sym of symbols) {
-      let q = await getQuote(sym);
+    // 🇸🇦
+    for (let s of saudi) {
+      let q = await getSA(s);
       if (!q) continue;
-
-      let a = analyze(q.price, q.prev, sym);
+      let a = analyze(q.price, q.prev, s);
       if (!a) continue;
+      all.push({ name:s, symbol:s, market:"🇸🇦 السوق السعودي", price:q.price, ...a });
+    }
 
-      if (chatId) {
-        await bot.sendMessage(chatId, format({
-          name: sym,
-          symbol: sym,
-          market: "🇺🇸 السوق الأمريكي",
-          price: q.price,
-          ...a
-        }));
-      }
+    // 🇺🇸
+    let us = await getUSSymbols();
+    for (let s of us.slice(0,50)) {
+      if (!s.symbol) continue;
+      let q = await getQuote(s.symbol);
+      if (!q) continue;
+      let a = analyze(q.price, q.prev, s.symbol);
+      if (!a) continue;
+      all.push({ name:s.symbol, symbol:s.symbol, market:"🇺🇸 السوق الأمريكي", price:q.price, ...a });
+    }
+
+    // 💰
+    let crypto = await getCryptoSymbols();
+    for (let c of crypto.slice(0,40)) {
+      if (!c.symbol) continue;
+      let q = await getQuote(c.symbol);
+      if (!q) continue;
+      let a = analyze(q.price, q.prev, c.symbol);
+      if (!a) continue;
+      all.push({ name:c.displaySymbol || c.symbol, symbol:c.symbol, market:"💰 العملات الرقمية", price:q.price, ...a });
+    }
+
+    for (let s of all) {
+      await safeSend(chatId, s.symbol, format(s));
+      await new Promise(r => setTimeout(r, 200));
     }
 
   } catch (e) {
@@ -214,12 +298,6 @@ async function run() {
 // 💀 تشغيل دائم
 setInterval(run, 60000);
 
-// 💀 تشغيل تلقائي
-setTimeout(() => {
-  console.log("🚀 AUTO START");
-  run();
-}, 5000);
-
 app.listen(3000, () => {
-  console.log("🔥 AI PRO MAX ELITE RUNNING 24/7");
+  console.log("🔥 AI PRO MAX ELITE ULTIMATE RUNNING");
 });
