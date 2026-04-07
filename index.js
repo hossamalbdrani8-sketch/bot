@@ -19,7 +19,7 @@ const bot = new TelegramBot(TOKEN, {
 
 // 🔑 API
 const "d7a0311r01qspme6c44gd7a0311r01qspme6c450";
-
+// 💀 مهم جدا
 let chatId = null;
 let memory = {};
 let running = false;
