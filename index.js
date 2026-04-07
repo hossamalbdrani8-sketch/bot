@@ -59,68 +59,71 @@ function analyze(price, prev, symbol) {
   let type = "🐠 مضاربين";
   let entry = "⏳ انتظر";
 
-  // 🧠 الذاكرة الذكية
   if (!memory[symbol]) {
     memory[symbol] = {
       price: price,
       low: price,
       high: price,
-      lastBreak: false
+      momentum: 0
     };
   }
 
   let prevData = memory[symbol];
 
-  // تحديث القاع
-  if (price < prevData.low) {
-    prevData.low = price;
-  }
+  if (price < prevData.low) prevData.low = price;
+  if (price > prevData.high) prevData.high = price;
 
-  // تحديث القمة
-  if (price > prevData.high) {
-    prevData.high = price;
-  }
-
-  // 📉 نسبة الارتداد من القاع
   let fromLow = ((price - prevData.low) / prevData.low) * 100;
+  let momentum = price - prevData.price;
 
-  // 📈 كسر القمة
-  let breakHigh = price > prevData.high * 0.995;
+  // 💀 السيولة المتقدمة
+  let flow = "⚠️ ضعف السيولة";
 
-  // 💹 السيولة
-  let flow = price > prevData.price ? "💹 سيولة مستمرة" : "⚠️ ضعف السيولة";
+  if (momentum > 0 && change > 0.5) {
+    flow = "💹 سيولة مستمرة";
+  }
 
-  // 🔥 تحليل الهوامير
-  if (change > 3) {
-    signal = "💰 دخول مؤسسات فعلي";
-    emoji = "⚡️";
-    smart = "🔥 Smart Money";
+  if (momentum > 0.5 && change > 1.5) {
+    flow = "🔥💹 سيولة قوية";
+  }
+
+  if (momentum > 1 && change > 2.5) {
+    flow = "💀🚀 سيولة انفجار";
+  }
+
+  // 💀 الهوامير
+  if (change > 4) {
+    signal = "💀🚀 دخول مؤسسات ضخم";
+    emoji = "🔥";
+    smart = "💀 Smart Money ELITE";
     type = "🦈 هوامير";
   } 
-  else if (change > 1.5) {
-    signal = "🧠 تجميع صامت";
-    smart = "📈 Accumulation";
+  else if (change > 2) {
+    signal = "🔥 تجميع قوي";
+    smart = "📈 Accumulation PRO";
   } 
-  else if (change < -3) {
-    signal = "🚨 تصريف ذكي";
+  else if (change < -4) {
+    signal = "🚨 تصريف عنيف";
     emoji = "⚡️";
     smart = "📉 Distribution";
     type = "🦈 هوامير";
   }
 
-  // 💀 الدخول الذكي
-  if (fromLow > 2 && fromLow < 6 && change > 0.5) {
-    entry = "💀 دخول من القاع";
+  // 💀 الدخول
+  if (fromLow > 1.5 && change > 0.3 && momentum > 0) {
+    entry = "⚡️ دخول مبكر";
   }
 
-  // 🚀 انطلاقة قوية
-  if (fromLow >= 6 && change > 2 && flow.includes("💹")) {
-    entry = "🚀 انطلاق موجة قوية";
+  if (fromLow > 2 && change > 1) {
+    entry = "💀 دخول ذكي";
   }
 
-  // 🔥 أقوى إشارة (قاع + كسر + سيولة)
-  if (fromLow > 3 && breakHigh && flow.includes("💹") && change > 2) {
-    entry = "💀🔥 دخول احترافي مؤكد";
+  if (fromLow > 3 && change > 2 && flow.includes("💹")) {
+    entry = "💀🔥 دخول احترافي";
+  }
+
+  if (fromLow > 4 && change > 3 && flow.includes("💀")) {
+    entry = "💀🚀 ELITE (انفجار حقيقي)";
   }
 
   function fix(n) {
@@ -142,11 +145,11 @@ function analyze(price, prev, symbol) {
   let tpStatus = tpRaw.map(v => price >= v);
   let sl = fix(price * 0.95);
 
-  // تحديث الذاكرة
   memory[symbol] = {
     price,
     low: prevData.low,
-    high: price > prevData.high ? price : prevData.high
+    high: prevData.high,
+    momentum
   };
 
   return {
@@ -252,7 +255,6 @@ async function run() {
   try {
     let all = [];
 
-    // 🇸🇦
     for (let s of saudi) {
       let q = await getSA(s);
       if (!q) continue;
@@ -261,7 +263,6 @@ async function run() {
       all.push({ name:s, symbol:s, market:"🇸🇦 السوق السعودي", price:q.price, ...a });
     }
 
-    // 🇺🇸
     let us = await getUSSymbols();
     for (let s of us.slice(0,50)) {
       if (!s.symbol) continue;
@@ -272,7 +273,6 @@ async function run() {
       all.push({ name:s.symbol, symbol:s.symbol, market:"🇺🇸 السوق الأمريكي", price:q.price, ...a });
     }
 
-    // 💰
     let crypto = await getCryptoSymbols();
     for (let c of crypto.slice(0,40)) {
       if (!c.symbol) continue;
