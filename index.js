@@ -76,22 +76,12 @@ function analyze(price, prev, symbol) {
   let fromLow = ((price - prevData.low) / prevData.low) * 100;
   let momentum = price - prevData.price;
 
-  // 💀 السيولة المتقدمة
   let flow = "⚠️ ضعف السيولة";
 
-  if (momentum > 0 && change > 0.5) {
-    flow = "💹 سيولة مستمرة";
-  }
+  if (momentum > 0 && change > 0.5) flow = "💹 سيولة مستمرة";
+  if (momentum > 0.5 && change > 1.5) flow = "🔥💹 سيولة قوية";
+  if (momentum > 1 && change > 2.5) flow = "💀🚀 سيولة انفجار";
 
-  if (momentum > 0.5 && change > 1.5) {
-    flow = "🔥💹 سيولة قوية";
-  }
-
-  if (momentum > 1 && change > 2.5) {
-    flow = "💀🚀 سيولة انفجار";
-  }
-
-  // 💀 الهوامير
   if (change > 4) {
     signal = "💀🚀 دخول مؤسسات ضخم";
     emoji = "🔥";
@@ -109,36 +99,18 @@ function analyze(price, prev, symbol) {
     type = "🦈 هوامير";
   }
 
-  // 💀 الدخول
-  if (fromLow > 1.5 && change > 0.3 && momentum > 0) {
-    entry = "⚡️ دخول مبكر";
-  }
-
-  if (fromLow > 2 && change > 1) {
-    entry = "💀 دخول ذكي";
-  }
-
-  if (fromLow > 3 && change > 2 && flow.includes("💹")) {
-    entry = "💀🔥 دخول احترافي";
-  }
-
-  if (fromLow > 4 && change > 3 && flow.includes("💀")) {
-    entry = "💀🚀 ELITE (انفجار حقيقي)";
-  }
+  if (fromLow > 1.5 && change > 0.3 && momentum > 0) entry = "⚡️ دخول مبكر";
+  if (fromLow > 2 && change > 1) entry = "💀 دخول ذكي";
+  if (fromLow > 3 && change > 2 && flow.includes("💹")) entry = "💀🔥 دخول احترافي";
+  if (fromLow > 4 && change > 3 && flow.includes("💀")) entry = "💀🚀 ELITE (انفجار حقيقي)";
 
   function fix(n) {
     return Number(n).toFixed(price < 1 ? 6 : 2);
   }
 
   let tpRaw = [
-    price * 1.02,
-    price * 1.04,
-    price * 1.06,
-    price * 1.08,
-    price * 1.10,
-    price * 1.12,
-    price * 1.15,
-    price * 1.18,
+    price * 1.02, price * 1.04, price * 1.06, price * 1.08,
+    price * 1.10, price * 1.12, price * 1.15, price * 1.18,
   ];
 
   let tp = tpRaw.map(v => fix(v));
@@ -222,7 +194,6 @@ async function getCryptoSymbols() {
   }
 }
 
-// =======================
 function getLogo(symbol) {
   return `https://logo.clearbit.com/${symbol.replace(".SR","").toLowerCase()}.com`;
 }
@@ -255,6 +226,7 @@ async function run() {
   try {
     let all = [];
 
+    // 🇸🇦
     for (let s of saudi) {
       let q = await getSA(s);
       if (!q) continue;
@@ -263,16 +235,36 @@ async function run() {
       all.push({ name:s, symbol:s, market:"🇸🇦 السوق السعودي", price:q.price, ...a });
     }
 
+    // 🇺🇸 السوق كامل (💀 دفعات)
     let us = await getUSSymbols();
-    for (let s of us.slice(0,50)) {
-      if (!s.symbol) continue;
-      let q = await getQuote(s.symbol);
-      if (!q) continue;
-      let a = analyze(q.price, q.prev, s.symbol);
-      if (!a) continue;
-      all.push({ name:s.symbol, symbol:s.symbol, market:"🇺🇸 السوق الأمريكي", price:q.price, ...a });
+    let chunkSize = 200;
+
+    for (let i = 0; i < us.length; i += chunkSize) {
+
+      let chunk = us.slice(i, i + chunkSize);
+
+      for (let s of chunk) {
+        if (!s.symbol) continue;
+
+        let q = await getQuote(s.symbol);
+        if (!q) continue;
+
+        let a = analyze(q.price, q.prev, s.symbol);
+        if (!a) continue;
+
+        all.push({
+          name: s.symbol,
+          symbol: s.symbol,
+          market:"🇺🇸 السوق الأمريكي",
+          price:q.price,
+          ...a
+        });
+      }
+
+      await new Promise(r => setTimeout(r, 1000));
     }
 
+    // 💰
     let crypto = await getCryptoSymbols();
     for (let c of crypto.slice(0,40)) {
       if (!c.symbol) continue;
