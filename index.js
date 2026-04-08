@@ -116,7 +116,10 @@ function analyze(price, prev, symbol) {
   ];
 
   let tp = tpRaw.map(fix);
-  let tpStatus = tpRaw.map(v => price >= v);
+
+  // 💀🔥 التعديل الوحيد هنا (TP جبار)
+  let tpStatus = tpRaw.map(v => price >= v * 0.995);
+
   let sl = fix(price * 0.95);
 
   memory[symbol] = {
