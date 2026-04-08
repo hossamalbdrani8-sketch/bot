@@ -22,12 +22,12 @@ const API_KEY = "d7a0311r01qspme6c44gd7a0311r01qspme6c450";
 let chatId = null;
 let memory = {};
 let running = false;
+let lastData = {}; // 💀 كاش
 
 // 💀 حماية
 process.on("uncaughtException", (err) => {
   console.log("💀 CRASH:", err.message);
 });
-
 process.on("unhandledRejection", (err) => {
   console.log("💀 PROMISE ERROR:", err);
 });
@@ -58,15 +58,10 @@ function analyze(price, prev, symbol) {
   let smart = "";
   let type = "🐠 مضاربين";
   let entry = "⏳ انتظر";
-  let alert = ""; // 🔥 مضاف فقط
+  let alert = "";
 
   if (!memory[symbol]) {
-    memory[symbol] = {
-      price,
-      low: price,
-      high: price,
-      momentum: 0
-    };
+    memory[symbol] = { price, low: price, high: price, momentum: 0 };
   }
 
   let prevData = memory[symbol];
@@ -82,14 +77,12 @@ function analyze(price, prev, symbol) {
   if (momentum > 0.5 && change > 1.5) flow = "🔥💹 سيولة قوية";
   if (momentum > 1 && change > 2.5) flow = "💀🚀 سيولة انفجار";
 
-  // 🔥 المضاف فقط
   if (momentum > 0.4 && change > 1 && fromLow > 2) {
     alert = "⚠️💀 تنبيه قبل الانفجار";
   }
   if (momentum > 1 && change > 2.5 && fromLow > 3) {
     alert = "💀🚀 تأكيد انفجار";
   }
-  // =======================
 
   if (change > 4) {
     signal = "💀🚀 دخول مؤسسات ضخم";
@@ -150,14 +143,14 @@ ${s.emoji} ${s.name}
 📊 ${s.signal} (${s.change.toFixed(2)}%)
 ${s.smart ? "🧠 " + s.smart : ""}
 
-🎯 TP1: ${s.tp[0]}
-🎯 TP2: ${s.tp[1]}
-🎯 TP3: ${s.tp[2]}
-🎯 TP4: ${s.tp[3]}
-🎯 TP5: ${s.tp[4]}
-🎯 TP6: ${s.tp[5]}
-🎯 TP7: ${s.tp[6]}
-🎯 TP8: ${s.tp[7]}
+🎯 TP1: ${s.tp[0]} ${s.tpStatus[0] ? "✅" : ""}
+🎯 TP2: ${s.tp[1]} ${s.tpStatus[1] ? "✅" : ""}
+🎯 TP3: ${s.tp[2]} ${s.tpStatus[2] ? "✅" : ""}
+🎯 TP4: ${s.tp[3]} ${s.tpStatus[3] ? "✅" : ""}
+🎯 TP5: ${s.tp[4]} ${s.tpStatus[4] ? "✅" : ""}
+🎯 TP6: ${s.tp[5]} ${s.tpStatus[5] ? "✅" : ""}
+🎯 TP7: ${s.tp[6]} ${s.tpStatus[6] ? "✅" : ""}
+🎯 TP8: ${s.tp[7]} ${s.tpStatus[7] ? "✅" : ""}
 
 🛑 SL: ${s.sl}
 
@@ -169,25 +162,43 @@ ${s.alert ? "🚨 " + s.alert : ""}
 }
 
 // =======================
+// 💀 API مع كاش
 async function getQuote(symbol) {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
     const data = await res.json();
-    if (!data?.c || !data?.pc) return null;
-    return { price: data.c, prev: data.pc };
-  } catch { return null; }
+
+    if (!data?.c || !data?.pc) throw "no data";
+
+    lastData[symbol] = { price: data.c, prev: data.pc };
+    return lastData[symbol];
+
+  } catch {
+    return lastData[symbol] || null;
+  }
 }
 
 async function getSA(symbol) {
   try {
     const res = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`);
     const data = await res.json();
+
     let p = data?.quoteResponse?.result?.[0];
-    if (!p) return null;
-    return { price: p.regularMarketPrice, prev: p.regularMarketPreviousClose };
-  } catch { return null; }
+    if (!p) throw "no data";
+
+    lastData[symbol] = {
+      price: p.regularMarketPrice,
+      prev: p.regularMarketPreviousClose
+    };
+
+    return lastData[symbol];
+
+  } catch {
+    return lastData[symbol] || null;
+  }
 }
 
+// =======================
 async function getCryptoSymbols() {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/crypto/symbol?exchange=BINANCE&token=${API_KEY}`);
@@ -222,12 +233,14 @@ async function run() {
   if (!chatId || running) return;
   running = true;
 
+  let start = Date.now();
+
   try {
 
-    // 🇸🇦
     for (let s of saudi) {
       let q = await getSA(s);
       if (!q) continue;
+
       let a = analyze(q.price, q.prev, s);
       if (!a) continue;
 
@@ -236,11 +249,13 @@ async function run() {
       }));
     }
 
-    // 🇺🇸 كامل السوق بدون تعليق 💀
     let us = await getUSSymbols();
     let chunkSize = 200;
 
     for (let i = 0; i < us.length; i += chunkSize) {
+
+      if (Date.now() - start > 55000) break;
+
       let chunk = us.slice(i, i + chunkSize);
 
       for (let s of chunk) {
@@ -260,13 +275,12 @@ async function run() {
           ...a
         }));
 
-        await new Promise(r => setTimeout(r, 25));
+        await new Promise(r => setTimeout(r, 20));
       }
 
-      await new Promise(r => setTimeout(r, 300));
+      await new Promise(r => setTimeout(r, 200));
     }
 
-    // 💰
     let crypto = await getCryptoSymbols();
     for (let c of crypto.slice(0,40)) {
       if (!c.symbol) continue;
