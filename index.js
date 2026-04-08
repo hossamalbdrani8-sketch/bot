@@ -23,7 +23,7 @@ let chatId = null;
 let memory = {};
 let running = false;
 
-// 💀 حماية من الكراش
+// 💀 حماية
 process.on("uncaughtException", (err) => {
   console.log("💀 CRASH:", err.message);
 });
@@ -61,7 +61,7 @@ function analyze(price, prev, symbol) {
 
   if (!memory[symbol]) {
     memory[symbol] = {
-      price: price,
+      price,
       low: price,
       high: price,
       momentum: 0
@@ -77,7 +77,6 @@ function analyze(price, prev, symbol) {
   let momentum = price - prevData.price;
 
   let flow = "⚠️ ضعف السيولة";
-
   if (momentum > 0 && change > 0.5) flow = "💹 سيولة مستمرة";
   if (momentum > 0.5 && change > 1.5) flow = "🔥💹 سيولة قوية";
   if (momentum > 1 && change > 2.5) flow = "💀🚀 سيولة انفجار";
@@ -102,18 +101,18 @@ function analyze(price, prev, symbol) {
   if (fromLow > 1.5 && change > 0.3 && momentum > 0) entry = "⚡️ دخول مبكر";
   if (fromLow > 2 && change > 1) entry = "💀 دخول ذكي";
   if (fromLow > 3 && change > 2 && flow.includes("💹")) entry = "💀🔥 دخول احترافي";
-  if (fromLow > 4 && change > 3 && flow.includes("💀")) entry = "💀🚀 ELITE (انفجار حقيقي)";
+  if (fromLow > 4 && change > 3 && flow.includes("💀")) entry = "💀🚀 ELITE";
 
   function fix(n) {
     return Number(n).toFixed(price < 1 ? 6 : 2);
   }
 
   let tpRaw = [
-    price * 1.02, price * 1.04, price * 1.06, price * 1.08,
-    price * 1.10, price * 1.12, price * 1.15, price * 1.18,
+    price*1.02, price*1.04, price*1.06, price*1.08,
+    price*1.10, price*1.12, price*1.15, price*1.18
   ];
 
-  let tp = tpRaw.map(v => fix(v));
+  let tp = tpRaw.map(fix);
   let tpStatus = tpRaw.map(v => price >= v);
   let sl = fix(price * 0.95);
 
@@ -124,10 +123,7 @@ function analyze(price, prev, symbol) {
     momentum
   };
 
-  return {
-    signal, tp, sl, emoji, change, smart,
-    type, entry, flow, tpStatus, fromLow
-  };
+  return { signal,tp,sl,emoji,change,smart,type,entry,flow,tpStatus,fromLow };
 }
 
 // =======================
@@ -144,14 +140,14 @@ ${s.emoji} ${s.name}
 📊 ${s.signal} (${s.change.toFixed(2)}%)
 ${s.smart ? "🧠 " + s.smart : ""}
 
-🎯 TP1: ${s.tp[0]} ${s.tpStatus[0] ? "✅" : ""}
-🎯 TP2: ${s.tp[1]} ${s.tpStatus[1] ? "✅" : ""}
-🎯 TP3: ${s.tp[2]} ${s.tpStatus[2] ? "✅" : ""}
-🎯 TP4: ${s.tp[3]} ${s.tpStatus[3] ? "✅" : ""}
-🎯 TP5: ${s.tp[4]} ${s.tpStatus[4] ? "✅" : ""}
-🎯 TP6: ${s.tp[5]} ${s.tpStatus[5] ? "✅" : ""}
-🎯 TP7: ${s.tp[6]} ${s.tpStatus[6] ? "✅" : ""}
-🎯 TP8: ${s.tp[7]} ${s.tpStatus[7] ? "✅" : ""}
+🎯 TP1: ${s.tp[0]}
+🎯 TP2: ${s.tp[1]}
+🎯 TP3: ${s.tp[2]}
+🎯 TP4: ${s.tp[3]}
+🎯 TP5: ${s.tp[4]}
+🎯 TP6: ${s.tp[5]}
+🎯 TP7: ${s.tp[6]}
+🎯 TP8: ${s.tp[7]}
 
 🛑 SL: ${s.sl}
 
@@ -166,11 +162,9 @@ async function getQuote(symbol) {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
     const data = await res.json();
-    if (!data || !data.c || !data.pc) return null;
+    if (!data?.c || !data?.pc) return null;
     return { price: data.c, prev: data.pc };
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 async function getSA(symbol) {
@@ -180,18 +174,14 @@ async function getSA(symbol) {
     let p = data?.quoteResponse?.result?.[0];
     if (!p) return null;
     return { price: p.regularMarketPrice, prev: p.regularMarketPreviousClose };
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 async function getCryptoSymbols() {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/crypto/symbol?exchange=BINANCE&token=${API_KEY}`);
     return await res.json();
-  } catch {
-    return [];
-  }
+  } catch { return []; }
 }
 
 function getLogo(symbol) {
@@ -213,9 +203,7 @@ async function getUSSymbols() {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/stock/symbol?exchange=US&token=${API_KEY}`);
     return await res.json();
-  } catch {
-    return [];
-  }
+  } catch { return []; }
 }
 
 // =======================
@@ -224,7 +212,6 @@ async function run() {
   running = true;
 
   try {
-    let all = [];
 
     // 🇸🇦
     for (let s of saudi) {
@@ -232,15 +219,17 @@ async function run() {
       if (!q) continue;
       let a = analyze(q.price, q.prev, s);
       if (!a) continue;
-      all.push({ name:s, symbol:s, market:"🇸🇦 السوق السعودي", price:q.price, ...a });
+
+      await safeSend(chatId, s, format({
+        name:s, symbol:s, market:"🇸🇦 السوق السعودي", price:q.price, ...a
+      }));
     }
 
-    // 🇺🇸 السوق كامل (💀 دفعات)
+    // 🇺🇸 كامل السوق بدون تعليق 💀
     let us = await getUSSymbols();
     let chunkSize = 200;
 
     for (let i = 0; i < us.length; i += chunkSize) {
-
       let chunk = us.slice(i, i + chunkSize);
 
       for (let s of chunk) {
@@ -252,32 +241,38 @@ async function run() {
         let a = analyze(q.price, q.prev, s.symbol);
         if (!a) continue;
 
-        all.push({
-          name: s.symbol,
-          symbol: s.symbol,
+        await safeSend(chatId, s.symbol, format({
+          name:s.symbol,
+          symbol:s.symbol,
           market:"🇺🇸 السوق الأمريكي",
           price:q.price,
           ...a
-        });
+        }));
+
+        await new Promise(r => setTimeout(r, 25));
       }
 
-      await new Promise(r => setTimeout(r, 1000));
+      await new Promise(r => setTimeout(r, 300));
     }
 
     // 💰
     let crypto = await getCryptoSymbols();
     for (let c of crypto.slice(0,40)) {
       if (!c.symbol) continue;
+
       let q = await getQuote(c.symbol);
       if (!q) continue;
+
       let a = analyze(q.price, q.prev, c.symbol);
       if (!a) continue;
-      all.push({ name:c.displaySymbol || c.symbol, symbol:c.symbol, market:"💰 العملات الرقمية", price:q.price, ...a });
-    }
 
-    for (let s of all) {
-      await safeSend(chatId, s.symbol, format(s));
-      await new Promise(r => setTimeout(r, 200));
+      await safeSend(chatId, c.symbol, format({
+        name:c.displaySymbol || c.symbol,
+        symbol:c.symbol,
+        market:"💰 العملات الرقمية",
+        price:q.price,
+        ...a
+      }));
     }
 
   } catch (e) {
@@ -287,7 +282,7 @@ async function run() {
   running = false;
 }
 
-// 💀 تشغيل دائم
+// =======================
 setInterval(run, 60000);
 
 app.listen(3000, () => {
