@@ -19,7 +19,9 @@ const bot = new TelegramBot(TOKEN, {
 // 🔑 API
 const API_KEY = "d7a0311r01qspme6c44gd7a0311r01qspme6c450";
 
-let chatId = null;
+// ✅ يدعم أكثر من جهاز
+let chatIds = new Set();
+
 let memory = {};
 let running = false;
 let lastData = {}; // 💀 كاش
@@ -36,15 +38,17 @@ process.on("unhandledRejection", (err) => {
 
 // =======================
 bot.on("message", (msg) => {
-  chatId = msg.chat.id;
+
+  // ✅ إضافة كل الأجهزة
+  chatIds.add(msg.chat.id);
 
   if (msg.text === "/start") {
-    bot.sendMessage(chatId, "💀 AI PRO MAX ELITE MODE (ULTIMATE)");
+    bot.sendMessage(msg.chat.id, "💀 AI PRO MAX ELITE MODE (ULTIMATE)");
     run();
   }
 
   if (msg.text === "/scan") {
-    bot.sendMessage(chatId, "🚀 فحص السوق...");
+    bot.sendMessage(msg.chat.id, "🚀 فحص السوق...");
     run();
   }
 });
@@ -164,6 +168,22 @@ ${s.alert ? "🚨 " + s.alert : ""}
 }
 
 // =======================
+async function safeSend(chatId, symbol, text) {
+  try {
+    await bot.sendPhoto(chatId, `https://logo.clearbit.com/${symbol.replace(".SR","").toLowerCase()}.com`, { caption: text });
+  } catch {
+    await bot.sendMessage(chatId, text);
+  }
+}
+
+// =======================
+async function sendAll(symbol, text) {
+  for (let id of chatIds) {
+    await safeSend(id, symbol, text);
+  }
+}
+
+// =======================
 async function getQuote(symbol) {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
@@ -200,26 +220,6 @@ async function getSA(symbol) {
 }
 
 // =======================
-async function getCryptoSymbols() {
-  try {
-    const res = await fetch(`https://finnhub.io/api/v1/crypto/symbol?exchange=BINANCE&token=${API_KEY}`);
-    return await res.json();
-  } catch { return []; }
-}
-
-function getLogo(symbol) {
-  return `https://logo.clearbit.com/${symbol.replace(".SR","").toLowerCase()}.com`;
-}
-
-async function safeSend(chatId, symbol, text) {
-  try {
-    await bot.sendPhoto(chatId, getLogo(symbol), { caption: text });
-  } catch {
-    await bot.sendMessage(chatId, text);
-  }
-}
-
-// =======================
 const saudi = ["2222.SR","1120.SR","2010.SR","7010.SR"];
 
 async function getUSSymbols() {
@@ -231,7 +231,7 @@ async function getUSSymbols() {
 
 // =======================
 async function run() {
-  if (!chatId || running) return;
+  if (running) return;
   running = true;
 
   try {
@@ -243,58 +243,31 @@ async function run() {
       let a = analyze(q.price, q.prev, s);
       if (!a) continue;
 
-      await safeSend(chatId, s, format({
+      await sendAll(s, format({
         name:s, symbol:s, market:"🇸🇦 السوق السعودي", price:q.price, ...a
       }));
     }
 
     let us = await getUSSymbols();
-    let chunkSize = 200;
 
-    for (let i = 0; i < us.length; i += chunkSize) {
+    for (let s of us) {
+      if (!s.symbol) continue;
 
-      let chunk = us.slice(i, i + chunkSize);
-
-      for (let s of chunk) {
-        if (!s.symbol) continue;
-
-        let q = await getQuote(s.symbol);
-        if (!q) continue;
-
-        let a = analyze(q.price, q.prev, s.symbol);
-        if (!a) continue;
-
-        await safeSend(chatId, s.symbol, format({
-          name:s.symbol,
-          symbol:s.symbol,
-          market:"🇺🇸 السوق الأمريكي",
-          price:q.price,
-          ...a
-        }));
-
-        await new Promise(r => setTimeout(r, 20));
-      }
-
-      await new Promise(r => setTimeout(r, 200));
-    }
-
-    let crypto = await getCryptoSymbols();
-    for (let c of crypto.slice(0,40)) {
-      if (!c.symbol) continue;
-
-      let q = await getQuote(c.symbol);
+      let q = await getQuote(s.symbol);
       if (!q) continue;
 
-      let a = analyze(q.price, q.prev, c.symbol);
+      let a = analyze(q.price, q.prev, s.symbol);
       if (!a) continue;
 
-      await safeSend(chatId, c.symbol, format({
-        name:c.displaySymbol || c.symbol,
-        symbol:c.symbol,
-        market:"💰 العملات الرقمية",
+      await sendAll(s.symbol, format({
+        name:s.symbol,
+        symbol:s.symbol,
+        market:"🇺🇸 السوق الأمريكي",
         price:q.price,
         ...a
       }));
+
+      await new Promise(r => setTimeout(r, 10));
     }
 
   } catch (e) {
@@ -304,7 +277,7 @@ async function run() {
   running = false;
 }
 
-// 🔥 تشغيل دائم حتى لو وقف
+// 🔥 تشغيل دائم
 setInterval(() => {
   if (!running) run();
 }, 60000);
