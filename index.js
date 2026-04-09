@@ -27,9 +27,11 @@ let lastData = {}; // 💀 كاش
 // 💀 حماية
 process.on("uncaughtException", (err) => {
   console.log("💀 CRASH:", err.message);
+  running = false;
 });
 process.on("unhandledRejection", (err) => {
   console.log("💀 PROMISE ERROR:", err);
+  running = false;
 });
 
 // =======================
@@ -116,10 +118,7 @@ function analyze(price, prev, symbol) {
   ];
 
   let tp = tpRaw.map(fix);
-
-  // 💀🔥 التعديل الوحيد هنا (TP جبار)
   let tpStatus = tpRaw.map(v => price >= v * 0.995);
-
   let sl = fix(price * 0.95);
 
   memory[symbol] = {
@@ -165,7 +164,6 @@ ${s.alert ? "🚨 " + s.alert : ""}
 }
 
 // =======================
-// 💀 API مع كاش
 async function getQuote(symbol) {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
@@ -236,8 +234,6 @@ async function run() {
   if (!chatId || running) return;
   running = true;
 
-  let start = Date.now();
-
   try {
 
     for (let s of saudi) {
@@ -256,8 +252,6 @@ async function run() {
     let chunkSize = 200;
 
     for (let i = 0; i < us.length; i += chunkSize) {
-
-      if (Date.now() - start > 55000) break;
 
       let chunk = us.slice(i, i + chunkSize);
 
@@ -310,8 +304,10 @@ async function run() {
   running = false;
 }
 
-// =======================
-setInterval(run, 60000);
+// 🔥 تشغيل دائم حتى لو وقف
+setInterval(() => {
+  if (!running) run();
+}, 60000);
 
 app.listen(3000, () => {
   console.log("🔥 AI PRO MAX ELITE ULTIMATE RUNNING");
