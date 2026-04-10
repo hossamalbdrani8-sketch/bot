@@ -37,9 +37,23 @@ process.on("unhandledRejection", (err) => {
 });
 
 // =======================
+// 🆕 بيانات إضافية
+async function getFundamentals(symbol) {
+  try {
+    const res = await fetch(`https://finnhub.io/api/v1/stock/metric?symbol=${symbol}&metric=all&token=${API_KEY}`);
+    const data = await res.json();
+
+    return {
+      float: data?.metric?.shareFloat || 0
+    };
+  } catch {
+    return null;
+  }
+}
+
+// =======================
 bot.on("message", (msg) => {
 
-  // ✅ إضافة كل الأجهزة
   chatIds.add(msg.chat.id);
 
   if (msg.text === "/start") {
@@ -149,6 +163,9 @@ ${s.emoji} ${s.name}
 📊 ${s.signal} (${s.change.toFixed(2)}%)
 ${s.smart ? "🧠 " + s.smart : ""}
 
+📦 Float: ${s.floatText}
+💵 Liquidity: ${s.liquidityText}
+
 🎯 TP1: ${s.tp[0]} ${s.tpStatus[0] ? "✅" : ""}
 🎯 TP2: ${s.tp[1]} ${s.tpStatus[1] ? "✅" : ""}
 🎯 TP3: ${s.tp[2]} ${s.tpStatus[2] ? "✅" : ""}
@@ -244,7 +261,9 @@ async function run() {
       if (!a) continue;
 
       await sendAll(s, format({
-        name:s, symbol:s, market:"🇸🇦 السوق السعودي", price:q.price, ...a
+        name:s, symbol:s, market:"🇸🇦 السوق السعودي", price:q.price,
+        floatText:"N/A", liquidityText:"N/A",
+        ...a
       }));
     }
 
@@ -259,11 +278,28 @@ async function run() {
       let a = analyze(q.price, q.prev, s.symbol);
       if (!a) continue;
 
+      // 🆕 بيانات الفلوت والسيولة
+      let f = await getFundamentals(s.symbol);
+
+      let float = f?.float || 0;
+      let floatText = "N/A";
+
+      if (float > 0) {
+        let floatM = float / 1e6;
+        if (floatM < 50) floatText = `💀 خفيف (انطلاقة) ${floatM.toFixed(2)}M`;
+        else floatText = `🐘 ثقيل ${floatM.toFixed(2)}M`;
+      }
+
+      let liquidity = q.price * (float || 0);
+      let liquidityText = liquidity ? (liquidity/1e6).toFixed(2)+"M$" : "N/A";
+
       await sendAll(s.symbol, format({
         name:s.symbol,
         symbol:s.symbol,
         market:"🇺🇸 السوق الأمريكي",
         price:q.price,
+        floatText,
+        liquidityText,
         ...a
       }));
 
