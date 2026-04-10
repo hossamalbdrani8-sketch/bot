@@ -19,41 +19,53 @@ const bot = new TelegramBot(TOKEN, {
 // 🔑 API
 const API_KEY = "d7a0311r01qspme6c44gd7a0311r01qspme6c450";
 
-// ✅ يدعم أكثر من جهاز
 let chatIds = new Set();
-
 let memory = {};
 let running = false;
-let lastData = {}; // 💀 كاش
-
-// 💀 حماية
-process.on("uncaughtException", (err) => {
-  console.log("💀 CRASH:", err.message);
-  running = false;
-});
-process.on("unhandledRejection", (err) => {
-  console.log("💀 PROMISE ERROR:", err);
-  running = false;
-});
+let lastData = {};
 
 // =======================
-// 🆕 بيانات إضافية
-async function getFundamentals(symbol) {
+// 🔥 Yahoo (Float + Volume)
+async function getExtra(symbol) {
   try {
-    const res = await fetch(`https://finnhub.io/api/v1/stock/metric?symbol=${symbol}&metric=all&token=${API_KEY}`);
+    const res = await fetch(`https://query1.finance.yahoo.com/v10/finance/quoteSummary/${symbol}?modules=defaultKeyStatistics,price`);
     const data = await res.json();
 
-    return {
-      float: data?.metric?.shareFloat || 0
-    };
+    let r = data?.quoteSummary?.result?.[0];
+
+    let float = r?.defaultKeyStatistics?.floatShares?.raw;
+    let volume = r?.price?.regularMarketVolume?.raw;
+
+    // 📦 Float تصنيف
+    let floatText = "N/A";
+    if (float) {
+      let m = float / 1e6;
+      if (m < 20) floatText = `💀 خفيف (انفجاري) ${m.toFixed(2)}M`;
+      else if (m < 100) floatText = `🔥 متوسط ${m.toFixed(2)}M`;
+      else floatText = `🐘 ثقيل ${m.toFixed(2)}M`;
+    }
+
+    // ⚡ نشاط
+    let activity = "⚠️ ضعيف";
+    if (volume > 5_000_000) activity = "🔥 نشط";
+    if (volume > 20_000_000) activity = "💀 انفجار";
+
+    // 💵 سيولة حقيقية
+    let liquidityText = volume ? (volume / 1e6).toFixed(2) + "M Vol" : "N/A";
+
+    return { floatText, activity, liquidityText };
+
   } catch {
-    return null;
+    return {
+      floatText: "N/A",
+      activity: "❌",
+      liquidityText: "N/A"
+    };
   }
 }
 
 // =======================
 bot.on("message", (msg) => {
-
   chatIds.add(msg.chat.id);
 
   if (msg.text === "/start") {
@@ -163,8 +175,9 @@ ${s.emoji} ${s.name}
 📊 ${s.signal} (${s.change.toFixed(2)}%)
 ${s.smart ? "🧠 " + s.smart : ""}
 
-📦 Float: ${s.floatText}
-💵 Liquidity: ${s.liquidityText}
+📦 ${s.floatText}
+⚡ ${s.activity}
+💵 ${s.liquidityText}
 
 🎯 TP1: ${s.tp[0]} ${s.tpStatus[0] ? "✅" : ""}
 🎯 TP2: ${s.tp[1]} ${s.tpStatus[1] ? "✅" : ""}
@@ -185,18 +198,13 @@ ${s.alert ? "🚨 " + s.alert : ""}
 }
 
 // =======================
-async function safeSend(chatId, symbol, text) {
-  try {
-    await bot.sendPhoto(chatId, `https://logo.clearbit.com/${symbol.replace(".SR","").toLowerCase()}.com`, { caption: text });
-  } catch {
-    await bot.sendMessage(chatId, text);
-  }
-}
-
-// =======================
 async function sendAll(symbol, text) {
   for (let id of chatIds) {
-    await safeSend(id, symbol, text);
+    try {
+      await bot.sendPhoto(id, `https://logo.clearbit.com/${symbol.toLowerCase()}.com`, { caption: text });
+    } catch {
+      await bot.sendMessage(id, text);
+    }
   }
 }
 
@@ -216,29 +224,7 @@ async function getQuote(symbol) {
   }
 }
 
-async function getSA(symbol) {
-  try {
-    const res = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbol}`);
-    const data = await res.json();
-
-    let p = data?.quoteResponse?.result?.[0];
-    if (!p) throw "no data";
-
-    lastData[symbol] = {
-      price: p.regularMarketPrice,
-      prev: p.regularMarketPreviousClose
-    };
-
-    return lastData[symbol];
-
-  } catch {
-    return lastData[symbol] || null;
-  }
-}
-
 // =======================
-const saudi = ["2222.SR","1120.SR","2010.SR","7010.SR"];
-
 async function getUSSymbols() {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/stock/symbol?exchange=US&token=${API_KEY}`);
@@ -252,21 +238,6 @@ async function run() {
   running = true;
 
   try {
-
-    for (let s of saudi) {
-      let q = await getSA(s);
-      if (!q) continue;
-
-      let a = analyze(q.price, q.prev, s);
-      if (!a) continue;
-
-      await sendAll(s, format({
-        name:s, symbol:s, market:"🇸🇦 السوق السعودي", price:q.price,
-        floatText:"N/A", liquidityText:"N/A",
-        ...a
-      }));
-    }
-
     let us = await getUSSymbols();
 
     for (let s of us) {
@@ -278,29 +249,15 @@ async function run() {
       let a = analyze(q.price, q.prev, s.symbol);
       if (!a) continue;
 
-      // 🆕 بيانات الفلوت والسيولة
-      let f = await getFundamentals(s.symbol);
-
-      let float = f?.float || 0;
-      let floatText = "N/A";
-
-      if (float > 0) {
-        let floatM = float / 1e6;
-        if (floatM < 50) floatText = `💀 خفيف (انطلاقة) ${floatM.toFixed(2)}M`;
-        else floatText = `🐘 ثقيل ${floatM.toFixed(2)}M`;
-      }
-
-      let liquidity = q.price * (float || 0);
-      let liquidityText = liquidity ? (liquidity/1e6).toFixed(2)+"M$" : "N/A";
+      let extra = await getExtra(s.symbol);
 
       await sendAll(s.symbol, format({
         name:s.symbol,
         symbol:s.symbol,
         market:"🇺🇸 السوق الأمريكي",
         price:q.price,
-        floatText,
-        liquidityText,
-        ...a
+        ...a,
+        ...extra
       }));
 
       await new Promise(r => setTimeout(r, 10));
