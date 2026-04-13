@@ -25,6 +25,80 @@ let running = false;
 let lastData = {};
 
 // =======================
+// 🔥 EMA DATA
+async function getCandles(symbol) {
+  try {
+    let to = Math.floor(Date.now()/1000);
+    let from = to - (60*60*24*30);
+
+    const res = await fetch(`https://finnhub.io/api/v1/stock/candle?symbol=${symbol}&resolution=5&from=${from}&to=${to}&token=${API_KEY}`);
+    const data = await res.json();
+
+    if (data.s !== "ok") return null;
+
+    return data.c;
+  } catch {
+    return null;
+  }
+}
+
+function calculateEMA(data, period) {
+  let k = 2 / (period + 1);
+  let ema = data[0];
+
+  for (let i = 1; i < data.length; i++) {
+    ema = data[i] * k + ema * (1 - k);
+  }
+
+  return ema;
+}
+
+async function getEMA(symbol) {
+  let data = await getCandles(symbol);
+  if (!data || data.length < 400) {
+    return {
+      emaText: "❌ EMA غير متوفر",
+      cross: "❌"
+    };
+  }
+
+  let ema7 = calculateEMA(data, 7);
+  let ema25 = calculateEMA(data, 25);
+  let ema50 = calculateEMA(data, 50);
+  let ema320 = calculateEMA(data, 320);
+  let ema380 = calculateEMA(data, 380);
+
+  let trend = "⚪ تذبذب";
+
+  if (ema7 > ema25 && ema25 > ema50 && ema50 > ema320) {
+    trend = "💀 ترند صاعد قوي";
+  }
+
+  if (ema7 < ema25 && ema25 < ema50) {
+    trend = "📉 ترند هابط";
+  }
+
+  let cross = "❌";
+
+  if (ema7 > ema25 && ema7 > ema50) {
+    cross = "🔥 تقاطع صاعد (دخول)";
+  }
+
+  if (ema7 < ema25 && ema7 < ema50) {
+    cross = "🚨 تقاطع هابط (خروج)";
+  }
+
+  if (ema7 > ema25 && ema25 > ema50 && ema50 > ema320 && ema320 > ema380) {
+    cross = "💀🔥 ELITE TREND";
+  }
+
+  return {
+    emaText: trend,
+    cross
+  };
+}
+
+// =======================
 // 🔥 Yahoo (Float + Volume)
 async function getExtra(symbol) {
   try {
@@ -36,7 +110,6 @@ async function getExtra(symbol) {
     let float = r?.defaultKeyStatistics?.floatShares?.raw;
     let volume = r?.price?.regularMarketVolume?.raw;
 
-    // 📦 Float تصنيف
     let floatText = "N/A";
     if (float) {
       let m = float / 1e6;
@@ -45,12 +118,10 @@ async function getExtra(symbol) {
       else floatText = `🐘 ثقيل ${m.toFixed(2)}M`;
     }
 
-    // ⚡ نشاط
     let activity = "⚠️ ضعيف";
     if (volume > 5_000_000) activity = "🔥 نشط";
     if (volume > 20_000_000) activity = "💀 انفجار";
 
-    // 💵 سيولة حقيقية
     let liquidityText = volume ? (volume / 1e6).toFixed(2) + "M Vol" : "N/A";
 
     return { floatText, activity, liquidityText };
@@ -179,6 +250,9 @@ ${s.smart ? "🧠 " + s.smart : ""}
 ⚡ ${s.activity}
 💵 ${s.liquidityText}
 
+📊 EMA: ${s.emaText}
+⚡ ${s.cross}
+
 🎯 TP1: ${s.tp[0]} ${s.tpStatus[0] ? "✅" : ""}
 🎯 TP2: ${s.tp[1]} ${s.tpStatus[1] ? "✅" : ""}
 🎯 TP3: ${s.tp[2]} ${s.tpStatus[2] ? "✅" : ""}
@@ -250,6 +324,7 @@ async function run() {
       if (!a) continue;
 
       let extra = await getExtra(s.symbol);
+      let ema = await getEMA(s.symbol);
 
       await sendAll(s.symbol, format({
         name:s.symbol,
@@ -257,7 +332,8 @@ async function run() {
         market:"🇺🇸 السوق الأمريكي",
         price:q.price,
         ...a,
-        ...extra
+        ...extra,
+        ...ema
       }));
 
       await new Promise(r => setTimeout(r, 10));
