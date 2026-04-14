@@ -53,25 +53,39 @@ function calculateEMA(data, period) {
   return ema;
 }
 
+// 💀💀💀 EMA ELITE MODE 💀💀💀
 async function getEMA(symbol) {
   let data = await getCandles(symbol);
-  if (!data || data.length < 400) {
+
+  if (!data || data.length < 50) {
     return {
       emaText: "❌ EMA غير متوفر",
       cross: "❌"
     };
   }
 
-  let ema7 = calculateEMA(data, 7);
-  let ema25 = calculateEMA(data, 25);
-  let ema50 = calculateEMA(data, 50);
-  let ema320 = calculateEMA(data, 320);
-  let ema380 = calculateEMA(data, 380);
+  // 💀 استخدام آخر 400 شمعة فقط (دقة عالية)
+  let slice = data.slice(-400);
+
+  let ema7 = calculateEMA(slice, 7);
+  let ema25 = calculateEMA(slice, 25);
+  let ema50 = calculateEMA(slice, 50);
+  let ema320 = slice.length >= 320 ? calculateEMA(slice, 320) : ema50;
+  let ema380 = slice.length >= 380 ? calculateEMA(slice, 380) : ema50;
 
   let trend = "⚪ تذبذب";
 
+  // 💀 اتجاهات متقدمة
+  if (ema7 > ema25 && ema25 > ema50) {
+    trend = "📈 صعود";
+  }
+
   if (ema7 > ema25 && ema25 > ema50 && ema50 > ema320) {
     trend = "💀 ترند صاعد قوي";
+  }
+
+  if (ema7 > ema25 && ema25 > ema50 && ema50 > ema320 && ema320 > ema380) {
+    trend = "💀🔥 ترند نخبة";
   }
 
   if (ema7 < ema25 && ema25 < ema50) {
@@ -80,6 +94,7 @@ async function getEMA(symbol) {
 
   let cross = "❌";
 
+  // 💀 تقاطعات
   if (ema7 > ema25 && ema7 > ema50) {
     cross = "🔥 تقاطع صاعد (دخول)";
   }
@@ -88,6 +103,16 @@ async function getEMA(symbol) {
     cross = "🚨 تقاطع هابط (خروج)";
   }
 
+  // 💀 انعكاس مبكر
+  if (ema7 > ema25 && ema25 < ema50) {
+    cross = "⚡ انعكاس صاعد مبكر";
+  }
+
+  if (ema7 < ema25 && ema25 > ema50) {
+    cross = "⚠️ انعكاس هابط مبكر";
+  }
+
+  // 💀 أقوى إشارة
   if (ema7 > ema25 && ema25 > ema50 && ema50 > ema320 && ema320 > ema380) {
     cross = "💀🔥 ELITE TREND";
   }
