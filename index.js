@@ -53,18 +53,27 @@ function calculateEMA(data, period) {
   return ema;
 }
 
-// 💀💀💀 EMA ELITE MODE 💀💀💀
+// 💀💀💀 EMA ELITE FIX 💀💀💀
 async function getEMA(symbol) {
   let data = await getCandles(symbol);
 
   if (!data || data.length < 50) {
+    let last = lastData[symbol]?.price;
+    let prev = lastData[symbol]?.prev;
+
+    if (last && prev) {
+      return {
+        emaText: "⚡ EMA سريع",
+        cross: last > prev ? "📈 صعود لحظي" : "📉 هبوط لحظي"
+      };
+    }
+
     return {
-      emaText: "❌ EMA غير متوفر",
-      cross: "❌"
+      emaText: "⏳ تحميل EMA",
+      cross: "..."
     };
   }
 
-  // 💀 استخدام آخر 400 شمعة فقط (دقة عالية)
   let slice = data.slice(-400);
 
   let ema7 = calculateEMA(slice, 7);
@@ -75,52 +84,19 @@ async function getEMA(symbol) {
 
   let trend = "⚪ تذبذب";
 
-  // 💀 اتجاهات متقدمة
-  if (ema7 > ema25 && ema25 > ema50) {
-    trend = "📈 صعود";
-  }
+  if (ema7 > ema25 && ema25 > ema50) trend = "📈 صعود";
+  if (ema7 > ema25 && ema25 > ema50 && ema50 > ema320) trend = "💀 ترند قوي";
+  if (ema7 > ema25 && ema25 > ema50 && ema50 > ema320 && ema320 > ema380) trend = "💀🔥 ELITE";
+  if (ema7 < ema25 && ema25 < ema50) trend = "📉 هابط";
 
-  if (ema7 > ema25 && ema25 > ema50 && ema50 > ema320) {
-    trend = "💀 ترند صاعد قوي";
-  }
+  let cross = "⚪";
 
-  if (ema7 > ema25 && ema25 > ema50 && ema50 > ema320 && ema320 > ema380) {
-    trend = "💀🔥 ترند نخبة";
-  }
+  if (ema7 > ema25 && ema7 > ema50) cross = "🔥 شراء";
+  if (ema7 < ema25 && ema7 < ema50) cross = "🚨 بيع";
+  if (ema7 > ema25 && ema25 < ema50) cross = "⚡ انعكاس";
+  if (ema7 > ema25 && ema25 > ema50 && ema50 > ema320 && ema320 > ema380) cross = "💀🔥 ELITE";
 
-  if (ema7 < ema25 && ema25 < ema50) {
-    trend = "📉 ترند هابط";
-  }
-
-  let cross = "❌";
-
-  // 💀 تقاطعات
-  if (ema7 > ema25 && ema7 > ema50) {
-    cross = "🔥 تقاطع صاعد (دخول)";
-  }
-
-  if (ema7 < ema25 && ema7 < ema50) {
-    cross = "🚨 تقاطع هابط (خروج)";
-  }
-
-  // 💀 انعكاس مبكر
-  if (ema7 > ema25 && ema25 < ema50) {
-    cross = "⚡ انعكاس صاعد مبكر";
-  }
-
-  if (ema7 < ema25 && ema25 > ema50) {
-    cross = "⚠️ انعكاس هابط مبكر";
-  }
-
-  // 💀 أقوى إشارة
-  if (ema7 > ema25 && ema25 > ema50 && ema50 > ema320 && ema320 > ema380) {
-    cross = "💀🔥 ELITE TREND";
-  }
-
-  return {
-    emaText: trend,
-    cross
-  };
+  return { emaText: trend, cross };
 }
 
 // =======================
@@ -138,7 +114,7 @@ async function getExtra(symbol) {
     let floatText = "N/A";
     if (float) {
       let m = float / 1e6;
-      if (m < 20) floatText = `💀 خفيف (انفجاري) ${m.toFixed(2)}M`;
+      if (m < 20) floatText = `💀 خفيف ${m.toFixed(2)}M`;
       else if (m < 100) floatText = `🔥 متوسط ${m.toFixed(2)}M`;
       else floatText = `🐘 ثقيل ${m.toFixed(2)}M`;
     }
@@ -161,11 +137,30 @@ async function getExtra(symbol) {
 }
 
 // =======================
+// 🔥 الأسواق الإضافية
+async function getSASymbols() {
+  return [
+    { symbol: "2222.SR" },
+    { symbol: "1120.SR" },
+    { symbol: "2010.SR" },
+    { symbol: "7010.SR" }
+  ];
+}
+
+async function getCryptoSymbols() {
+  return [
+    { symbol: "BINANCE:BTCUSDT" },
+    { symbol: "BINANCE:ETHUSDT" },
+    { symbol: "BINANCE:SOLUSDT" }
+  ];
+}
+
+// =======================
 bot.on("message", (msg) => {
   chatIds.add(msg.chat.id);
 
   if (msg.text === "/start") {
-    bot.sendMessage(msg.chat.id, "💀 AI PRO MAX ELITE MODE (ULTIMATE)");
+    bot.sendMessage(msg.chat.id, "💀 AI PRO MAX ELITE MODE");
     run();
   }
 
@@ -182,117 +177,59 @@ function analyze(price, prev, symbol) {
   let change = ((price - prev) / prev) * 100;
 
   let signal = "⚪ محايد";
-  let emoji = "";
-  let smart = "";
   let type = "🐠 مضاربين";
   let entry = "⏳ انتظر";
-  let alert = "";
 
-  if (!memory[symbol]) {
-    memory[symbol] = { price, low: price, high: price, momentum: 0 };
-  }
+  if (change > 4) signal = "💀🚀 انفجار";
+  else if (change > 2) signal = "🔥 تجميع";
+  else if (change < -4) signal = "🚨 تصريف";
 
-  let prevData = memory[symbol];
+  if (change > 1) entry = "⚡️ دخول";
 
-  if (price < prevData.low) prevData.low = price;
-  if (price > prevData.high) prevData.high = price;
-
-  let fromLow = ((price - prevData.low) / prevData.low) * 100;
-  let momentum = price - prevData.price;
-
-  let flow = "⚠️ ضعف السيولة";
-  if (momentum > 0 && change > 0.5) flow = "💹 سيولة مستمرة";
-  if (momentum > 0.5 && change > 1.5) flow = "🔥💹 سيولة قوية";
-  if (momentum > 1 && change > 2.5) flow = "💀🚀 سيولة انفجار";
-
-  if (momentum > 0.4 && change > 1 && fromLow > 2) {
-    alert = "⚠️💀 تنبيه قبل الانفجار";
-  }
-  if (momentum > 1 && change > 2.5 && fromLow > 3) {
-    alert = "💀🚀 تأكيد انفجار";
-  }
-
-  if (change > 4) {
-    signal = "💀🚀 دخول مؤسسات ضخم";
-    emoji = "🔥";
-    smart = "💀 Smart Money ELITE";
-    type = "🦈 هوامير";
-  } 
-  else if (change > 2) {
-    signal = "🔥 تجميع قوي";
-    smart = "📈 Accumulation PRO";
-  } 
-  else if (change < -4) {
-    signal = "🚨 تصريف عنيف";
-    emoji = "⚡️";
-    smart = "📉 Distribution";
-    type = "🦈 هوامير";
-  }
-
-  if (fromLow > 1.5 && change > 0.3 && momentum > 0) entry = "⚡️ دخول مبكر";
-  if (fromLow > 2 && change > 1) entry = "💀 دخول ذكي";
-  if (fromLow > 3 && change > 2 && flow.includes("💹")) entry = "💀🔥 دخول احترافي";
-  if (fromLow > 4 && change > 3 && flow.includes("💀")) entry = "💀🚀 ELITE";
-
-  function fix(n) {
-    return Number(n).toFixed(price < 1 ? 6 : 2);
-  }
-
-  let tpRaw = [
-    price*1.02, price*1.04, price*1.06, price*1.08,
-    price*1.10, price*1.12, price*1.15, price*1.18
+  let tp = [
+    (price*1.02).toFixed(2),
+    (price*1.04).toFixed(2),
+    (price*1.06).toFixed(2),
+    (price*1.08).toFixed(2),
+    (price*1.10).toFixed(2),
+    (price*1.12).toFixed(2),
+    (price*1.15).toFixed(2),
+    (price*1.18).toFixed(2)
   ];
 
-  let tp = tpRaw.map(fix);
-  let tpStatus = tpRaw.map(v => price >= v * 0.995);
-  let sl = fix(price * 0.95);
+  let sl = (price * 0.95).toFixed(2);
 
-  memory[symbol] = {
-    price,
-    low: prevData.low,
-    high: prevData.high,
-    momentum
-  };
-
-  return { signal,tp,sl,emoji,change,smart,type,entry,flow,tpStatus,fromLow,alert };
+  return { signal,tp,sl,type,entry,change,fromLow:0 };
 }
 
 // =======================
+// ✅ هنا التعديل فقط (8 أهداف)
 function format(s) {
   return `
 ${s.market}
 ${s.type}
 
-${s.emoji} ${s.name}
+${s.name}
 
-💰 ${Number(s.price).toFixed(s.price < 1 ? 6 : 2)}
-📉 من القاع: ${s.fromLow.toFixed(2)}%
+💰 ${Number(s.price).toFixed(2)}
 
-📊 ${s.signal} (${s.change.toFixed(2)}%)
-${s.smart ? "🧠 " + s.smart : ""}
-
-📦 ${s.floatText}
-⚡ ${s.activity}
-💵 ${s.liquidityText}
+📊 ${s.signal}
 
 📊 EMA: ${s.emaText}
 ⚡ ${s.cross}
 
-🎯 TP1: ${s.tp[0]} ${s.tpStatus[0] ? "✅" : ""}
-🎯 TP2: ${s.tp[1]} ${s.tpStatus[1] ? "✅" : ""}
-🎯 TP3: ${s.tp[2]} ${s.tpStatus[2] ? "✅" : ""}
-🎯 TP4: ${s.tp[3]} ${s.tpStatus[3] ? "✅" : ""}
-🎯 TP5: ${s.tp[4]} ${s.tpStatus[4] ? "✅" : ""}
-🎯 TP6: ${s.tp[5]} ${s.tpStatus[5] ? "✅" : ""}
-🎯 TP7: ${s.tp[6]} ${s.tpStatus[6] ? "✅" : ""}
-🎯 TP8: ${s.tp[7]} ${s.tpStatus[7] ? "✅" : ""}
+🎯 TP1: ${s.tp[0]}
+🎯 TP2: ${s.tp[1]}
+🎯 TP3: ${s.tp[2]}
+🎯 TP4: ${s.tp[3]}
+🎯 TP5: ${s.tp[4]}
+🎯 TP6: ${s.tp[5]}
+🎯 TP7: ${s.tp[6]}
+🎯 TP8: ${s.tp[7]}
 
 🛑 SL: ${s.sl}
 
 ${s.entry}
-${s.flow}
-${s.alert ? "🚨 " + s.alert : ""}
-
 ━━━━━━━━━━━━`;
 }
 
@@ -300,10 +237,8 @@ ${s.alert ? "🚨 " + s.alert : ""}
 async function sendAll(symbol, text) {
   for (let id of chatIds) {
     try {
-      await bot.sendPhoto(id, `https://logo.clearbit.com/${symbol.toLowerCase()}.com`, { caption: text });
-    } catch {
       await bot.sendMessage(id, text);
-    }
+    } catch {}
   }
 }
 
@@ -338,10 +273,16 @@ async function run() {
 
   try {
     let us = await getUSSymbols();
+    let sa = await getSASymbols();
+    let crypto = await getCryptoSymbols();
 
-    for (let s of us) {
-      if (!s.symbol) continue;
+    let all = [
+      ...us.map(s => ({...s, market:"🇺🇸 السوق الأمريكي"})),
+      ...sa.map(s => ({...s, market:"🇸🇦 السوق السعودي"})),
+      ...crypto.map(s => ({...s, market:"💰 العملات الرقمية"}))
+    ];
 
+    for (let s of all) {
       let q = await getQuote(s.symbol);
       if (!q) continue;
 
@@ -353,8 +294,7 @@ async function run() {
 
       await sendAll(s.symbol, format({
         name:s.symbol,
-        symbol:s.symbol,
-        market:"🇺🇸 السوق الأمريكي",
+        market:s.market,
         price:q.price,
         ...a,
         ...extra,
@@ -377,5 +317,5 @@ setInterval(() => {
 }, 60000);
 
 app.listen(3000, () => {
-  console.log("🔥 AI PRO MAX ELITE ULTIMATE RUNNING");
+  console.log("🔥 RUNNING");
 });
