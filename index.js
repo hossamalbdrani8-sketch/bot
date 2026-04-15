@@ -203,8 +203,17 @@ function analyze(price, prev, symbol) {
 }
 
 // =======================
-// ✅ هنا التعديل فقط (8 أهداف)
+// 💀💀💀 FORMAT ELITE SMART 💀💀💀
 function format(s) {
+
+  let liquidity = "🪫 ضعف سيولة";
+  if (s.change > 1) liquidity = "💹 سيولة مستمرة";
+  if (s.change > 3) liquidity = "💹🔥 سيولة قوية";
+
+  function check(tp) {
+    return Number(s.price) >= Number(tp) ? "✅" : "";
+  }
+
   return `
 ${s.market}
 ${s.type}
@@ -218,18 +227,19 @@ ${s.name}
 📊 EMA: ${s.emaText}
 ⚡ ${s.cross}
 
-🎯 TP1: ${s.tp[0]}
-🎯 TP2: ${s.tp[1]}
-🎯 TP3: ${s.tp[2]}
-🎯 TP4: ${s.tp[3]}
-🎯 TP5: ${s.tp[4]}
-🎯 TP6: ${s.tp[5]}
-🎯 TP7: ${s.tp[6]}
-🎯 TP8: ${s.tp[7]}
+🎯 TP1: ${s.tp[0]} ${check(s.tp[0])}
+🎯 TP2: ${s.tp[1]} ${check(s.tp[1])}
+🎯 TP3: ${s.tp[2]} ${check(s.tp[2])}
+🎯 TP4: ${s.tp[3]} ${check(s.tp[3])}
+🎯 TP5: ${s.tp[4]} ${check(s.tp[4])}
+🎯 TP6: ${s.tp[5]} ${check(s.tp[5])}
+🎯 TP7: ${s.tp[6]} ${check(s.tp[6])}
+🎯 TP8: ${s.tp[7]} ${check(s.tp[7])}
 
 🛑 SL: ${s.sl}
 
 ${s.entry}
+${liquidity}
 ━━━━━━━━━━━━`;
 }
 
