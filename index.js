@@ -200,8 +200,16 @@ async function run() {
     if (!q) continue;
 
     let a = analyze(q.price, q.prev);
+    if (!a) continue;
+
+    // 💀 فلترة SNIPER
+    if (a.change < 3) continue;
+    if (q.price < 0.3) continue;
+
     let ema = await getEMA(s.symbol);
     let extra = await getExtra(s.symbol);
+
+    if (extra.activity === "🪫 ضعف سيولة") continue;
 
     let text = format({
       name:s.symbol,
