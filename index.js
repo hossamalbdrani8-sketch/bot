@@ -113,7 +113,7 @@ bot.on("message", (msg) => {
   chatIds.add(msg.chat.id);
 
   if (msg.text === "/start") {
-    bot.sendMessage(msg.chat.id, "💀 RUNNING 24/7");
+    bot.sendMessage(msg.chat.id, "💀 RUNNING 24/7 SNIPER MODE");
   }
 });
 
@@ -202,14 +202,12 @@ async function run() {
     let a = analyze(q.price, q.prev);
     if (!a) continue;
 
-    // 💀 فلترة SNIPER
-    if (a.change < 3) continue;
-    if (q.price < 0.3) continue;
+    // 💀🔥 SNIPER MODE (هجومي)
+    if (a.change < 0.5) continue; // كان 3 💀
+    if (q.price < 0.1) continue;  // كان 0.3
 
     let ema = await getEMA(s.symbol);
     let extra = await getExtra(s.symbol);
-
-    if (extra.activity === "🪫 ضعف سيولة") continue;
 
     let text = format({
       name:s.symbol,
@@ -224,7 +222,7 @@ async function run() {
       await bot.sendMessage(id, text);
     }
 
-    await new Promise(r => setTimeout(r, 10));
+    await new Promise(r => setTimeout(r, 5));
   }
 
   running = false;
@@ -239,12 +237,12 @@ async function startLoop() {
     } catch (e) {
       console.log(e);
     }
-    await new Promise(r => setTimeout(r, 5000));
+    await new Promise(r => setTimeout(r, 3000)); // أسرع
   }
 }
 
 startLoop();
 
 app.listen(3000, () => {
-  console.log("💀 RUNNING 24/7");
+  console.log("💀 SNIPER RUNNING 24/7");
 });
