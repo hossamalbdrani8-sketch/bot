@@ -25,7 +25,6 @@ let running = false;
 let lastData = {};
 
 // =======================
-// 🔥 EMA DATA
 async function getCandles(symbol) {
   try {
     let to = Math.floor(Date.now()/1000);
@@ -53,7 +52,7 @@ function calculateEMA(data, period) {
   return ema;
 }
 
-// 💀 EMA
+// =======================
 async function getEMA(symbol) {
   let data = await getCandles(symbol);
 
@@ -115,6 +114,10 @@ bot.on("message", (msg) => {
   if (msg.text === "/start") {
     bot.sendMessage(msg.chat.id, "💀 RUNNING 24/7 SNIPER MODE");
   }
+
+  if (msg.text === "/scan") {
+    run();
+  }
 });
 
 // =======================
@@ -172,6 +175,8 @@ async function getQuote(symbol) {
     const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
     const data = await res.json();
 
+    if (!data?.c || !data?.pc) return null;
+
     lastData[symbol] = { price: data.c, prev: data.pc };
     return lastData[symbol];
 
@@ -189,40 +194,54 @@ async function getUSSymbols() {
 }
 
 // =======================
+// 💀🔥 RUN FIX (Batch + بدون ضغط)
 async function run() {
   if (running) return;
   running = true;
 
-  let us = await getUSSymbols();
+  try {
+    let us = await getUSSymbols();
 
-  for (let s of us) {
-    let q = await getQuote(s.symbol);
-    if (!q) continue;
+    let batchSize = 50;
 
-    let a = analyze(q.price, q.prev);
-    if (!a) continue;
+    for (let i = 0; i < us.length; i += batchSize) {
 
-    // 💀🔥 SNIPER MODE (هجومي)
-    if (a.change < 0.5) continue; // كان 3 💀
-    if (q.price < 0.1) continue;  // كان 0.3
+      let batch = us.slice(i, i + batchSize);
 
-    let ema = await getEMA(s.symbol);
-    let extra = await getExtra(s.symbol);
+      await Promise.all(batch.map(async (s) => {
+        try {
+          let q = await getQuote(s.symbol);
+          if (!q) return;
 
-    let text = format({
-      name:s.symbol,
-      market:"🇺🇸 السوق الأمريكي",
-      price:q.price,
-      ...a,
-      ...ema,
-      ...extra
-    });
+          let a = analyze(q.price, q.prev);
+          if (!a) return;
 
-    for (let id of chatIds) {
-      await bot.sendMessage(id, text);
+          if (a.change < 0.5) return;
+
+          let ema = await getEMA(s.symbol);
+          let extra = await getExtra(s.symbol);
+
+          let text = format({
+            name:s.symbol,
+            market:"🇺🇸 السوق الأمريكي",
+            price:q.price,
+            ...a,
+            ...ema,
+            ...extra
+          });
+
+          for (let id of chatIds) {
+            await bot.sendMessage(id, text);
+          }
+
+        } catch {}
+      }));
+
+      await new Promise(r => setTimeout(r, 1500));
     }
 
-    await new Promise(r => setTimeout(r, 5));
+  } catch (e) {
+    console.log("ERROR:", e);
   }
 
   running = false;
@@ -237,12 +256,12 @@ async function startLoop() {
     } catch (e) {
       console.log(e);
     }
-    await new Promise(r => setTimeout(r, 3000)); // أسرع
+    await new Promise(r => setTimeout(r, 3000));
   }
 }
 
 startLoop();
 
 app.listen(3000, () => {
-  console.log("💀 SNIPER RUNNING 24/7");
+  console.log("💀 RUNNING 24/7 FULL MARKET");
 });
