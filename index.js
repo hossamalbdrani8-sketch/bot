@@ -20,7 +20,6 @@ const bot = new TelegramBot(TOKEN, {
 const API_KEY = "d7a0311r01qspme6c44gd7a0311r01qspme6c450";
 
 let chatIds = new Set();
-let memory = {};
 let running = false;
 let lastData = {};
 
@@ -112,7 +111,7 @@ bot.on("message", (msg) => {
   chatIds.add(msg.chat.id);
 
   if (msg.text === "/start") {
-    bot.sendMessage(msg.chat.id, "💀 RUNNING 24/7 SNIPER MODE");
+    bot.sendMessage(msg.chat.id, "💀 RUNNING 24/7 FULL MARKET");
   }
 
   if (msg.text === "/scan") {
@@ -138,11 +137,16 @@ function analyze(price, prev) {
 }
 
 // =======================
+// ✅ FORMAT SMART (أهداف تلقائي + سيولة)
 function format(s) {
 
   function check(tp) {
-    return s.price >= tp ? "✅" : "";
+    return Number(s.price) >= Number(tp) ? "✅" : "";
   }
+
+  let liquidity = "🪫 ضعف سيولة";
+  if (s.change > 1) liquidity = "💹 سيولة مستمرة";
+  if (s.change > 3) liquidity = "💹🔥 سيولة قوية";
 
   return `
 ${s.market}
@@ -156,16 +160,16 @@ ${s.name}
 📊 EMA: ${s.emaText}
 ⚡ ${s.cross}
 
-🎯 ${s.tp[0].toFixed(2)} ${check(s.tp[0])}
-🎯 ${s.tp[1].toFixed(2)} ${check(s.tp[1])}
-🎯 ${s.tp[2].toFixed(2)} ${check(s.tp[2])}
-🎯 ${s.tp[3].toFixed(2)} ${check(s.tp[3])}
-🎯 ${s.tp[4].toFixed(2)} ${check(s.tp[4])}
-🎯 ${s.tp[5].toFixed(2)} ${check(s.tp[5])}
-🎯 ${s.tp[6].toFixed(2)} ${check(s.tp[6])}
-🎯 ${s.tp[7].toFixed(2)} ${check(s.tp[7])}
+🎯 TP1: ${s.tp[0].toFixed(2)} ${check(s.tp[0])}
+🎯 TP2: ${s.tp[1].toFixed(2)} ${check(s.tp[1])}
+🎯 TP3: ${s.tp[2].toFixed(2)} ${check(s.tp[2])}
+🎯 TP4: ${s.tp[3].toFixed(2)} ${check(s.tp[3])}
+🎯 TP5: ${s.tp[4].toFixed(2)} ${check(s.tp[4])}
+🎯 TP6: ${s.tp[5].toFixed(2)} ${check(s.tp[5])}
+🎯 TP7: ${s.tp[6].toFixed(2)} ${check(s.tp[6])}
+🎯 TP8: ${s.tp[7].toFixed(2)} ${check(s.tp[7])}
 
-${s.activity}
+${liquidity}
 ━━━━━━━━━━━━`;
 }
 
@@ -194,7 +198,6 @@ async function getUSSymbols() {
 }
 
 // =======================
-// 💀🔥 RUN FIX (Batch + بدون ضغط)
 async function run() {
   if (running) return;
   running = true;
@@ -215,8 +218,6 @@ async function run() {
 
           let a = analyze(q.price, q.prev);
           if (!a) return;
-
-          if (a.change < 0.5) return;
 
           let ema = await getEMA(s.symbol);
           let extra = await getExtra(s.symbol);
@@ -256,7 +257,7 @@ async function startLoop() {
     } catch (e) {
       console.log(e);
     }
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise(r => setTimeout(r, 5000));
   }
 }
 
