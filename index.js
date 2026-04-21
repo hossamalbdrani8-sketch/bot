@@ -1,29 +1,31 @@
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
-import fetch from "node-fetch"; // ✅ مهم
+import fetch from "node-fetch"; // ✅ حل المشكلة
 
 const app = express();
 app.use(express.json());
 
 // 🔑 TOKEN
-const TOKEN = "PUT_YOUR_TOKEN_HERE";
+const TOKEN = "PUT_TOKEN_HERE";
 
 // 🔑 API
-const API_KEY = "PUT_YOUR_API_KEY_HERE";
+const API_KEY = "PUT_API_KEY_HERE";
 
-// 💀 اتصال ثابت
-const bot = new TelegramBot(TOKEN, {
-  polling: true
-});
+// 💀 اتصال
+const bot = new TelegramBot(TOKEN, { polling: true });
 
 let chatIds = new Set();
 let running = false;
 let lastData = {};
+let sentSignals = {}; // ✅ لتحديث الأهداف
 
 // =======================
 async function getQuote(symbol) {
   try {
     const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
+
+    if (res.status === 429) return null;
+
     const data = await res.json();
 
     if (!data?.c || !data?.pc) return null;
@@ -37,19 +39,11 @@ async function getQuote(symbol) {
 }
 
 // =======================
-async function getUSSymbols() {
-  try {
-    const res = await fetch(`https://finnhub.io/api/v1/stock/symbol?exchange=US&token=${API_KEY}`);
-    return await res.json();
-  } catch { return []; }
-}
-
-// =======================
 function analyze(price, prev) {
   let change = ((price - prev) / prev) * 100;
 
   let signal = "⚪";
-  if (change > 3) signal = "🚀 قوي";
+  if (change > 3) signal = "💀🚀 انفجار";
   else if (change > 1) signal = "🔥 صعود";
   else if (change < -3) signal = "🚨 هبوط";
 
@@ -63,22 +57,38 @@ function analyze(price, prev) {
 
 // =======================
 function format(s) {
+
+  function check(tp) {
+    return s.price >= tp ? "✅" : "";
+  }
+
   return `
+${s.market}
+
 ${s.name}
 
 💰 ${s.price.toFixed(2)}
+
 📊 ${s.signal}
 
-🎯 ${s.tp[0].toFixed(2)}
-🎯 ${s.tp[1].toFixed(2)}
-🎯 ${s.tp[2].toFixed(2)}
-🎯 ${s.tp[3].toFixed(2)}
-🎯 ${s.tp[4].toFixed(2)}
-🎯 ${s.tp[5].toFixed(2)}
-🎯 ${s.tp[6].toFixed(2)}
-🎯 ${s.tp[7].toFixed(2)}
+🎯 ${s.tp[0].toFixed(2)} ${check(s.tp[0])}
+🎯 ${s.tp[1].toFixed(2)} ${check(s.tp[1])}
+🎯 ${s.tp[2].toFixed(2)} ${check(s.tp[2])}
+🎯 ${s.tp[3].toFixed(2)} ${check(s.tp[3])}
+🎯 ${s.tp[4].toFixed(2)} ${check(s.tp[4])}
+🎯 ${s.tp[5].toFixed(2)} ${check(s.tp[5])}
+🎯 ${s.tp[6].toFixed(2)} ${check(s.tp[6])}
+🎯 ${s.tp[7].toFixed(2)} ${check(s.tp[7])}
 
 ━━━━━━━━━━━━`;
+}
+
+// =======================
+async function getUSSymbols() {
+  try {
+    const res = await fetch(`https://finnhub.io/api/v1/stock/symbol?exchange=US&token=${API_KEY}`);
+    return await res.json();
+  } catch { return []; }
 }
 
 // =======================
@@ -90,12 +100,13 @@ bot.on("message", (msg) => {
   }
 
   if (msg.text === "/scan") {
+    bot.sendMessage(msg.chat.id, "🚀 جاري الفحص...");
     run();
   }
 });
 
 // =======================
-// 💀 الحل الحقيقي هنا
+// 💀🔥 تشغيل ذكي + تحديث تلقائي للأهداف
 async function run() {
   if (running) return;
   running = true;
@@ -103,8 +114,7 @@ async function run() {
   try {
     let us = await getUSSymbols();
 
-    // 🔥 خفف الضغط (بدل السوق كامل دفعة وحدة)
-    let batchSize = 10;
+    let batchSize = 20;
 
     for (let i = 0; i < us.length; i += batchSize) {
 
@@ -117,38 +127,60 @@ async function run() {
         let a = analyze(q.price, q.prev);
         if (!a) continue;
 
-        // 🔥 فلترة خفيفة (بدونها راح ينفجر البوت)
-        if (a.change < 1) continue;
+        // 🔥 فلترة خفيفة فقط
+        if (a.change < 0.3) continue;
 
-        let text = format({
+        let data = {
           name: s.symbol,
+          market: "🇺🇸 السوق الأمريكي",
           price: q.price,
           ...a
-        });
+        };
+
+        // ✅ حفظ الإشارة لتحديثها لاحقًا
+        sentSignals[s.symbol] = data;
+
+        let text = format(data);
 
         for (let id of chatIds) {
-          try {
-            await bot.sendMessage(id, text);
-            await new Promise(r => setTimeout(r, 200)); // 🚫 منع حظر تيليجرام
-          } catch {}
+          await bot.sendMessage(id, text);
+          await new Promise(r => setTimeout(r, 200));
         }
       }
 
-      await new Promise(r => setTimeout(r, 2000)); // 🚫 منع حظر API
+      await new Promise(r => setTimeout(r, 2000));
     }
 
   } catch (e) {
-    console.log("ERROR:", e.message);
+    console.log("ERROR:", e);
   }
 
   running = false;
 }
 
 // =======================
-// 💀 تشغيل دائم فعلي
+// 💀 تحديث الأهداف تلقائي
+setInterval(async () => {
+  for (let symbol in sentSignals) {
+    let q = await getQuote(symbol);
+    if (!q) continue;
+
+    let s = sentSignals[symbol];
+    s.price = q.price;
+
+    let text = format(s);
+
+    for (let id of chatIds) {
+      await bot.sendMessage(id, text);
+      await new Promise(r => setTimeout(r, 200));
+    }
+  }
+}, 15000);
+
+// =======================
 setInterval(() => {
   run();
-}, 15000); // كل 15 ثانية
+}, 20000);
 
 app.listen(3000, () => {
   console.log("💀 BOT RUNNING STABLE");
