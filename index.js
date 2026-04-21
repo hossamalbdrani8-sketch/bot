@@ -1,42 +1,125 @@
+
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
-import fetch from "node-fetch"; // ✅ حل المشكلة
 
 const app = express();
 app.use(express.json());
 
 // 🔑 TOKEN
-const TOKEN = "PUT_TOKEN_HERE";
+const TOKEN = "8652994768:AAHwa1uXSRpqJmpL2X_yfYLjXIu437T-Dw4";
+
+// 💀 اتصال قوي ثابت
+const bot = new TelegramBot(TOKEN, {
+  polling: {
+    interval: 300,
+    autoStart: true,
+    params: { timeout: 10 }
+  }
+});
 
 // 🔑 API
-const API_KEY = "PUT_API_KEY_HERE";
-
-// 💀 اتصال
-const bot = new TelegramBot(TOKEN, { polling: true });
+const API_KEY = "d7a0311r01qspme6c44gd7a0311r01qspme6c450";
 
 let chatIds = new Set();
+let memory = {};
 let running = false;
 let lastData = {};
-let sentSignals = {}; // ✅ لتحديث الأهداف
 
 // =======================
-async function getQuote(symbol) {
+async function getCandles(symbol) {
   try {
-    const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
+    let to = Math.floor(Date.now()/1000);
+    let from = to - (60*60*24*30);
 
-    if (res.status === 429) return null;
-
+    const res = await fetch(`https://finnhub.io/api/v1/stock/candle?symbol=${symbol}&resolution=5&from=${from}&to=${to}&token=${API_KEY}`);
     const data = await res.json();
 
-    if (!data?.c || !data?.pc) return null;
+    if (data.s !== "ok") return null;
 
-    lastData[symbol] = { price: data.c, prev: data.pc };
-    return lastData[symbol];
-
+    return data.c;
   } catch {
     return null;
   }
 }
+
+function calculateEMA(data, period) {
+  let k = 2 / (period + 1);
+  let ema = data[0];
+
+  for (let i = 1; i < data.length; i++) {
+    ema = data[i] * k + ema * (1 - k);
+  }
+
+  return ema;
+}
+
+// =======================
+async function getEMA(symbol) {
+  let data = await getCandles(symbol);
+
+  if (!data || data.length < 50) {
+    let last = lastData[symbol]?.price;
+    let prev = lastData[symbol]?.prev;
+
+    if (last && prev) {
+      return {
+        emaText: "⚡ EMA سريع",
+        cross: last > prev ? "📈 صعود لحظي" : "📉 هبوط لحظي"
+      };
+    }
+
+    return {
+      emaText: "⏳ تحميل EMA",
+      cross: "..."
+    };
+  }
+
+  let slice = data.slice(-400);
+
+  let ema7 = calculateEMA(slice, 7);
+  let ema25 = calculateEMA(slice, 25);
+  let ema50 = calculateEMA(slice, 50);
+
+  let trend = "⚪";
+  if (ema7 > ema25 && ema25 > ema50) trend = "📈 صاعد";
+  if (ema7 < ema25 && ema25 < ema50) trend = "📉 هابط";
+
+  let cross = ema7 > ema25 ? "🔥 شراء" : "🚨 بيع";
+
+  return { emaText: trend, cross };
+}
+
+// =======================
+async function getExtra(symbol) {
+  try {
+    const res = await fetch(`https://query1.finance.yahoo.com/v10/finance/quoteSummary/${symbol}?modules=price`);
+    const data = await res.json();
+
+    let volume = data?.quoteSummary?.result?.[0]?.price?.regularMarketVolume?.raw;
+
+    let activity = "🪫 ضعف سيولة";
+    if (volume > 5_000_000) activity = "💹 سيولة";
+    if (volume > 20_000_000) activity = "💹🔥 قوية";
+
+    return { activity };
+
+  } catch {
+    return { activity: "❌" };
+  }
+}
+
+// =======================
+bot.on("message", (msg) => {
+  chatIds.add(msg.chat.id);
+
+  if (msg.text === "/start") {
+    bot.sendMessage(msg.chat.id, "💀 RUNNING 24/7 SNIPER MODE");
+  }
+
+  if (msg.text === "/scan") {
+    run();
+  }
+});
 
 // =======================
 function analyze(price, prev) {
@@ -71,6 +154,9 @@ ${s.name}
 
 📊 ${s.signal}
 
+📊 EMA: ${s.emaText}
+⚡ ${s.cross}
+
 🎯 ${s.tp[0].toFixed(2)} ${check(s.tp[0])}
 🎯 ${s.tp[1].toFixed(2)} ${check(s.tp[1])}
 🎯 ${s.tp[2].toFixed(2)} ${check(s.tp[2])}
@@ -80,7 +166,24 @@ ${s.name}
 🎯 ${s.tp[6].toFixed(2)} ${check(s.tp[6])}
 🎯 ${s.tp[7].toFixed(2)} ${check(s.tp[7])}
 
+${s.activity}
 ━━━━━━━━━━━━`;
+}
+
+// =======================
+async function getQuote(symbol) {
+  try {
+    const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
+    const data = await res.json();
+
+    if (!data?.c || !data?.pc) return null;
+
+    lastData[symbol] = { price: data.c, prev: data.pc };
+    return lastData[symbol];
+
+  } catch {
+    return null;
+  }
 }
 
 // =======================
@@ -92,21 +195,7 @@ async function getUSSymbols() {
 }
 
 // =======================
-bot.on("message", (msg) => {
-  chatIds.add(msg.chat.id);
-
-  if (msg.text === "/start") {
-    bot.sendMessage(msg.chat.id, "💀 RUNNING 24/7");
-  }
-
-  if (msg.text === "/scan") {
-    bot.sendMessage(msg.chat.id, "🚀 جاري الفحص...");
-    run();
-  }
-});
-
-// =======================
-// 💀🔥 تشغيل ذكي + تحديث تلقائي للأهداف
+// 💀🔥 RUN FIX (Batch + بدون ضغط)
 async function run() {
   if (running) return;
   running = true;
@@ -114,41 +203,42 @@ async function run() {
   try {
     let us = await getUSSymbols();
 
-    let batchSize = 20;
+    let batchSize = 50;
 
     for (let i = 0; i < us.length; i += batchSize) {
 
       let batch = us.slice(i, i + batchSize);
 
-      for (let s of batch) {
-        let q = await getQuote(s.symbol);
-        if (!q) continue;
+      await Promise.all(batch.map(async (s) => {
+        try {
+          let q = await getQuote(s.symbol);
+          if (!q) return;
 
-        let a = analyze(q.price, q.prev);
-        if (!a) continue;
+          let a = analyze(q.price, q.prev);
+          if (!a) return;
 
-        // 🔥 فلترة خفيفة فقط
-        if (a.change < 0.3) continue;
+          if (a.change < 0.5) return;
 
-        let data = {
-          name: s.symbol,
-          market: "🇺🇸 السوق الأمريكي",
-          price: q.price,
-          ...a
-        };
+          let ema = await getEMA(s.symbol);
+          let extra = await getExtra(s.symbol);
 
-        // ✅ حفظ الإشارة لتحديثها لاحقًا
-        sentSignals[s.symbol] = data;
+          let text = format({
+            name:s.symbol,
+            market:"🇺🇸 السوق الأمريكي",
+            price:q.price,
+            ...a,
+            ...ema,
+            ...extra
+          });
 
-        let text = format(data);
+          for (let id of chatIds) {
+            await bot.sendMessage(id, text);
+          }
 
-        for (let id of chatIds) {
-          await bot.sendMessage(id, text);
-          await new Promise(r => setTimeout(r, 200));
-        }
-      }
+        } catch {}
+      }));
 
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 1500));
     }
 
   } catch (e) {
@@ -159,29 +249,20 @@ async function run() {
 }
 
 // =======================
-// 💀 تحديث الأهداف تلقائي
-setInterval(async () => {
-  for (let symbol in sentSignals) {
-    let q = await getQuote(symbol);
-    if (!q) continue;
-
-    let s = sentSignals[symbol];
-    s.price = q.price;
-
-    let text = format(s);
-
-    for (let id of chatIds) {
-      await bot.sendMessage(id, text);
-      await new Promise(r => setTimeout(r, 200));
+// 💀 24/7 LOOP
+async function startLoop() {
+  while (true) {
+    try {
+      await run();
+    } catch (e) {
+      console.log(e);
     }
+    await new Promise(r => setTimeout(r, 3000));
   }
-}, 15000);
+}
 
-// =======================
-setInterval(() => {
-  run();
-}, 20000);
+startLoop();
 
 app.listen(3000, () => {
-  console.log("💀 BOT RUNNING STABLE");
+  console.log("💀 RUNNING 24/7 FULL MARKET");
 });
