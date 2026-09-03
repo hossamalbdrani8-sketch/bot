@@ -1,766 +1,1301 @@
 // ============================================================
-// 💀 US STOCK SCANNER TELEGRAM BOT
-// نسخة مستقرة بدون Finnhub API
-// يعتمد على Yahoo Finance Public Chart/Screener
+// 🇺🇸 US STOCK TELEGRAM BOT
+// EMA + LIQUIDITY + VOLUME + VWAP + TARGETS
+// Node.js 18+
 // ============================================================
-// Node.js 18+ مطلوب
-// لا تحتاج node-fetch
+
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
-const app = express();
-app.use(express.json());
+
 // ============================================================
-// 🔐 الإعدادات
+// الإعدادات
 // ============================================================
-// ضعها في Environment Variables
+
 const TOKEN = process.env.TELEGRAM_TOKEN;
-// عدد الأسهم التي يتم فحصها في كل دورة
+
+const PORT = Number(process.env.PORT || 3000);
+
 const MAX_SYMBOLS = Number(process.env.MAX_SYMBOLS || 250);
-// الحد الأدنى للتغير لإرسال الإشارة
+
 const MIN_CHANGE = Number(process.env.MIN_CHANGE || 0.30);
-// كل كم دقيقة يعاد الفحص
+
 const SCAN_INTERVAL_MIN = Number(
   process.env.SCAN_INTERVAL_MIN || 5
 );
-// تحديث الإشارات الموجودة
+
 const UPDATE_INTERVAL_SEC = Number(
   process.env.UPDATE_INTERVAL_SEC || 30
 );
-// التأخير بين طلبات الأسعار
+
 const REQUEST_DELAY_MS = Number(
   process.env.REQUEST_DELAY_MS || 350
 );
-// ============================================================
-// 🔐 التأكد من TOKEN
-// ============================================================
+
 if (!TOKEN) {
-  console.error(
-    "❌ TELEGRAM_TOKEN غير موجود في Environment Variables"
-  );
+  console.error("❌ TELEGRAM_TOKEN غير موجود");
   process.exit(1);
 }
+
 // ============================================================
-// 🤖 Telegram
+// Telegram
 // ============================================================
+
 const bot = new TelegramBot(TOKEN, {
-  polling: true,
+  polling: true
 });
+
+const app = express();
+
+app.use(express.json());
+
 // ============================================================
-// 🌐 Web Server
+// التخزين
 // ============================================================
-const PORT = Number(process.env.PORT || 3000);
-app.get("/", (req, res) => {
-  res.status(200).send("💀 US STOCK BOT RUNNING");
-});
-app.get("/health", (req, res) => {
-  res.json({
-    status: "ok",
-    running,
-    users: chatIds.size,
-    signals: Object.keys(sentSignals).length,
-    uptime: Math.floor(process.uptime()),
-  });
-});
-app.listen(PORT, () => {
-  console.log(`🌐 Server running on port ${PORT}`);
-});
-// ============================================================
-// 🧠 حالة البوت
-// ============================================================
-const chatIds = new Set();
-let running = false;
-let scanStartedAt = null;
-let lastScanAt = null;
-let lastScanCount = 0;
+
 const sentSignals = new Map();
-const lastRequest = new Map();
+
+let scanning = false;
+
+let lastScanTime = null;
+
+let lastScanCount = 0;
+
 let cachedSymbols = [];
+
 let symbolsCacheTime = 0;
-const SYMBOL_CACHE_MS = 15 * 60 * 1000;
+
 // ============================================================
-// ⏳ Delay
+// أدوات عامة
 // ============================================================
+
 function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
-// ============================================================
-// 🔒 تنظيف الرمز
-// ============================================================
-function cleanSymbol(symbol) {
-  if (!symbol) return "";
-  return String(symbol)
-    .trim()
-    .toUpperCase()
-    .replace(/\./g, "-");
-}
-// ============================================================
-// 💰 Yahoo Chart
-// ============================================================
-async function yahooChart(symbol) {
-  try {
-    const now = Math.floor(Date.now() / 1000);
-    const url =
-      "https://query1.finance.yahoo.com/v8/finance/chart/" +
-      encodeURIComponent(symbol) +
-      "?period1=" +
-      (now - 86400 * 5) +
-      "&period2=" +
-      now +
-      "&interval=1d&events=history&includeAdjustedClose=true";
-    const response = await fetch(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        Accept: "application/json",
-      },
-    });
-    if (!response.ok) {
-      return null;
-    }
-    const json = await response.json();
-    const result = json?.chart?.result?.[0];
-    if (!result) {
-      return null;
-    }
-    const meta = result.meta;
-    const price =
-      Number(meta?.regularMarketPrice) ||
-      Number(meta?.previousClose);
-    const previousClose =
-      Number(meta?.previousClose) ||
-      Number(meta?.chartPreviousClose);
-    if (
-      !Number.isFinite(price) ||
-      !Number.isFinite(previousClose) ||
-      price <= 0 ||
-      previousClose <= 0
-    ) {
-      return null;
-    }
-    const change =
-      ((price - previousClose) / previousClose) * 100;
-    return {
-      symbol,
-      price,
-      previousClose,
-      change,
-      currency: meta?.currency || "USD",
-      exchange: meta?.exchangeName || "US",
-      marketState: meta?.marketState || "UNKNOWN",
-    };
-  } catch (error) {
-    console.log(
-      `⚠️ Yahoo error ${symbol}:`,
-      error.message
-    );
-    return null;
+
+function roundPrice(price) {
+  if (!Number.isFinite(price)) return "0.00";
+
+  if (price < 1) {
+    return price.toFixed(2);
   }
-}
-// ============================================================
-// 🔥 Yahoo Screener
-// ============================================================
-async function yahooScreener(scrId, count = 250) {
-  try {
-    const url =
-      "https://query1.finance.yahoo.com/v1/finance/screener/predefined" +
-      "?scrIds=" +
-      encodeURIComponent(scrId) +
-      "&count=" +
-      count;
-    const response = await fetch(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        Accept: "application/json",
-      },
-    });
-    if (!response.ok) {
-      console.log(
-        `⚠️ Screener ${scrId}: HTTP ${response.status}`
-      );
-      return [];
-    }
-    const json = await response.json();
-    const quotes =
-      json?.finance?.result?.[0]?.quotes || [];
-    return quotes
-      .map((q) => cleanSymbol(q.symbol))
-      .filter(Boolean);
-  } catch (error) {
-    console.log(
-      `⚠️ Screener error ${scrId}:`,
-      error.message
-    );
-    return [];
+
+  if (price < 10) {
+    return price.toFixed(2);
   }
+
+  return price.toFixed(2);
 }
+
+function formatNumber(value) {
+  if (!Number.isFinite(value)) return "0";
+
+  if (value >= 1_000_000_000) {
+    return `${(value / 1_000_000_000).toFixed(2)}B`;
+  }
+
+  if (value >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(2)}M`;
+  }
+
+  if (value >= 1_000) {
+    return `${(value / 1_000).toFixed(2)}K`;
+  }
+
+  return Math.round(value).toLocaleString("en-US");
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
 // ============================================================
-// 📋 الحصول على الأسهم
+// Yahoo Finance
 // ============================================================
-async function getUSSymbols(force = false) {
+
+async function yahooFetch(url) {
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+      "Accept": "application/json"
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Yahoo HTTP ${response.status}`);
+  }
+
+  return response.json();
+}
+
+// ============================================================
+// قائمة الأسهم
+// ============================================================
+
+async function getSymbols() {
+
   const now = Date.now();
+
+  // كاش 15 دقيقة
   if (
-    !force &&
     cachedSymbols.length > 0 &&
-    now - symbolsCacheTime < SYMBOL_CACHE_MS
+    now - symbolsCacheTime < 15 * 60 * 1000
   ) {
     return cachedSymbols;
   }
-  console.log("📋 تحديث قائمة الأسهم...");
-  const sets = await Promise.all([
-    yahooScreener("day_gainers", 250),
-    yahooScreener("most_actives", 250),
-    yahooScreener("day_losers", 100),
-    yahooScreener("growth_technology_stocks", 250),
-  ]);
-  const unique = new Set();
-  for (const list of sets) {
-    for (const symbol of list) {
-      if (unique.size >= MAX_SYMBOLS) {
-        break;
-      }
-      unique.add(symbol);
-    }
-  }
-  cachedSymbols = [...unique];
-  symbolsCacheTime = now;
-  console.log(
-    `📊 تم تحميل ${cachedSymbols.length} سهم`
-  );
-  return cachedSymbols;
-}
-// ============================================================
-// 🛡️ منع الطلبات السريعة لنفس السهم
-// ============================================================
-function canRequest(symbol) {
-  const now = Date.now();
-  const previous = lastRequest.get(symbol) || 0;
-  if (now - previous < 1000) {
-    return false;
-  }
-  lastRequest.set(symbol, now);
-  return true;
-}
-// ============================================================
-// 💰 جلب السعر مع إعادة المحاولة
-// ============================================================
-async function getQuote(symbol, retries = 2) {
-  symbol = cleanSymbol(symbol);
-  if (!symbol) {
-    return null;
-  }
-  if (!canRequest(symbol)) {
-    return null;
-  }
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    const data = await yahooChart(symbol);
-    if (data) {
-      return data;
-    }
-    if (attempt < retries) {
-      await sleep(1000 * (attempt + 1));
-    }
-  }
-  return null;
-}
-// ============================================================
-// 🧠 تحليل السهم
-// ============================================================
-function analyze(data) {
-  if (!data) {
-    return null;
-  }
-  const price = data.price;
-  const change = data.change;
-  let signal = "⚪ مراقبة";
-  let strength = 0;
-  if (change >= 5) {
-    signal = "💀🚀 انفجار قوي";
-    strength = 100;
-  } else if (change >= 3) {
-    signal = "🚀 صعود قوي";
-    strength = 90;
-  } else if (change >= 2) {
-    signal = "🔥 صعود";
-    strength = 75;
-  } else if (change >= 1) {
-    signal = "🟢 إيجابي";
-    strength = 60;
-  } else if (change >= 0.3) {
-    signal = "🟢 بداية صعود";
-    strength = 50;
-  } else if (change <= -5) {
-    signal = "🚨 هبوط قوي";
-    strength = 0;
-  } else if (change <= -3) {
-    signal = "🔻 هبوط";
-    strength = 10;
-  } else if (change < 0) {
-    signal = "🔴 سلبي";
-    strength = 25;
-  }
-  // ========================================================
-  // 🎯 الأهداف
-  // ========================================================
-  const targets = [
-    price * 1.02,
-    price * 1.04,
-    price * 1.06,
-    price * 1.08,
-    price * 1.10,
-    price * 1.12,
-    price * 1.15,
-    price * 1.18,
+
+  const lists = [
+    "day_gainers",
+    "most_actives",
+    "growth_technology_stocks"
   ];
-  return {
-    symbol: data.symbol,
-    price,
-    previousClose: data.previousClose,
-    change,
-    signal,
-    strength,
-    targets,
-    marketState: data.marketState,
-    createdAt: Date.now(),
-  };
-}
-// ============================================================
-// 🎯 تنسيق السعر
-// ============================================================
-function priceFormat(value) {
-  if (!Number.isFinite(value)) {
-    return "0.00";
-  }
-  if (value < 1) {
-    return value.toFixed(4);
-  }
-  if (value < 10) {
-    return value.toFixed(3);
-  }
-  return value.toFixed(2);
-}
-// ============================================================
-// 🎯 فحص الهدف
-// ============================================================
-function targetStatus(price, target) {
-  return price >= target ? "✅" : "";
-}
-// ============================================================
-// 📩 رسالة السهم
-// ============================================================
-function formatSignal(s) {
-  const targetLines = s.targets
-    .map(
-      (target, index) =>
-        `🎯 الهدف ${index + 1}: ${priceFormat(
-          target
-        )} ${targetStatus(s.price, target)}`
-    )
-    .join("\n");
-  const direction =
-    s.change >= 0 ? "📈" : "📉";
-  return `
-🇺🇸 <b>السوق الأمريكي</b>
-<b>💠 ${s.symbol}</b>
-💰 السعر: <b>$${priceFormat(s.price)}</b>
-${direction} التغير: <b>${s.change.toFixed(2)}%</b>
-📊 الإشارة:
-<b>${s.signal}</b>
-💪 قوة الإشارة:
-<b>${s.strength}%</b>
-━━━━━━━━━━━━━━
-🎯 <b>الأهداف</b>
-━━━━━━━━━━━━━━
-${targetLines}
-━━━━━━━━━━━━━━
-🕐 حالة السوق:
-${s.marketState}
-⚠️ الإشارة آلية وليست توصية مالية.
-`;
-}
-// ============================================================
-// 📤 إرسال للجميع
-// ============================================================
-async function sendToAll(text) {
-  for (const chatId of chatIds) {
+
+  const symbols = new Set();
+
+  for (const list of lists) {
+
     try {
-      await bot.sendMessage(chatId, text, {
-        parse_mode: "HTML",
-        disable_web_page_preview: true,
-      });
-      await sleep(250);
+
+      const url =
+        `https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=${encodeURIComponent(list)}&count=250`;
+
+      const data = await yahooFetch(url);
+
+      const quotes =
+        data?.finance?.result?.[0]?.quotes || [];
+
+      for (const item of quotes) {
+
+        const symbol = item?.symbol;
+
+        if (
+          symbol &&
+          /^[A-Z0-9.\-]+$/.test(symbol) &&
+          !symbol.includes("=") &&
+          !symbol.includes("^")
+        ) {
+          symbols.add(symbol);
+        }
+
+        if (symbols.size >= MAX_SYMBOLS) {
+          break;
+        }
+      }
+
     } catch (error) {
+
       console.log(
-        `⚠️ Telegram error ${chatId}:`,
+        `⚠️ تعذر تحميل القائمة ${list}:`,
         error.message
       );
-      // المستخدم حظر البوت
-      if (
-        error.message?.includes("bot was blocked") ||
-        error.message?.includes("chat not found") ||
-        error.message?.includes("user is deactivated")
-      ) {
-        chatIds.delete(chatId);
-      }
+    }
+
+    if (symbols.size >= MAX_SYMBOLS) {
+      break;
     }
   }
+
+  cachedSymbols = [...symbols].slice(0, MAX_SYMBOLS);
+
+  symbolsCacheTime = now;
+
+  console.log(
+    `📋 تم تحميل ${cachedSymbols.length} سهم`
+  );
+
+  return cachedSymbols;
 }
+
 // ============================================================
-// 🔥 إرسال إشارة جديدة فقط
+// جلب بيانات السهم
 // ============================================================
-async function processSignal(data) {
-  if (!data) {
+
+async function getStockData(symbol) {
+
+  const url =
+    `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}` +
+    `?range=5d&interval=5m&includePrePost=false`;
+
+  const data = await yahooFetch(url);
+
+  const result =
+    data?.chart?.result?.[0];
+
+  if (!result) {
+    throw new Error("لا توجد بيانات");
+  }
+
+  const meta = result.meta || {};
+
+  const quote =
+    result.indicators?.quote?.[0];
+
+  if (!quote) {
+    throw new Error("بيانات التداول غير موجودة");
+  }
+
+  const closes = (quote.close || [])
+    .map(Number)
+    .filter(Number.isFinite);
+
+  const highs = (quote.high || [])
+    .map(Number)
+    .filter(Number.isFinite);
+
+  const lows = (quote.low || [])
+    .map(Number)
+    .filter(Number.isFinite);
+
+  const volumes = (quote.volume || [])
+    .map(Number)
+    .filter(Number.isFinite);
+
+  if (closes.length < 20) {
+    throw new Error("بيانات غير كافية");
+  }
+
+  const price =
+    Number(meta.regularMarketPrice) ||
+    closes[closes.length - 1];
+
+  const previousClose =
+    Number(meta.previousClose) ||
+    Number(meta.chartPreviousClose) ||
+    closes[Math.max(0, closes.length - 2)];
+
+  if (
+    !Number.isFinite(price) ||
+    !Number.isFinite(previousClose) ||
+    previousClose <= 0
+  ) {
+    throw new Error("السعر غير صالح");
+  }
+
+  // ==========================================================
+  // التغير
+  // ==========================================================
+
+  const change =
+    ((price - previousClose) / previousClose) * 100;
+
+  // ==========================================================
+  // EMA
+  // ==========================================================
+
+  const ema7 = calculateEMA(closes, 7);
+
+  const ema14 = calculateEMA(closes, 14);
+
+  const ema25 = calculateEMA(closes, 25);
+
+  const ema50 = calculateEMA(closes, 50);
+
+  // ==========================================================
+  // VWAP
+  // ==========================================================
+
+  const vwap =
+    calculateVWAP(
+      highs,
+      lows,
+      closes,
+      volumes
+    );
+
+  // ==========================================================
+  // حجم التداول
+  // ==========================================================
+
+  const currentVolume =
+    volumes.length
+      ? volumes[volumes.length - 1]
+      : 0;
+
+  const averageVolume =
+    average(
+      volumes.slice(
+        Math.max(0, volumes.length - 50),
+        volumes.length
+      )
+    );
+
+  // ==========================================================
+  // قوة الفوليوم
+  // ==========================================================
+
+  let volumeStrength = 0;
+
+  if (averageVolume > 0) {
+
+    volumeStrength =
+      (currentVolume / averageVolume) * 50;
+
+    volumeStrength =
+      clamp(volumeStrength, 0, 100);
+  }
+
+  // ==========================================================
+  // قوة VWAP
+  // ==========================================================
+
+  let vwapStrength = 50;
+
+  if (vwap > 0) {
+
+    const distance =
+      ((price - vwap) / vwap) * 100;
+
+    vwapStrength =
+      50 + distance * 20;
+
+    vwapStrength =
+      clamp(vwapStrength, 0, 100);
+  }
+
+  // ==========================================================
+  // ضغط السيولة
+  // ==========================================================
+
+  let buyPressure = 0;
+
+  let sellPressure = 0;
+
+  const lookback = Math.min(
+    20,
+    closes.length
+  );
+
+  for (
+    let i = closes.length - lookback;
+    i < closes.length;
+    i++
+  ) {
+
+    const close = closes[i];
+
+    const open =
+      i > 0
+        ? closes[i - 1]
+        : close;
+
+    const volume =
+      volumes[i] || 0;
+
+    if (close > open) {
+
+      buyPressure += volume;
+
+    } else if (close < open) {
+
+      sellPressure += volume;
+
+    }
+  }
+
+  const totalPressure =
+    buyPressure + sellPressure;
+
+  let liquidityState =
+    "⚪ سيولة متوازنة";
+
+  if (totalPressure > 0) {
+
+    const buyRatio =
+      (buyPressure / totalPressure) * 100;
+
+    const sellRatio =
+      (sellPressure / totalPressure) * 100;
+
+    if (
+      buyRatio >= 65 &&
+      volumeStrength >= 60 &&
+      price >= vwap
+    ) {
+
+      liquidityState =
+        "🟢 دخول سيولة قوية";
+
+    } else if (
+      sellRatio >= 65 &&
+      volumeStrength >= 60 &&
+      price < vwap
+    ) {
+
+      liquidityState =
+        "🔴 خروج سيولة";
+
+    } else if (buyRatio >= 55) {
+
+      liquidityState =
+        "🟢 دخول سيولة";
+
+    } else if (sellRatio >= 55) {
+
+      liquidityState =
+        "🔴 خروج سيولة";
+    }
+  }
+
+  // ==========================================================
+  // EMA Signal
+  // ==========================================================
+
+  let emaSignal =
+    "⚪ EMA متوازن";
+
+  if (
+    ema7 > ema14 &&
+    ema14 > ema25 &&
+    ema25 > ema50
+  ) {
+
+    emaSignal =
+      "⚡ EMA سريع";
+
+  } else if (
+    ema7 < ema14 &&
+    ema14 < ema25 &&
+    ema25 < ema50
+  ) {
+
+    emaSignal =
+      "🔻 EMA هابط";
+  }
+
+  // ==========================================================
+  // الاتجاه اللحظي
+  // ==========================================================
+
+  let intradaySignal =
+    "⚪ مستقر";
+
+  if (
+    price > ema7 &&
+    ema7 > ema14 &&
+    price > vwap
+  ) {
+
+    intradaySignal =
+      "⚡ 📈 صعود لحظي";
+
+  } else if (
+    price < ema7 &&
+    ema7 < ema14 &&
+    price < vwap
+  ) {
+
+    intradaySignal =
+      "⚡ 📉 هبوط لحظي";
+  }
+
+  // ==========================================================
+  // إشارة رئيسية
+  // ==========================================================
+
+  let signal =
+    "📊 محايد";
+
+  if (
+    change >= MIN_CHANGE &&
+    price > ema7 &&
+    ema7 > ema14 &&
+    price > vwap &&
+    volumeStrength >= 50
+  ) {
+
+    signal =
+      "📊 🔥 صعود";
+
+  } else if (
+    change <= -MIN_CHANGE &&
+    price < ema7 &&
+    ema7 < ema14 &&
+    price < vwap &&
+    volumeStrength >= 50
+  ) {
+
+    signal =
+      "📊 🔻 هبوط";
+  }
+
+  return {
+    symbol,
+    price,
+    previousClose,
+    change,
+    ema7,
+    ema14,
+    ema25,
+    ema50,
+    vwap,
+    currentVolume,
+    averageVolume,
+    volumeStrength,
+    vwapStrength,
+    liquidityState,
+    emaSignal,
+    intradaySignal,
+    signal
+  };
+}
+
+// ============================================================
+// EMA
+// ============================================================
+
+function calculateEMA(values, period) {
+
+  if (!values.length) {
+    return 0;
+  }
+
+  const multiplier =
+    2 / (period + 1);
+
+  let ema =
+    values[0];
+
+  for (let i = 1; i < values.length; i++) {
+
+    ema =
+      (values[i] - ema) *
+      multiplier +
+      ema;
+  }
+
+  return ema;
+}
+
+// ============================================================
+// VWAP
+// ============================================================
+
+function calculateVWAP(
+  highs,
+  lows,
+  closes,
+  volumes
+) {
+
+  let totalPV = 0;
+
+  let totalVolume = 0;
+
+  const length = Math.min(
+    highs.length,
+    lows.length,
+    closes.length,
+    volumes.length
+  );
+
+  const start =
+    Math.max(0, length - 78);
+
+  for (let i = start; i < length; i++) {
+
+    const high = highs[i];
+
+    const low = lows[i];
+
+    const close = closes[i];
+
+    const volume = volumes[i];
+
+    if (
+      !Number.isFinite(high) ||
+      !Number.isFinite(low) ||
+      !Number.isFinite(close) ||
+      !Number.isFinite(volume) ||
+      volume <= 0
+    ) {
+      continue;
+    }
+
+    const typical =
+      (high + low + close) / 3;
+
+    totalPV +=
+      typical * volume;
+
+    totalVolume +=
+      volume;
+  }
+
+  if (totalVolume <= 0) {
+    return closes[closes.length - 1];
+  }
+
+  return totalPV / totalVolume;
+}
+
+// ============================================================
+// Average
+// ============================================================
+
+function average(values) {
+
+  if (!values.length) {
+    return 0;
+  }
+
+  const sum =
+    values.reduce(
+      (a, b) => a + b,
+      0
+    );
+
+  return sum / values.length;
+}
+
+// ============================================================
+// الأهداف
+// ============================================================
+
+function calculateTargets(entry) {
+
+  const percentages = [
+    0.02,
+    0.04,
+    0.06,
+    0.08,
+    0.10,
+    0.12,
+    0.15,
+    0.18
+  ];
+
+  return percentages.map(
+    percent =>
+      entry * (1 + percent)
+  );
+}
+
+// ============================================================
+// تنسيق الرسالة
+// ============================================================
+
+function formatSignal(data) {
+
+  const targets =
+    calculateTargets(data.price);
+
+  const targetText =
+    targets
+      .map(
+        target =>
+          `🎯 ${roundPrice(target)}`
+      )
+      .join("\n");
+
+  return `
+🇺🇸 السوق الأمريكي
+
+${data.symbol}
+
+💰 ${roundPrice(data.price)}
+
+${data.signal}
+
+📊 EMA: ${data.emaSignal}
+${data.intradaySignal}
+
+${data.liquidityState}
+💪 قوة الفوليوم: ${data.volumeStrength.toFixed(0)}%
+📦 حجم التداول: ${formatNumber(data.currentVolume)}
+🔥 قوة الفيواب: ${data.vwapStrength.toFixed(0)}%
+
+${targetText}
+
+━━━━━━━━━━━━
+`.trim();
+}
+
+// ============================================================
+// إرسال إشارة
+// ============================================================
+
+async function sendSignal(chatId, data) {
+
+  const old =
+    sentSignals.get(data.symbol);
+
+  // لا نكرر نفس الإشارة
+  if (
+    old &&
+    old.signal === data.signal &&
+    old.liquidityState === data.liquidityState
+  ) {
+    return false;
+  }
+
+  sentSignals.set(
+    data.symbol,
+    {
+      ...data,
+      entryPrice: data.price,
+      targetsHit: []
+    }
+  );
+
+  await bot.sendMessage(
+    chatId,
+    formatSignal(data)
+  );
+
+  return true;
+}
+
+// ============================================================
+// فحص الأسهم
+// ============================================================
+
+async function scan(chatId) {
+
+  if (scanning) {
     return;
   }
-  const analysis = analyze(data);
-  if (!analysis) {
+
+  scanning = true;
+
+  console.log("🔎 بدء الفحص...");
+
+  try {
+
+    const symbols =
+      await getSymbols();
+
+    let found = 0;
+
+    for (
+      const symbol of symbols
+    ) {
+
+      try {
+
+        const data =
+          await getStockData(symbol);
+
+        // نركز على الأسهم الصاعدة
+        if (
+          data.change >= MIN_CHANGE &&
+          data.price > 0
+        ) {
+
+          const sent =
+            await sendSignal(
+              chatId,
+              data
+            );
+
+          if (sent) {
+            found++;
+          }
+        }
+
+      } catch (error) {
+
+        console.log(
+          `⚠️ ${symbol}: ${error.message}`
+        );
+      }
+
+      await sleep(
+        REQUEST_DELAY_MS
+      );
+    }
+
+    lastScanCount = found;
+
+    lastScanTime =
+      new Date();
+
+    console.log(
+      `✅ انتهى الفحص — إشارات جديدة: ${found}`
+    );
+
+  } finally {
+
+    scanning = false;
+  }
+}
+
+// ============================================================
+// تحديث الإشارات
+// ============================================================
+
+async function updateSignals() {
+
+  if (
+    sentSignals.size === 0
+  ) {
     return;
   }
-  if (analysis.change < MIN_CHANGE) {
+
+  for (
+    const [
+      symbol,
+      old
+    ] of sentSignals
+  ) {
+
+    try {
+
+      const data =
+        await getStockData(symbol);
+
+      // تحديث البيانات الداخلية
+      old.price =
+        data.price;
+
+      old.change =
+        data.change;
+
+      old.volumeStrength =
+        data.volumeStrength;
+
+      old.currentVolume =
+        data.currentVolume;
+
+      old.vwapStrength =
+        data.vwapStrength;
+
+      old.liquidityState =
+        data.liquidityState;
+
+      old.emaSignal =
+        data.emaSignal;
+
+      old.intradaySignal =
+        data.intradaySignal;
+
+      old.signal =
+        data.signal;
+
+      const targets =
+        calculateTargets(
+          old.entryPrice
+        );
+
+      for (
+        let i = 0;
+        i < targets.length;
+        i++
+      ) {
+
+        const target =
+          targets[i];
+
+        if (
+          data.price >= target &&
+          !old.targetsHit.includes(i)
+        ) {
+
+          old.targetsHit.push(i);
+
+          console.log(
+            `🎯 ${symbol} وصل الهدف ${i + 1}`
+          );
+
+          // نرسل تحديث الهدف فقط
+          for (
+            const chatId of old.chatIds || []
+          ) {
+
+            await bot.sendMessage(
+              chatId,
+              `
+🎯 تحقق الهدف ${i + 1}
+
+${symbol}
+
+💰 السعر الحالي:
+${roundPrice(data.price)}
+
+🎯 الهدف:
+${roundPrice(target)}
+
+${data.liquidityState}
+
+💪 قوة الفوليوم:
+${data.volumeStrength.toFixed(0)}%
+
+🔥 قوة الفيواب:
+${data.vwapStrength.toFixed(0)}%
+
+━━━━━━━━━━━━
+`.trim()
+            );
+          }
+        }
+      }
+
+    } catch (error) {
+
+      console.log(
+        `⚠️ تحديث ${symbol}:`,
+        error.message
+      );
+    }
+
+    await sleep(
+      REQUEST_DELAY_MS
+    );
+  }
+}
+
+// ============================================================
+// حفظ Chat ID للإشارة
+// ============================================================
+
+function attachChatId(
+  symbol,
+  chatId
+) {
+
+  const item =
+    sentSignals.get(symbol);
+
+  if (!item) {
     return;
   }
-  const old = sentSignals.get(analysis.symbol);
-  // ========================================================
-  // منع التكرار
-  // ========================================================
-  if (old) {
-    const priceMove =
-      Math.abs(
-        (analysis.price - old.price) /
-          old.price
-      ) * 100;
-    // إذا لم يتحرك السعر بشكل واضح لا ترسل مرة أخرى
-    if (priceMove < 1) {
+
+  if (!item.chatIds) {
+    item.chatIds = [];
+  }
+
+  if (
+    !item.chatIds.includes(chatId)
+  ) {
+    item.chatIds.push(chatId);
+  }
+}
+
+// ============================================================
+// /start
+// ============================================================
+
+bot.onText(
+  /\/start/,
+  async msg => {
+
+    const chatId =
+      msg.chat.id;
+
+    await bot.sendMessage(
+      chatId,
+      `
+🇺🇸 بوت مراقبة الأسهم الأمريكية
+
+✅ EMA
+✅ الاتجاه اللحظي
+🟢 دخول السيولة
+🔴 خروج السيولة
+💪 قوة الفوليوم
+📦 حجم التداول
+🔥 قوة VWAP
+🎯 8 أهداف
+
+الأوامر:
+
+/scan — فحص الأسهم
+/signals — الإشارات الحالية
+/status — حالة البوت
+/refresh — تحديث قائمة الأسهم
+/stop — إيقاف الإشارات
+
+━━━━━━━━━━━━
+`.trim()
+    );
+  }
+);
+
+// ============================================================
+// /scan
+// ============================================================
+
+bot.onText(
+  /\/scan/,
+  async msg => {
+
+    const chatId =
+      msg.chat.id;
+
+    await bot.sendMessage(
+      chatId,
+      "🔎 بدأ فحص الأسهم الأمريكية..."
+    );
+
+    await scan(chatId);
+
+    // ربط chatId بالإشارات
+    for (
+      const [
+        symbol
+      ] of sentSignals
+    ) {
+      attachChatId(
+        symbol,
+        chatId
+      );
+    }
+
+    await bot.sendMessage(
+      chatId,
+      `
+✅ انتهى الفحص
+
+📊 إشارات جديدة:
+${lastScanCount}
+
+⏱ آخر فحص:
+${lastScanTime
+  ? lastScanTime.toLocaleString("ar-SA")
+  : "—"}
+`.trim()
+    );
+  }
+);
+
+// ============================================================
+// /signals
+// ============================================================
+
+bot.onText(
+  /\/signals/,
+  async msg => {
+
+    const chatId =
+      msg.chat.id;
+
+    if (
+      sentSignals.size === 0
+    ) {
+
+      await bot.sendMessage(
+        chatId,
+        "📭 لا توجد إشارات حالياً."
+      );
+
       return;
     }
+
+    let text =
+      "📊 الإشارات الحالية\n\n";
+
+    let count = 0;
+
+    for (
+      const [
+        symbol,
+        data
+      ] of sentSignals
+    ) {
+
+      text +=
+        `${symbol} — ${roundPrice(data.price)} — ${data.signal}\n`;
+
+      count++;
+
+      if (count >= 30) {
+        break;
+      }
+    }
+
+    await bot.sendMessage(
+      chatId,
+      text.trim()
+    );
   }
-  sentSignals.set(
-    analysis.symbol,
-    analysis
-  );
-  const text = formatSignal(analysis);
-  await sendToAll(text);
-}
+);
+
 // ============================================================
-// 🚀 الفحص الرئيسي
+// /status
 // ============================================================
-async function runScan(force = false) {
-  if (running) {
-    console.log("⏳ الفحص السابق ما زال يعمل");
-    return;
+
+bot.onText(
+  /\/status/,
+  async msg => {
+
+    const chatId =
+      msg.chat.id;
+
+    await bot.sendMessage(
+      chatId,
+      `
+🟢 حالة البوت
+
+📡 Telegram: يعمل
+📊 الإشارات: ${sentSignals.size}
+📋 الأسهم: ${cachedSymbols.length}
+🔎 الفحص: ${scanning ? "جارٍ" : "متوقف"}
+⏱ آخر فحص:
+${lastScanTime
+  ? lastScanTime.toLocaleString("ar-SA")
+  : "لم يبدأ"}
+
+━━━━━━━━━━━━
+`.trim()
+    );
   }
-  running = true;
-  scanStartedAt = Date.now();
-  console.log("=================================");
-  console.log("🚀 بدء فحص السوق الأمريكي");
-  console.log("=================================");
-  try {
-    const symbols =
-      await getUSSymbols(force);
-    let scanned = 0;
-    for (const symbol of symbols) {
+);
+
+// ============================================================
+// /refresh
+// ============================================================
+
+bot.onText(
+  /\/refresh/,
+  async msg => {
+
+    const chatId =
+      msg.chat.id;
+
+    cachedSymbols = [];
+
+    symbolsCacheTime = 0;
+
+    await bot.sendMessage(
+      chatId,
+      "🔄 تم مسح قائمة الأسهم وسيتم تحميلها من جديد."
+    );
+  }
+);
+
+// ============================================================
+// /stop
+// ============================================================
+
+bot.onText(
+  /\/stop/,
+  async msg => {
+
+    const chatId =
+      msg.chat.id;
+
+    sentSignals.clear();
+
+    await bot.sendMessage(
+      chatId,
+      "🛑 تم مسح الإشارات الحالية."
+    );
+  }
+);
+
+// ============================================================
+// تحديث كل X ثانية
+// ============================================================
+
+setInterval(
+  async () => {
+
+    try {
+
+      await updateSignals();
+
+    } catch (error) {
+
+      console.log(
+        "⚠️ خطأ في التحديث:",
+        error.message
+      );
+    }
+
+  },
+  UPDATE_INTERVAL_SEC * 1000
+);
+
+// ============================================================
+// فحص تلقائي
+// ============================================================
+
+setInterval(
+  async () => {
+
+    console.log(
+      "⏰ الفحص التلقائي..."
+    );
+
+    // الفحص التلقائي يحتاج Chat IDs
+    const chats =
+      new Set();
+
+    for (
+      const data of sentSignals.values()
+    ) {
+
+      for (
+        const chatId of data.chatIds || []
+      ) {
+        chats.add(chatId);
+      }
+    }
+
+    for (
+      const chatId of chats
+    ) {
+
       try {
-        const data =
-          await getQuote(symbol);
-        if (data) {
-          scanned++;
-          await processSignal(data);
-        }
-        await sleep(REQUEST_DELAY_MS);
+
+        await scan(chatId);
+
       } catch (error) {
+
         console.log(
-          `⚠️ ${symbol}:`,
+          "⚠️ خطأ في الفحص:",
           error.message
         );
       }
     }
-    lastScanCount = scanned;
-    lastScanAt = Date.now();
+
+  },
+  SCAN_INTERVAL_MIN * 60 * 1000
+);
+
+// ============================================================
+// Express
+// ============================================================
+
+app.get(
+  "/",
+  (req, res) => {
+
+    res.send(
+      "🇺🇸 US Stock Telegram Bot — Running"
+    );
+  }
+);
+
+app.get(
+  "/health",
+  (req, res) => {
+
+    res.json({
+      status: "ok",
+      signals: sentSignals.size,
+      scanning,
+      lastScanTime
+    });
+  }
+);
+
+// ============================================================
+// تشغيل السيرفر
+// ============================================================
+
+app.listen(
+  PORT,
+  () => {
+
     console.log(
-      `✅ انتهى الفحص — تم تحليل ${scanned} سهم`
+      `🚀 Server running on port ${PORT}`
     );
-  } catch (error) {
+
     console.log(
-      "❌ Scan ERROR:",
-      error.message
+      "🤖 Telegram bot is running"
     );
-  } finally {
-    running = false;
-  }
-}
-// ============================================================
-// 🔄 تحديث الإشارات الموجودة
-// ============================================================
-async function updateSignals() {
-  if (sentSignals.size === 0) {
-    return;
-  }
-  console.log(
-    `🔄 تحديث ${sentSignals.size} إشارة`
-  );
-  for (const [
-    symbol,
-    signal,
-  ] of sentSignals) {
-    try {
-      const data =
-        await getQuote(symbol);
-      if (!data) {
-        continue;
-      }
-      const oldPrice = signal.price;
-      signal.price = data.price;
-      signal.change = data.change;
-      signal.marketState =
-        data.marketState;
-      // إعادة حساب الأهداف
-      signal.targets = [
-        signal.price * 1.02,
-        signal.price * 1.04,
-        signal.price * 1.06,
-        signal.price * 1.08,
-        signal.price * 1.10,
-        signal.price * 1.12,
-        signal.price * 1.15,
-        signal.price * 1.18,
-      ];
-      // ======================================================
-      // لا نرسل رسالة عند كل تحديث بسيط
-      // ======================================================
-      const movement =
-        Math.abs(
-          ((signal.price - oldPrice) /
-            oldPrice) *
-            100
-        );
-      if (movement >= 1) {
-        await sendToAll(
-          formatSignal(signal)
-        );
-      }
-      await sleep(
-        REQUEST_DELAY_MS
-      );
-    } catch (error) {
-      console.log(
-        `⚠️ Update ${symbol}:`,
-        error.message
-      );
-    }
-  }
-}
-// ============================================================
-// 🤖 Telegram Commands
-// ============================================================
-bot.on("message", async (msg) => {
-  const chatId = msg.chat.id;
-  chatIds.add(chatId);
-  const text =
-    (msg.text || "").trim().toLowerCase();
-  // ========================================================
-  // START
-  // ========================================================
-  if (text === "/start") {
-    await bot.sendMessage(
-      chatId,
-      `
-💀 <b>US STOCK BOT</b>
-🟢 البوت يعمل الآن
-━━━━━━━━━━━━━━
-📊 /scan
-بدء فحص السوق
-📈 /signals
-الإشارات الحالية
-📊 /status
-حالة البوت
-🛑 /stop
-إيقاف الفحص الحالي
-🔄 /refresh
-تحديث قائمة الأسهم
-━━━━━━━━━━━━━━
-🇺🇸 السوق الأمريكي
-`,
-      {
-        parse_mode: "HTML",
-      }
+
+    console.log(
+      "📊 EMA + Liquidity + Volume + VWAP enabled"
     );
-    return;
   }
-  // ========================================================
-  // SCAN
-  // ========================================================
-  if (text === "/scan") {
-    await bot.sendMessage(
-      chatId,
-      "🚀 جاري فحص السوق الأمريكي..."
-    );
-    runScan(true);
-    return;
-  }
-  // ========================================================
-  // SIGNALS
-  // ========================================================
-  if (text === "/signals") {
-    if (sentSignals.size === 0) {
-      await bot.sendMessage(
-        chatId,
-        "⚪ لا توجد إشارات محفوظة حاليًا."
-      );
-      return;
-    }
-    let message =
-      "📊 <b>الإشارات الحالية</b>\n\n";
-    let counter = 0;
-    for (const [
-      symbol,
-      signal,
-    ] of sentSignals) {
-      counter++;
-      message +=
-        `${counter}. <b>${symbol}</b> ` +
-        `$${priceFormat(signal.price)} ` +
-        `${signal.change >= 0 ? "📈" : "📉"} ` +
-        `${signal.change.toFixed(2)}%\n`;
-      if (counter >= 30) {
-        break;
-      }
-    }
-    await bot.sendMessage(
-      chatId,
-      message,
-      {
-        parse_mode: "HTML",
-      }
-    );
-    return;
-  }
-  // ========================================================
-  // STATUS
-  // ========================================================
-  if (text === "/status") {
-    const uptime =
-      Math.floor(
-        process.uptime()
-      );
-    const hours =
-      Math.floor(uptime / 3600);
-    const minutes =
-      Math.floor(
-        (uptime % 3600) / 60
-      );
-    const seconds =
-      uptime % 60;
-    await bot.sendMessage(
-      chatId,
-      `
-🟢 <b>حالة البوت</b>
-الحالة:
-${running ? "🔴 فحص يعمل" : "🟢 جاهز"}
-👥 المستخدمون:
-${chatIds.size}
-📊 الأسهم:
-${cachedSymbols.length}
-🎯 الإشارات:
-${sentSignals.size}
-📡 آخر فحص:
-${
-  lastScanAt
-    ? new Date(lastScanAt).toLocaleString(
-        "en-US"
-      )
-    : "لم يبدأ"
-}
-📈 الأسهم التي تم تحليلها:
-${lastScanCount}
-⏱️ التشغيل:
-${hours}h ${minutes}m ${seconds}s
-`,
-      {
-        parse_mode: "HTML",
-      }
-    );
-    return;
-  }
-  // ========================================================
-  // STOP
-  // ========================================================
-  if (text === "/stop") {
-    if (!running) {
-      await bot.sendMessage(
-        chatId,
-        "🟢 لا يوجد فحص يعمل حاليًا."
-      );
-      return;
-    }
-    await bot.sendMessage(
-      chatId,
-      "⚠️ لا يمكن إلغاء طلب الشبكة الجاري، لكنه سيتوقف بعد انتهاء الدورة الحالية."
-    );
-    return;
-  }
-  // ========================================================
-  // REFRESH
-  // ========================================================
-  if (text === "/refresh") {
-    cachedSymbols = [];
-    symbolsCacheTime = 0;
-    await bot.sendMessage(
-      chatId,
-      "🔄 تم حذف القائمة القديمة. سيتم تحميل قائمة جديدة في الفحص القادم."
-    );
-    return;
-  }
-});
-// ============================================================
-// 🚨 أخطاء Telegram
-// ============================================================
-bot.on("polling_error", (error) => {
-  console.log(
-    "⚠️ Telegram polling:",
-    error.message
-  );
-});
-// ============================================================
-// 🚨 أخطاء عامة
-// ============================================================
-process.on("unhandledRejection", (error) => {
-  console.log(
-    "❌ Unhandled rejection:",
-    error
-  );
-});
-process.on("uncaughtException", (error) => {
-  console.log(
-    "❌ Uncaught exception:",
-    error
-  );
-});
-// ============================================================
-// 🔄 الفحص التلقائي
-// ============================================================
-setInterval(() => {
-  runScan(false);
-}, SCAN_INTERVAL_MIN * 60 * 1000);
-// ============================================================
-// 🔄 تحديث الإشارات
-// ============================================================
-setInterval(() => {
-  updateSignals();
-}, UPDATE_INTERVAL_SEC * 1000);
-// ============================================================
-// 🚀 تشغيل أول فحص
-// ============================================================
-setTimeout(() => {
-  runScan(true);
-}, 5000);
-// ============================================================
-// 💀 READY
-// ============================================================
-console.log("");
-console.log("=================================");
-console.log("💀 US STOCK BOT");
-console.log("🟢 BOT ONLINE");
-console.log("📡 Yahoo Finance Data");
-console.log("🚫 Finnhub API NOT REQUIRED");
-console.log("=================================");
-console.log("");
+);
