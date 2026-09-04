@@ -1,16 +1,28 @@
  // ============================================================
-// 🇺🇸 US STOCK TELEGRAM BOT PRO MAX
-// EMA + LIQUIDITY + VOLUME + VWAP
-// + PRICE >= $0.10
-// + NYSE / NASDAQ / AMEX ONLY
-// + MARKET CAP
-// + STOCK MOVEMENT
-// + ACCUMULATION / DISTRIBUTION
-// + 4H LOW
-// + GENERAL TREND
-// + REVERSE SPLIT TODAY / MONTH / YEAR
-// + DIVIDEND DATA
-// + STRONG EXPLOSION FILTER
+// 🇺🇸 US STOCK TELEGRAM BOT PRO MAX v4
+//
+// 🔒 OTC BLOCKER PRO
+// ✅ NASDAQ
+// ✅ NYSE
+// ✅ NYSE AMERICAN / AMEX
+// 🚫 OTC / PINK / OTCQB / OTCQX / PINK SHEETS
+// 🚫 أي بورصة غير معروفة
+//
+// 📊 EMA
+// 💧 LIQUIDITY
+// 📦 VOLUME
+// 🔥 VWAP
+// 💰 MARKET CAP
+// 📈 STOCK MOVEMENT
+// 🟢 ACCUMULATION
+// 🔴 DISTRIBUTION
+// 📉 4H LOW
+// 📊 GENERAL TREND
+// 🔄 REVERSE SPLIT
+// 💵 DIVIDEND
+// 💥 EXPLOSION SCORE
+// 🎯 8 TARGETS
+//
 // Node.js 18+
 // ============================================================
 
@@ -18,49 +30,47 @@ import express from "express";
 import TelegramBot from "node-telegram-bot-api";
 
 // ============================================================
-// الإعدادات
+// ⚙️ الإعدادات
 // ============================================================
 
-const TOKEN = process.env.TELEGRAM_TOKEN;
+const TOKEN =
+  process.env.TELEGRAM_TOKEN;
 
-const PORT = Number(
-  process.env.PORT || 3000
-);
+const PORT =
+  Number(process.env.PORT || 3000);
 
-const MAX_SYMBOLS = Number(
-  process.env.MAX_SYMBOLS || 250
-);
+const MAX_SYMBOLS =
+  Number(process.env.MAX_SYMBOLS || 250);
 
-const MIN_CHANGE = Number(
-  process.env.MIN_CHANGE || 0.30
-);
+const MIN_CHANGE =
+  Number(process.env.MIN_CHANGE || 0.30);
 
-const MIN_PRICE = Number(
-  process.env.MIN_PRICE || 0.10
-);
+const MIN_PRICE =
+  Number(process.env.MIN_PRICE || 0.10);
 
-const SCAN_INTERVAL_MIN = Number(
-  process.env.SCAN_INTERVAL_MIN || 5
-);
+const SCAN_INTERVAL_MIN =
+  Number(process.env.SCAN_INTERVAL_MIN || 5);
 
-const UPDATE_INTERVAL_SEC = Number(
-  process.env.UPDATE_INTERVAL_SEC || 30
-);
+const UPDATE_INTERVAL_SEC =
+  Number(process.env.UPDATE_INTERVAL_SEC || 30);
 
-const REQUEST_DELAY_MS = Number(
-  process.env.REQUEST_DELAY_MS || 350
-);
+const REQUEST_DELAY_MS =
+  Number(process.env.REQUEST_DELAY_MS || 350);
 
-const SPLIT_CACHE_MS = Number(
-  process.env.SPLIT_CACHE_MS || 60 * 1000
-);
+const SPLIT_CACHE_MS =
+  Number(
+    process.env.SPLIT_CACHE_MS ||
+    60 * 1000
+  );
 
-const DIVIDEND_CACHE_MS = Number(
-  process.env.DIVIDEND_CACHE_MS || 5 * 60 * 1000
-);
+const DIVIDEND_CACHE_MS =
+  Number(
+    process.env.DIVIDEND_CACHE_MS ||
+    5 * 60 * 1000
+  );
 
 // ============================================================
-// تحقق من التوكن
+// 🔐 التحقق من التوكن
 // ============================================================
 
 if (!TOKEN) {
@@ -73,24 +83,30 @@ if (!TOKEN) {
 }
 
 // ============================================================
-// Telegram
+// 🤖 Telegram
 // ============================================================
 
-const bot = new TelegramBot(
-  TOKEN,
-  {
-    polling: true
-  }
-);
+const bot =
+  new TelegramBot(
+    TOKEN,
+    {
+      polling: true
+    }
+  );
 
-const app = express();
+// ============================================================
+// 🌐 Express
+// ============================================================
+
+const app =
+  express();
 
 app.use(
   express.json()
 );
 
 // ============================================================
-// التخزين
+// 💾 التخزين
 // ============================================================
 
 const sentSignals =
@@ -118,16 +134,23 @@ let symbolsCacheTime =
   0;
 
 // ============================================================
-// أدوات عامة
+// 🧰 أدوات عامة
 // ============================================================
 
 function sleep(ms) {
 
   return new Promise(
     resolve =>
-      setTimeout(resolve, ms)
+      setTimeout(
+        resolve,
+        ms
+      )
   );
 }
+
+// ============================================================
+// 💵 تقريب السعر
+// ============================================================
 
 function roundPrice(price) {
 
@@ -138,8 +161,17 @@ function roundPrice(price) {
     return "0.00";
   }
 
+  if (price < 1) {
+
+    return price.toFixed(4);
+  }
+
   return price.toFixed(2);
 }
+
+// ============================================================
+// 🔢 تنسيق الأرقام
+// ============================================================
 
 function formatNumber(value) {
 
@@ -156,8 +188,10 @@ function formatNumber(value) {
   ) {
 
     return (
-      (value / 1_000_000_000)
-        .toFixed(2) +
+      (
+        value /
+        1_000_000_000
+      ).toFixed(2) +
       "B"
     );
   }
@@ -167,8 +201,10 @@ function formatNumber(value) {
   ) {
 
     return (
-      (value / 1_000_000)
-        .toFixed(2) +
+      (
+        value /
+        1_000_000
+      ).toFixed(2) +
       "M"
     );
   }
@@ -178,8 +214,10 @@ function formatNumber(value) {
   ) {
 
     return (
-      (value / 1_000)
-        .toFixed(2) +
+      (
+        value /
+        1_000
+      ).toFixed(2) +
       "K"
     );
   }
@@ -191,6 +229,10 @@ function formatNumber(value) {
   );
 }
 
+// ============================================================
+// 📏 Clamp
+// ============================================================
+
 function clamp(
   value,
   min,
@@ -199,12 +241,15 @@ function clamp(
 
   return Math.max(
     min,
-    Math.min(max, value)
+    Math.min(
+      max,
+      value
+    )
   );
 }
 
 // ============================================================
-// التاريخ
+// 📅 بداية اليوم
 // ============================================================
 
 function startOfToday() {
@@ -222,6 +267,10 @@ function startOfToday() {
   return d;
 }
 
+// ============================================================
+// 📅 بداية الشهر
+// ============================================================
+
 function startOfMonth() {
 
   const d =
@@ -238,6 +287,10 @@ function startOfMonth() {
 
   return d;
 }
+
+// ============================================================
+// 📅 بداية السنة
+// ============================================================
 
 function startOfYear() {
 
@@ -260,7 +313,7 @@ function startOfYear() {
 }
 
 // ============================================================
-// Yahoo Finance
+// 📡 Yahoo Fetch
 // ============================================================
 
 async function yahooFetch(url) {
@@ -270,6 +323,7 @@ async function yahooFetch(url) {
       url,
       {
         headers: {
+
           "User-Agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
 
@@ -279,7 +333,9 @@ async function yahooFetch(url) {
       }
     );
 
-  if (!response.ok) {
+  if (
+    !response.ok
+  ) {
 
     throw new Error(
       `Yahoo HTTP ${response.status}`
@@ -290,44 +346,310 @@ async function yahooFetch(url) {
 }
 
 // ============================================================
-// الأسواق الأمريكية المسموح بها
+// 🔒🔒🔒 فلتر البورصة الصارم جدًا
+//
+// يسمح فقط:
+//
+// NASDAQ:
+// NMS
+// NGM
+// NCM
+//
+// NYSE:
+// NYQ
+//
+// NYSE AMERICAN / AMEX:
+// ASE
+//
+// أي شيء آخر = 🚫 مرفوض
 // ============================================================
 
-function isAllowedUSExchange(
+function isStrictAllowedExchange(
+  exchange
+) {
+
+  const value =
+    String(
+      exchange || ""
+    )
+      .trim()
+      .toUpperCase();
+
+  const allowed =
+    new Set([
+      "NMS",
+      "NGM",
+      "NCM",
+      "NYQ",
+      "ASE"
+    ]);
+
+  return allowed.has(
+    value
+  );
+}
+
+// ============================================================
+// 🔒 فحص بيانات Yahoo Screener
+//
+// مهم جدًا:
+// إذا exchange غير موجود → مرفوض
+// لا نعتمد على الاسم وحده
+// ============================================================
+
+function isAllowedScreenerStock(
   item
 ) {
 
+  if (!item) {
+
+    return false;
+  }
+
+  const symbol =
+    String(
+      item.symbol || ""
+    )
+      .trim()
+      .toUpperCase();
+
   const exchange =
     String(
-      item?.exchange ||
-      ""
-    ).toUpperCase();
+      item.exchange || ""
+    )
+      .trim()
+      .toUpperCase();
+
+  const quoteType =
+    String(
+      item.quoteType || ""
+    )
+      .trim()
+      .toUpperCase();
 
   const fullExchange =
     String(
-      item?.fullExchangeName ||
-      ""
-    ).toUpperCase();
+      item.fullExchangeName || ""
+    )
+      .trim()
+      .toUpperCase();
 
-  const allowedCodes = [
-    "NMS",
-    "NGM",
-    "NCM",
-    "NYQ",
-    "ASE"
-  ];
+  // ==========================================================
+  // 🚫 رمز غير صالح
+  // ==========================================================
 
   if (
-    allowedCodes.includes(
+    !symbol ||
+    !/^[A-Z0-9.\-]+$/.test(
+      symbol
+    )
+  ) {
+
+    return false;
+  }
+
+  // ==========================================================
+  // 🚫 مؤشرات / عملات / أزواج
+  // ==========================================================
+
+  if (
+    symbol.includes("=") ||
+    symbol.includes("^") ||
+    symbol.includes("/") ||
+    symbol.includes("=X")
+  ) {
+
+    return false;
+  }
+
+  // ==========================================================
+  // 🚫 يجب أن يكون Equity
+  // ==========================================================
+
+  if (
+    quoteType &&
+    quoteType !== "EQUITY"
+  ) {
+
+    return false;
+  }
+
+  // ==========================================================
+  // 🔒 البورصة يجب أن تكون معروفة ومسموحة
+  // ==========================================================
+
+  if (
+    !isStrictAllowedExchange(
       exchange
     )
   ) {
 
-    return true;
+    console.log(
+      `🚫 مرفوض OTC/غير أمريكي: ${symbol} | Exchange=${exchange || "UNKNOWN"} | ${fullExchange || "UNKNOWN"}`
+    );
+
+    return false;
   }
+
+  // ==========================================================
+  // 🚫 حماية إضافية من رموز OTC المعروفة
+  // ==========================================================
+
+  const blockedPatterns = [
+
+    ".PK",
+    ".OB",
+    ".OTC",
+    ".PINK",
+    ".QB",
+    ".QX"
+  ];
+
+  for (
+    const pattern of
+      blockedPatterns
+  ) {
+
+    if (
+      symbol.includes(
+        pattern
+      )
+    ) {
+
+      console.log(
+        `🚫 رمز OTC محظور: ${symbol}`
+      );
+
+      return false;
+    }
+  }
+
+  // ==========================================================
+  // 🚫 أي اسم سوق يحتوي OTC
+  // ==========================================================
 
   if (
     fullExchange.includes(
+      "OTC"
+    ) ||
+    fullExchange.includes(
+      "PINK"
+    ) ||
+    fullExchange.includes(
+      "OTCQB"
+    ) ||
+    fullExchange.includes(
+      "OTCQX"
+    ) ||
+    fullExchange.includes(
+      "PINK SHEETS"
+    )
+  ) {
+
+    console.log(
+      `🚫 سوق OTC: ${symbol} | ${fullExchange}`
+    );
+
+    return false;
+  }
+
+  return true;
+}
+
+// ============================================================
+// 🔒 فحص البورصة من بيانات Chart
+//
+// هذا هو الحاجز الثاني
+//
+// حتى لو دخل السهم من Screener
+// يتم فحصه مرة ثانية هنا
+// ============================================================
+
+function isAllowedChartExchange(
+  meta
+) {
+
+  if (!meta) {
+
+    return false;
+  }
+
+  const exchange =
+    String(
+      meta.exchange || ""
+    )
+      .trim()
+      .toUpperCase();
+
+  const exchangeName =
+    String(
+      meta.exchangeName || ""
+    )
+      .trim()
+      .toUpperCase();
+
+  const fullExchangeName =
+    String(
+      meta.fullExchangeName || ""
+    )
+      .trim()
+      .toUpperCase();
+
+  const instrumentType =
+    String(
+      meta.instrumentType || ""
+    )
+      .trim()
+      .toUpperCase();
+
+  // ==========================================================
+  // 🚫 إذا كان نوع الأداة معروفًا وليس Equity
+  // ==========================================================
+
+  if (
+    instrumentType &&
+    instrumentType !==
+      "EQUITY"
+  ) {
+
+    return false;
+  }
+
+  // ==========================================================
+  // 🔒 أهم شرط
+  // إذا وجدنا Exchange يجب أن يكون من القائمة
+  // ==========================================================
+
+  if (
+    exchange
+  ) {
+
+    if (
+      !isStrictAllowedExchange(
+        exchange
+      )
+    ) {
+
+      console.log(
+        `🚫 Chart Exchange مرفوض: ${exchange}`
+      );
+
+      return false;
+    }
+
+    return true;
+  }
+
+  // ==========================================================
+  // إذا لم يرسل Yahoo الكود
+  // نتحقق من الاسم
+  // ==========================================================
+
+  if (
+    exchangeName.includes(
+      "NASDAQ"
+    ) ||
+    fullExchangeName.includes(
       "NASDAQ"
     )
   ) {
@@ -336,8 +658,13 @@ function isAllowedUSExchange(
   }
 
   if (
-    fullExchange.includes(
-      "NYSE"
+    exchangeName === "NYSE" ||
+    exchangeName.includes(
+      "NEW YORK STOCK EXCHANGE"
+    ) ||
+    fullExchangeName === "NYSE" ||
+    fullExchangeName.includes(
+      "NEW YORK STOCK EXCHANGE"
     )
   ) {
 
@@ -345,7 +672,16 @@ function isAllowedUSExchange(
   }
 
   if (
-    fullExchange.includes(
+    exchangeName.includes(
+      "NYSE AMERICAN"
+    ) ||
+    exchangeName.includes(
+      "AMERICAN STOCK EXCHANGE"
+    ) ||
+    fullExchangeName.includes(
+      "NYSE AMERICAN"
+    ) ||
+    fullExchangeName.includes(
       "AMERICAN STOCK EXCHANGE"
     )
   ) {
@@ -353,20 +689,19 @@ function isAllowedUSExchange(
     return true;
   }
 
-  if (
-    fullExchange.includes(
-      "NYSE AMERICAN"
-    )
-  ) {
+  // ==========================================================
+  // 🚫 غير معروف = مرفوض
+  // ==========================================================
 
-    return true;
-  }
+  console.log(
+    `🚫 بورصة غير معروفة: ${exchangeName || fullExchangeName || "UNKNOWN"}`
+  );
 
   return false;
 }
 
 // ============================================================
-// تحليل Reverse Split
+// 🔄 تحليل Reverse Split
 // ============================================================
 
 function parseSplitRatio(
@@ -381,7 +716,10 @@ function parseSplitRatio(
   const text =
     String(ratio)
       .trim()
-      .replace(/\s/g, "");
+      .replace(
+        /\s/g,
+        ""
+      );
 
   const match =
     text.match(
@@ -424,7 +762,7 @@ function parseSplitRatio(
 }
 
 // ============================================================
-// Reverse Split
+// 🔄 Reverse Split
 // ============================================================
 
 async function getReverseSplitInfo(
@@ -484,13 +822,16 @@ async function getReverseSplitInfo(
       {};
 
     const today =
-      startOfToday().getTime();
+      startOfToday()
+        .getTime();
 
     const month =
-      startOfMonth().getTime();
+      startOfMonth()
+        .getTime();
 
     const year =
-      startOfYear().getTime();
+      startOfYear()
+        .getTime();
 
     let todaySplit =
       null;
@@ -619,7 +960,9 @@ async function getReverseSplitInfo(
     let period =
       null;
 
-    if (todaySplit) {
+    if (
+      todaySplit
+    ) {
 
       selected =
         todaySplit;
@@ -703,7 +1046,7 @@ async function getReverseSplitInfo(
 }
 
 // ============================================================
-// تنسيق Reverse Split
+// 🔄 تنسيق Reverse Split
 // ============================================================
 
 function formatReverseSplit(
@@ -734,7 +1077,7 @@ ${split.period}
 }
 
 // ============================================================
-// بيانات التوزيعات
+// 💵 Dividend
 // ============================================================
 
 async function getDividendInfo(
@@ -798,8 +1141,12 @@ async function getDividendInfo(
         );
 
       if (
-        !Number.isFinite(timestamp) ||
-        !Number.isFinite(amount)
+        !Number.isFinite(
+          timestamp
+        ) ||
+        !Number.isFinite(
+          amount
+        )
       ) {
 
         continue;
@@ -857,7 +1204,7 @@ async function getDividendInfo(
 }
 
 // ============================================================
-// تنسيق التوزيع
+// 💵 تنسيق Dividend
 // ============================================================
 
 function formatDividend(
@@ -891,13 +1238,17 @@ function formatDividend(
 }
 
 // ============================================================
-// قائمة الأسهم
+// 📋 تحميل الأسهم
 // ============================================================
 
 async function getSymbols() {
 
   const now =
     Date.now();
+
+  // ==========================================================
+  // استخدام الكاش
+  // ==========================================================
 
   if (
     cachedSymbols.length > 0 &&
@@ -919,6 +1270,10 @@ async function getSymbols() {
 
   const symbolMap =
     new Map();
+
+  // ==========================================================
+  // تحميل القوائم
+  // ==========================================================
 
   for (
     const list of lists
@@ -942,35 +1297,33 @@ async function getSymbols() {
         const item of quotes
       ) {
 
-        const symbol =
-          item?.symbol;
+        // ====================================================
+        // 🔒 الفلتر الصارم
+        // ====================================================
 
         if (
-          !symbol ||
-          !/^[A-Z0-9.\-]+$/.test(
-            symbol
+          !isAllowedScreenerStock(
+            item
           )
         ) {
 
           continue;
         }
 
-        if (
-          symbol.includes("=") ||
-          symbol.includes("^") ||
-          symbol.includes("/")
-        ) {
+        const symbol =
+          String(
+            item.symbol
+          )
+            .trim()
+            .toUpperCase();
 
-          continue;
-        }
-
-        // ================================================
-        // استبعاد OTC
-        // ================================================
+        // ====================================================
+        // منع التكرار
+        // ====================================================
 
         if (
-          !isAllowedUSExchange(
-            item
+          symbolMap.has(
+            symbol
           )
         ) {
 
@@ -979,7 +1332,7 @@ async function getSymbols() {
 
         const marketCap =
           Number(
-            item?.marketCap
+            item.marketCap
           );
 
         symbolMap.set(
@@ -996,15 +1349,25 @@ async function getSymbols() {
                 : 0,
 
             exchange:
-              item?.exchange ||
-              "",
+              String(
+                item.exchange ||
+                ""
+              )
+                .trim()
+                .toUpperCase(),
 
             fullExchangeName:
-              item?.fullExchangeName ||
-              "",
+              String(
+                item.fullExchangeName ||
+                ""
+              ),
 
             shortName:
-              item?.shortName ||
+              item.shortName ||
+              "",
+
+            quoteType:
+              item.quoteType ||
               ""
           }
         );
@@ -1036,7 +1399,9 @@ async function getSymbols() {
   }
 
   cachedSymbols =
-    [...symbolMap.values()]
+    [
+      ...symbolMap.values()
+    ]
       .slice(
         0,
         MAX_SYMBOLS
@@ -1049,11 +1414,19 @@ async function getSymbols() {
     `📋 تم تحميل ${cachedSymbols.length} سهم أمريكي`
   );
 
+  console.log(
+    "🔒 OTC BLOCKER: ACTIVE"
+  );
+
+  console.log(
+    "✅ NASDAQ / NYSE / NYSE AMERICAN ONLY"
+  );
+
   return cachedSymbols;
 }
 
 // ============================================================
-// جلب بيانات السهم
+// 📊 بيانات السهم
 // ============================================================
 
 async function getStockData(
@@ -1061,16 +1434,22 @@ async function getStockData(
 ) {
 
   const symbol =
-    typeof symbolInfo === "string"
+    typeof symbolInfo ===
+      "string"
       ? symbolInfo
       : symbolInfo.symbol;
 
   const marketCap =
-    typeof symbolInfo === "object"
+    typeof symbolInfo ===
+      "object"
       ? Number(
           symbolInfo.marketCap
         )
       : 0;
+
+  // ==========================================================
+  // 📡 Chart 5m
+  // ==========================================================
 
   const url =
     `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}` +
@@ -1094,6 +1473,25 @@ async function getStockData(
   const meta =
     result.meta || {};
 
+  // ==========================================================
+  // 🔒🔒 الحاجز الثاني ضد OTC
+  // ==========================================================
+
+  if (
+    !isAllowedChartExchange(
+      meta
+    )
+  ) {
+
+    throw new Error(
+      `🚫 OTC / بورصة غير مسموحة: ${
+        meta?.exchangeName ||
+        meta?.exchange ||
+        "UNKNOWN"
+      }`
+    );
+  }
+
   const quote =
     result.indicators?.quote?.[0];
 
@@ -1103,6 +1501,10 @@ async function getStockData(
       "بيانات التداول غير موجودة"
     );
   }
+
+  // ==========================================================
+  // الأسعار
+  // ==========================================================
 
   const closes =
     (quote.close || [])
@@ -1141,6 +1543,10 @@ async function getStockData(
     );
   }
 
+  // ==========================================================
+  // 💰 السعر
+  // ==========================================================
+
   const price =
     Number(
       meta.regularMarketPrice
@@ -1150,7 +1556,7 @@ async function getStockData(
     ];
 
   // ==========================================================
-  // الحد الأدنى للسعر
+  // 🚫 الحد الأدنى للسعر
   // ==========================================================
 
   if (
@@ -1162,6 +1568,10 @@ async function getStockData(
       `السعر أقل من $${MIN_PRICE}`
     );
   }
+
+  // ==========================================================
+  // السعر السابق
+  // ==========================================================
 
   const previousClose =
     Number(
@@ -1190,17 +1600,20 @@ async function getStockData(
   }
 
   // ==========================================================
-  // التغير
+  // 📈 نسبة التغير
   // ==========================================================
 
   const change =
     (
-      (price - previousClose) /
+      (
+        price -
+        previousClose
+      ) /
       previousClose
     ) * 100;
 
   // ==========================================================
-  // EMA
+  // 📊 EMA
   // ==========================================================
 
   const ema7 =
@@ -1234,7 +1647,7 @@ async function getStockData(
     );
 
   // ==========================================================
-  // VWAP
+  // 🔥 VWAP
   // ==========================================================
 
   const vwap =
@@ -1246,7 +1659,7 @@ async function getStockData(
     );
 
   // ==========================================================
-  // حجم التداول
+  // 📦 الفوليوم
   // ==========================================================
 
   const currentVolume =
@@ -1285,7 +1698,7 @@ async function getStockData(
   }
 
   // ==========================================================
-  // قوة VWAP
+  // 🔥 قوة VWAP
   // ==========================================================
 
   let vwapStrength =
@@ -1297,7 +1710,10 @@ async function getStockData(
 
     const distance =
       (
-        (price - vwap) /
+        (
+          price -
+          vwap
+        ) /
         vwap
       ) * 100;
 
@@ -1311,7 +1727,7 @@ async function getStockData(
   }
 
   // ==========================================================
-  // ضغط الشراء والبيع
+  // 🟢🔴 ضغط الشراء والبيع
   // ==========================================================
 
   let buyPressure =
@@ -1390,7 +1806,7 @@ async function getStockData(
   }
 
   // ==========================================================
-  // السيولة
+  // 💧 السيولة
   // ==========================================================
 
   let liquidityState =
@@ -1430,7 +1846,7 @@ async function getStockData(
   }
 
   // ==========================================================
-  // التجميع / التصريف
+  // 📦 التجميع / التصريف
   // ==========================================================
 
   let accumulation =
@@ -1472,7 +1888,10 @@ async function getStockData(
   }
 
   // ==========================================================
-  // حركة السهم
+  // 📈 حركة السهم
+  //
+  // 12 شمعة × 5 دقائق
+  // = تقريبًا ساعة
   // ==========================================================
 
   const movementLookback =
@@ -1497,8 +1916,10 @@ async function getStockData(
 
     movementPercent =
       (
-        (price -
-          movementStart) /
+        (
+          price -
+          movementStart
+        ) /
         movementStart
       ) * 100;
   }
@@ -1536,8 +1957,9 @@ async function getStockData(
   }
 
   // ==========================================================
-  // قاع آخر 4 ساعات
-  // 48 شمعة × 5 دقائق
+  // 📉 قاع آخر 4 ساعات
+  //
+  // 48 × 5 دقائق
   // ==========================================================
 
   const fourHourBars =
@@ -1566,7 +1988,7 @@ async function getStockData(
       : 0;
 
   // ==========================================================
-  // الاتجاه العام
+  // 📊 الاتجاه العام
   // ==========================================================
 
   let generalTrend =
@@ -1590,7 +2012,7 @@ async function getStockData(
   }
 
   // ==========================================================
-  // EMA
+  // ⚡ EMA
   // ==========================================================
 
   let emaSignal =
@@ -1616,7 +2038,7 @@ async function getStockData(
   }
 
   // ==========================================================
-  // الصعود اللحظي
+  // ⚡ الحركة اللحظية
   // ==========================================================
 
   let intradaySignal =
@@ -1642,7 +2064,7 @@ async function getStockData(
   }
 
   // ==========================================================
-  // قوة الانفجار
+  // 💥 قوة الانفجار
   // ==========================================================
 
   let explosionScore =
@@ -1714,7 +2136,7 @@ async function getStockData(
   }
 
   // ==========================================================
-  // الإشارة الرئيسية
+  // 📊 الإشارة الرئيسية
   // ==========================================================
 
   let signal =
@@ -1733,7 +2155,7 @@ async function getStockData(
     "⚡ 📈 صعود لحظي";
 
   // ==========================================================
-  // انفجار حقيقي
+  // 💀🚀 انفجار مؤكد
   // ==========================================================
 
   if (
@@ -1780,7 +2202,7 @@ async function getStockData(
   }
 
   // ==========================================================
-  // Reverse Split
+  // 🔄 Reverse Split
   // ==========================================================
 
   const reverseSplit =
@@ -1789,7 +2211,7 @@ async function getStockData(
     );
 
   // ==========================================================
-  // Dividend
+  // 💵 Dividend
   // ==========================================================
 
   const dividend =
@@ -1798,7 +2220,7 @@ async function getStockData(
     );
 
   // ==========================================================
-  // النتيجة
+  // 📊 النتيجة النهائية
   // ==========================================================
 
   return {
@@ -1808,10 +2230,16 @@ async function getStockData(
     marketCap,
 
     exchange:
-      symbolInfo?.exchange ||
-      "",
+      String(
+        meta.exchange ||
+        symbolInfo?.exchange ||
+        ""
+      )
+        .trim()
+        .toUpperCase(),
 
     fullExchangeName:
+      meta.exchangeName ||
       symbolInfo?.fullExchangeName ||
       "",
 
@@ -1874,7 +2302,7 @@ async function getStockData(
 }
 
 // ============================================================
-// EMA
+// 📊 حساب EMA
 // ============================================================
 
 function calculateEMA(
@@ -1915,7 +2343,7 @@ function calculateEMA(
 }
 
 // ============================================================
-// VWAP
+// 🔥 VWAP
 // ============================================================
 
 function calculateVWAP(
@@ -2005,7 +2433,7 @@ function calculateVWAP(
 }
 
 // ============================================================
-// Average
+// 📊 Average
 // ============================================================
 
 function average(
@@ -2036,7 +2464,7 @@ function average(
 }
 
 // ============================================================
-// الأهداف
+// 🎯 الأهداف
 // ============================================================
 
 function calculateTargets(
@@ -2070,7 +2498,7 @@ function calculateTargets(
 }
 
 // ============================================================
-// تنسيق الرسالة
+// 📝 تنسيق الإشارة
 // ============================================================
 
 function formatSignal(
@@ -2109,6 +2537,9 @@ function formatSignal(
 🇺🇸 السوق الأمريكي
 
 ${data.symbol}
+
+🏛 البورصة:
+${data.exchange || "غير معروف"}
 
 💰 السعر:
 $${roundPrice(data.price)}
@@ -2175,7 +2606,7 @@ ${targetText}
 }
 
 // ============================================================
-// حفظ Chat ID
+// 👤 ربط Chat ID
 // ============================================================
 
 function attachChatId(
@@ -2214,13 +2645,30 @@ function attachChatId(
 }
 
 // ============================================================
-// إرسال الإشارة
+// 📤 إرسال الإشارة
 // ============================================================
 
 async function sendSignal(
   chatId,
   data
 ) {
+
+  // ==========================================================
+  // 🔒 حماية أخيرة قبل Telegram
+  // ==========================================================
+
+  if (
+    !isStrictAllowedExchange(
+      data.exchange
+    )
+  ) {
+
+    console.log(
+      `🚫 تم منع إرسال ${data.symbol} — Exchange=${data.exchange || "UNKNOWN"}`
+    );
+
+    return false;
+  }
 
   const old =
     sentSignals.get(
@@ -2300,7 +2748,7 @@ async function sendSignal(
 }
 
 // ============================================================
-// الفحص
+// 🔎 الفحص
 // ============================================================
 
 async function scan(
@@ -2321,6 +2769,10 @@ async function scan(
     "🔎 بدء فحص السوق..."
   );
 
+  console.log(
+    "🔒 OTC BLOCKER ACTIVE"
+  );
+
   try {
 
     const symbols =
@@ -2336,13 +2788,47 @@ async function scan(
 
       try {
 
+        // ====================================================
+        // 🔒 فحص إضافي قبل طلب البيانات
+        // ====================================================
+
+        if (
+          !isStrictAllowedExchange(
+            symbolInfo.exchange
+          )
+        ) {
+
+          console.log(
+            `🚫 تخطي ${symbolInfo.symbol} — بورصة غير مسموحة`
+          );
+
+          continue;
+        }
+
         const data =
           await getStockData(
             symbolInfo
           );
 
         // ====================================================
-        // فقط $0.10 فأعلى
+        // 🔒 فحص نهائي
+        // ====================================================
+
+        if (
+          !isStrictAllowedExchange(
+            data.exchange
+          )
+        ) {
+
+          console.log(
+            `🚫 ${data.symbol} مرفوض نهائيًا`
+          );
+
+          continue;
+        }
+
+        // ====================================================
+        // 💵 السعر
         // ====================================================
 
         if (
@@ -2354,7 +2840,7 @@ async function scan(
         }
 
         // ====================================================
-        // 🚀 الانفجار المؤكد
+        // 💀🚀 انفجار مؤكد
         // ====================================================
 
         if (
@@ -2376,7 +2862,7 @@ async function scan(
           }
 
         // ====================================================
-        // صعود مؤكد
+        // 🔥 صعود مؤكد
         // ====================================================
 
         } else if (
@@ -2398,7 +2884,7 @@ async function scan(
           }
 
         // ====================================================
-        // Reverse Split اليوم
+        // 🔄 Reverse Split اليوم
         // ====================================================
 
         } else if (
@@ -2452,7 +2938,7 @@ async function scan(
 }
 
 // ============================================================
-// تحديث الإشارات
+// 🔄 تحديث الإشارات
 // ============================================================
 
 async function updateSignals() {
@@ -2474,6 +2960,27 @@ async function updateSignals() {
 
     try {
 
+      // ======================================================
+      // 🔒 لا نحدث أي سهم غير مسموح
+      // ======================================================
+
+      if (
+        !isStrictAllowedExchange(
+          old.exchange
+        )
+      ) {
+
+        console.log(
+          `🚫 إزالة ${symbol} — OTC/بورصة غير مسموحة`
+        );
+
+        sentSignals.delete(
+          symbol
+        );
+
+        continue;
+      }
+
       const symbolInfo = {
 
         symbol,
@@ -2485,13 +2992,37 @@ async function updateSignals() {
           old.exchange || "",
 
         fullExchangeName:
-          old.fullExchangeName || ""
+          old.fullExchangeName || "",
+
+        quoteType:
+          "EQUITY"
       };
 
       const data =
         await getStockData(
           symbolInfo
         );
+
+      // ======================================================
+      // 🔒 فحص أخير
+      // ======================================================
+
+      if (
+        !isStrictAllowedExchange(
+          data.exchange
+        )
+      ) {
+
+        console.log(
+          `🚫 حذف ${symbol} من المراقبة — OTC`
+        );
+
+        sentSignals.delete(
+          symbol
+        );
+
+        continue;
+      }
 
       // ======================================================
       // تحديث البيانات
@@ -2505,6 +3036,12 @@ async function updateSignals() {
 
       old.marketCap =
         data.marketCap;
+
+      old.exchange =
+        data.exchange;
+
+      old.fullExchangeName =
+        data.fullExchangeName;
 
       old.volumeStrength =
         data.volumeStrength;
@@ -2561,7 +3098,7 @@ async function updateSignals() {
         data.dividend;
 
       // ======================================================
-      // Reverse Split جديد
+      // 🔄 Reverse Split جديد
       // ======================================================
 
       const currentlyHasSplit =
@@ -2590,6 +3127,9 @@ async function updateSignals() {
 🇺🇸 السوق الأمريكي
 
 ${symbol}
+
+🏛 البورصة:
+${data.exchange}
 
 💰 السعر:
 $${roundPrice(
@@ -2624,7 +3164,7 @@ ${data.explosionScore}/100
       }
 
       // ======================================================
-      // مراقبة الأهداف
+      // 🎯 الأهداف
       // ======================================================
 
       const targets =
@@ -2668,6 +3208,9 @@ ${data.explosionScore}/100
 🎯 تحقق الهدف ${i + 1}
 
 🇺🇸 ${symbol}
+
+🏛 البورصة:
+${data.exchange}
 
 💰 السعر:
 $${roundPrice(
@@ -2726,11 +3269,20 @@ bot.onText(
       `
 🇺🇸 بوت الأسهم الأمريكية PRO MAX
 
+🔒 فلتر البورصة:
+✅ NASDAQ
+✅ NYSE
+✅ NYSE AMERICAN / AMEX
+
+🚫 OTC مستبعد نهائيًا
+🚫 OTCQX
+🚫 OTCQB
+🚫 PINK
+🚫 PINK SHEETS
+🚫 أي بورصة غير معروفة
+
 💵 الحد الأدنى:
 $${MIN_PRICE.toFixed(2)}
-
-🇺🇸 NYSE / NASDAQ / AMEX
-🚫 OTC مستبعد
 
 📊 رصد حركة السهم
 🟢 التجميع
@@ -2777,12 +3329,27 @@ bot.onText(
 
     await bot.sendMessage(
       chatId,
-      "🔎 بدأ فحص السوق الأمريكي..."
+      `
+🔎 بدأ فحص السوق الأمريكي...
+
+🔒 فلتر OTC:
+مفعل
+
+✅ NASDAQ
+✅ NYSE
+✅ NYSE AMERICAN / AMEX
+
+🚫 OTC مرفوض
+`.trim()
     );
 
     await scan(
       chatId
     );
+
+    // ========================================================
+    // ربط المستخدم بالإشارات
+    // ========================================================
 
     for (
       const [
@@ -2804,7 +3371,10 @@ bot.onText(
 📊 إشارات جديدة:
 ${lastScanCount}
 
-🇺🇸 NYSE / NASDAQ / AMEX
+🔒 فلتر OTC:
+مفعل
+
+🇺🇸 NASDAQ / NYSE / NYSE AMERICAN
 
 💵 الحد الأدنى:
 $${MIN_PRICE.toFixed(2)}
@@ -2858,8 +3428,24 @@ bot.onText(
       ] of sentSignals
     ) {
 
+      // ======================================================
+      // 🔒 لا تعرض أي سهم غير مسموح
+      // ======================================================
+
+      if (
+        !isStrictAllowedExchange(
+          data.exchange
+        )
+      ) {
+
+        continue;
+      }
+
       text +=
         `🇺🇸 ${symbol}\n`;
+
+      text +=
+        `🏛 ${data.exchange}\n`;
 
       text +=
         `💰 $${roundPrice(
@@ -2904,6 +3490,18 @@ bot.onText(
       }
     }
 
+    if (
+      count === 0
+    ) {
+
+      await bot.sendMessage(
+        chatId,
+        "📭 لا توجد أسهم مسموحة حاليًا."
+      );
+
+      return;
+    }
+
     await bot.sendMessage(
       chatId,
       text.trim()
@@ -2930,25 +3528,45 @@ bot.onText(
 📡 Telegram:
 يعمل
 
+🔒 OTC BLOCKER:
+مفعل
+
 📊 الإشارات:
 ${sentSignals.size}
 
 📋 الأسهم:
 ${cachedSymbols.length}
 
-🇺🇸 الأسواق:
-NYSE / NASDAQ / AMEX
+🇺🇸 الأسواق المسموحة:
+
+✅ NASDAQ
+✅ NYSE
+✅ NYSE AMERICAN / AMEX
 
 🚫 OTC:
-مستبعد
+مرفوض
+
+🚫 PINK:
+مرفوض
+
+🚫 OTCQB:
+مرفوض
+
+🚫 OTCQX:
+مرفوض
+
+🚫 سوق غير معروف:
+مرفوض
 
 💵 الحد الأدنى:
 $${MIN_PRICE.toFixed(2)}
 
 🔎 الفحص:
-${scanning
-  ? "جارٍ"
-  : "متوقف"}
+${
+  scanning
+    ? "جارٍ"
+    : "متوقف"
+}
 
 ⏱ آخر فحص:
 ${
@@ -2988,7 +3606,21 @@ bot.onText(
 
     await bot.sendMessage(
       chatId,
-      "🔄 تم تحديث الأسهم + Reverse Split + التوزيعات."
+      `
+🔄 تم تحديث النظام
+
+🔒 فلتر OTC:
+مفعل
+
+✅ NASDAQ
+✅ NYSE
+✅ NYSE AMERICAN / AMEX
+
+🚫 OTC مرفوض
+🚫 PINK مرفوض
+🚫 OTCQB مرفوض
+🚫 OTCQX مرفوض
+`.trim()
     );
   }
 );
@@ -3008,13 +3640,17 @@ bot.onText(
 
     await bot.sendMessage(
       chatId,
-      "🛑 تم مسح الإشارات الحالية."
+      `
+🛑 تم مسح الإشارات الحالية.
+
+🔒 فلتر OTC سيبقى مفعلًا.
+`.trim()
     );
   }
 );
 
 // ============================================================
-// تحديث كل 30 ثانية
+// 🔄 تحديث الإشارات كل 30 ثانية
 // ============================================================
 
 setInterval(
@@ -3033,11 +3669,12 @@ setInterval(
     }
 
   },
-  UPDATE_INTERVAL_SEC * 1000
+  UPDATE_INTERVAL_SEC *
+  1000
 );
 
 // ============================================================
-// الفحص التلقائي
+// ⏰ الفحص التلقائي
 // ============================================================
 
 setInterval(
@@ -3092,27 +3729,46 @@ setInterval(
 );
 
 // ============================================================
-// Express
+// 🌐 الصفحة الرئيسية
 // ============================================================
 
 app.get(
   "/",
-  (req, res) => {
+  (
+    req,
+    res
+  ) => {
 
     res.send(
-      "🇺🇸 US Stock Telegram Bot PRO MAX — Running"
+      "🇺🇸 US Stock Telegram Bot PRO MAX v4 — OTC BLOCKER ACTIVE"
     );
   }
 );
 
+// ============================================================
+// ❤️ Health
+// ============================================================
+
 app.get(
   "/health",
-  (req, res) => {
+  (
+    req,
+    res
+  ) => {
 
     res.json({
 
       status:
         "ok",
+
+      bot:
+        "running",
+
+      otcBlocker:
+        true,
+
+      strictExchangeFilter:
+        true,
 
       signals:
         sentSignals.size,
@@ -3124,12 +3780,29 @@ app.get(
       minPrice:
         MIN_PRICE,
 
-      exchanges:
-        [
-          "NASDAQ",
-          "NYSE",
-          "AMEX"
-        ],
+      allowedExchanges: [
+
+        "NASDAQ",
+
+        "NYSE",
+
+        "NYSE AMERICAN",
+
+        "AMEX"
+      ],
+
+      blockedMarkets: [
+
+        "OTC",
+
+        "OTCQB",
+
+        "OTCQX",
+
+        "PINK",
+
+        "PINK SHEETS"
+      ],
 
       otc:
         false
@@ -3138,7 +3811,7 @@ app.get(
 );
 
 // ============================================================
-// تشغيل السيرفر
+// 🚀 تشغيل السيرفر
 // ============================================================
 
 app.listen(
@@ -3154,11 +3827,39 @@ app.listen(
     );
 
     console.log(
-      "🇺🇸 NYSE / NASDAQ / AMEX ONLY"
+      "🔒 OTC BLOCKER PRO ACTIVE"
     );
 
     console.log(
-      "🚫 OTC excluded"
+      "✅ NASDAQ ONLY"
+    );
+
+    console.log(
+      "✅ NYSE ONLY"
+    );
+
+    console.log(
+      "✅ NYSE AMERICAN / AMEX ONLY"
+    );
+
+    console.log(
+      "🚫 OTC EXCLUDED"
+    );
+
+    console.log(
+      "🚫 OTCQB EXCLUDED"
+    );
+
+    console.log(
+      "🚫 OTCQX EXCLUDED"
+    );
+
+    console.log(
+      "🚫 PINK EXCLUDED"
+    );
+
+    console.log(
+      "🚫 UNKNOWN EXCHANGE EXCLUDED"
     );
 
     console.log(
