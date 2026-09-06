@@ -3,7 +3,7 @@
   "version": "3.0.0",
   "main": "index.js",
   "scripts": {
-    "start":"node tasi.js"
+        "start": "node index.js & node tasi.js"
   },
   "engines": {
     "node": ">=18"
