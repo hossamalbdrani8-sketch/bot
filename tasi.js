@@ -1,4 +1,5 @@
 
+
 const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
 const yahooFinance = require("yahoo-finance2").default;
@@ -17,6 +18,7 @@ const bot = new TelegramBot(TOKEN, {
     }
 });
 
+// قائمة أسهم السوق السعودي (تاسي) فقط
 const tasiStocks = [
     { symbol: "2222.SR", name: "أرامكو السعودية" },
     { symbol: "1120.SR", name: "مصرف الراجحي" },
@@ -31,6 +33,15 @@ const tasiStocks = [
     { symbol: "1211.SR", name: "معادن" },
     { symbol: "4030.SR", name: "النهدي" },
     { symbol: "4190.SR", name: "جرير" }
+];
+
+// قائمة أسهم السوق الأمريكي فقط
+const usStocks = [
+    { symbol: "AAPL", name: "Apple Inc." },
+    { symbol: "TSLA", name: "Tesla Inc." },
+    { symbol: "MSFT", name: "Microsoft Corporation" },
+    { symbol: "NVDA", name: "NVIDIA Corporation" },
+    { symbol: "LCII", name: "LCI Industries" }
 ];
 
 async function getStockData(symbol) {
@@ -61,26 +72,32 @@ async function getStockData(symbol) {
 
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
-    const text = msg.text;
+    const text = msg.text ? msg.text.trim() : "";
 
     if (text === '/start') {
-        bot.sendMessage(chatId, "🇸🇦 أهلاً بك في بوت السوق السعودي (TASI SENTINEL).\n\nأرسل /signals لبدء فحص أسهم تاسي الفوري.");
+        await bot.sendMessage(chatId, 
+            "🇸🇦🇺🇸 أهلاً بك في بوت الأسواق المالية الشامل.\n\n" +
+            "الرجاء اختيار السوق المطلوبة:\n" +
+            "🇸🇦 أرسل `/tasi` لفحص أسهم السوق السعودي.\n" +
+            "🇺🇸 أرسل `/us` لفحص أسهم السوق الأمريكي.", 
+            { parse_mode: "Markdown" }
+        );
     } 
-    else if (text === '/signals') {
-        bot.sendMessage(chatId, "🔍 جاري جلب أحدث بيانات أسهم تاسي وإرسال التقارير...");
+    else if (text === '/tasi') {
+        await bot.sendMessage(chatId, "🇸🇦 جاري جلب أحدث بيانات السوق السعودي (تاسي)...");
 
         for (let stock of tasiStocks) {
             const data = await getStockData(stock.symbol);
             if (data) {
                 const icon = data.change >= 0 ? "🟢" : "🔴";
                 const reportText = 
-                    `📊 *تقرير تاسي الفني: ${stock.name}* (${stock.symbol})\n` +
+                    `🇸🇦 *السوق السعودي (تاسي): ${stock.name}* (${stock.symbol})\n` +
                     `----------------------------------\n` +
                     `💰 *السعر الحالي:* \`${data.price} SAR\`\n` +
                     `📈 *التغير اليومي:* ${icon} \`${data.change >= 0 ? '+' : ''}${data.change}%\`\n` +
                     `📉 *مؤشر الاتجاه (EMA):* \`${data.ema}\`\n` +
                     `⚡ *الاتجاه العام:* ${data.trend}\n\n` +
-                    `🎯 *الأهداف السعرية القادمة:*\n` +
+                    `🎯 *الأهداف السعرية:*\n` +
                     `  • الهدف 1: \`${data.targets[0]}\`\n` +
                     `  • الهدف 2: \`${data.targets[1]}\`\n` +
                     `  • الهدف 3: \`${data.targets[2]}\``;
@@ -92,12 +109,39 @@ bot.on('message', async (msg) => {
                 await new Promise(resolve => setTimeout(resolve, 800));
             }
         }
+        await bot.sendMessage(chatId, "✅ انتهى فحص السوق السعودي بنجاح.");
+    }
+    else if (text === '/us') {
+        await bot.sendMessage(chatId, "🇺🇸 جاري جلب أحدث بيانات السوق الأمريكي...");
 
-        bot.sendMessage(chatId, "✅ انتهى فحص أسهم تاسي وإرسال جميع التقارير بنجاح.");
+        for (let stock of usStocks) {
+            const data = await getStockData(stock.symbol);
+            if (data) {
+                const icon = data.change >= 0 ? "🟢" : "🔴";
+                const reportText = 
+                    `🇺🇸 *السوق الأمريكي: ${stock.name}* (${stock.symbol})\n` +
+                    `----------------------------------\n` +
+                    `💰 *السعر الحالي:* \`${data.price} USD\`\n` +
+                    `📈 *التغير اليومي:* ${icon} \`${data.change >= 0 ? '+' : ''}${data.change}%\`\n` +
+                    `📉 *مؤشر الاتجاه (EMA):* \`${data.ema}\`\n` +
+                    `⚡ *الاتجاه العام:* ${data.trend}\n\n` +
+                    `🎯 *الأهداف السعرية:*\n` +
+                    `  • الهدف 1: \`${data.targets[0]}\`\n` +
+                    `  • الهدف 2: \`${data.targets[1]}\`\n` +
+                    `  • الهدف 3: \`${data.targets[2]}\``;
+
+                try {
+                    await bot.sendMessage(chatId, reportText, { parse_mode: "Markdown" });
+                } catch (err) {}
+                
+                await new Promise(resolve => setTimeout(resolve, 800));
+            }
+        }
+        await bot.sendMessage(chatId, "✅ انتهى فحص السوق الأمريكي بنجاح.");
     }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`TASI SENTINEL running on port ${PORT}`);
+    console.log(`Bot running on port ${PORT}`);
 });
