@@ -9,7 +9,7 @@ const app = express();
 app.use(express.json());
 
 // 🔑 توكن بوت تاسي الصحيح
-const TOKEN = "7772382813:AAECFDY04AXNEf-Q98_65UheUEz7u2HymJw";
+const TOKEN = process.env.TOKEN || "7772382813:AAECFDY04AXNEf-Q98_65UheUEz7u2HymJw";
 const bot = new TelegramBot(TOKEN, {
     polling: {
         interval: 300,
