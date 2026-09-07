@@ -1,10 +1,9 @@
-
 {
   "name": "tasi-bot",
   "version": "1.0.0",
-  "main": "tasi.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node tasi.js"
+    "start": "node index.js"
   },
   "dependencies": {
     "express": "^4.18.2",
