@@ -12,9 +12,8 @@ const TOKEN = process.env.TOKEN || "7772382813:AAECFDY04AXNEf-Q98_65UheUEz7u2Hym
 const bot = new TelegramBot(TOKEN, {
     polling: {
         interval: 300,
-        autoStart: true,   
-     params: { timeout: 10 }
-    }
+        autoStart: true,
+        params: { timeout: 10 }
     }
 });
 
@@ -97,10 +96,11 @@ bot.on('message', async (msg) => {
             }
         }
 
-        bot.sendMessage(chatId, "✅ انتهى فحص أسهم تاسي وإرسال جميع التقارير بنجاح دون أي أخطاء.");
+        bot.sendMessage(chatId, "✅ انتهى فحص أسهم تاسي وإرسال جميع التقارير بنجاح.");
     }
 });
 
-app.listen(3000, () => {
-    console.log("TASI SENTINEL يعمل بسلاسة ودون أخطاء...");
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`TASI SENTINEL يعمل بنجاح على البورت ${PORT}...`);
 });
