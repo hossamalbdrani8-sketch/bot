@@ -1,3 +1,4 @@
+
 {
   "name": "tasi-bot",
   "version": "1.0.0",
@@ -8,7 +9,6 @@
   "dependencies": {
     "express": "^4.18.2",
     "node-telegram-bot-api": "^0.61.0",
-    "canvas": "^2.11.2",
     "yahoo-finance2": "^2.11.3"
   }
 }
