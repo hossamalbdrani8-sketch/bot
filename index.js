@@ -9,7 +9,7 @@ const app = express();
 app.use(express.json());
 
 // توكن بوت السوق الأمريكي الخاص بك (ضعه هنا أو عبر متغيرات البيئة)
-const TOKEN = process.env.TOKEN || "8652994768:AAHg_ABByrZdvlljJ1dQfs6LSmBl37XMPXk";
+const TOKEN = process.env.TOKEN || "8652994768:AAHg_ABByrZdvlljJ1dQfs6LSmBl37XMPXk"
 const bot = new TelegramBot(TOKEN, { polling: true });
 
 const usStocks = [
