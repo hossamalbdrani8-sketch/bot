@@ -1,16 +1,14 @@
 {
-  "name": "us-stock-telegram-bot",
-  "version": "3.0.0",
-  "main": "index.js",
+  "name": "tasi-bot",
+  "version": "1.0.0",
+  "main": "tasi.js",
   "scripts": {
-    "start": "node nasdaq.js & node tasi.js"
-  },
-  "engines": {
-    "node": ">=18"
+    "start": "node tasi.js"
   },
   "dependencies": {
-    "express": "^5.1.0",
-    "node-telegram-bot-api": "^0.66.0",
-    "canvas": "^2.11.2"
+    "express": "^4.18.2",
+    "node-telegram-bot-api": "^0.61.0",
+    "canvas": "^2.11.2",
+    "yahoo-finance2": "^2.11.3"
   }
 }
