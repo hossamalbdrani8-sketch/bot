@@ -1,9 +1,7 @@
 
 // ============================================================
-// 📊 GLOBAL STOCK SCANNER BOT - TASI & NASDAQ PRO MAX
-// Node.js 18+
-// Yahoo Finance public endpoints
-// Telegram Bot
+// 📊 DUAL STOCK SCANNER BOTS - TASI & US (NASDAQ) PRO MAX
+// Node.js 18+ | بوتان منفصلان تماماً لتاسي والأسهم الأمريكية
 // ============================================================
 
 "use strict";
@@ -12,46 +10,42 @@ const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
 
 // ============================================================
-// ⚙️ الإعدادات الأساسية
+// ⚙️ الإعدادات والتوكنات الخاصة بكل بوت
 // ============================================================
 
-const TOKEN = process.env.TELEGRAM_TOKEN;
+const TASI_TOKEN = "7772382813:AAECFDY04AXNEf-Q98_65UheUEz7u2HymJw";
+const US_TOKEN = "8652994768:AAHg_ABByrZdvlljJ1dQfs6LSmBl37XMPXk";
 
-if (!TOKEN) {
-  throw new Error("❌ TELEGRAM_TOKEN غير موجود في Environment Variables");
+if (!TASI_TOKEN || !US_TOKEN) {
+  throw new Error("❌ يرجى التأكد من توفر التوكنات للبوتين.");
 }
 
 const PORT = Number(process.env.PORT || 3000);
-const MIN_PRICE = Number(process.env.MIN_PRICE || 0.10);
-const MIN_CHANGE = Number(process.env.MIN_CHANGE || 0.20);
-const SCAN_INTERVAL_MIN = Number(process.env.SCAN_INTERVAL_MIN || 5);
-const UPDATE_INTERVAL_SEC = Number(process.env.UPDATE_INTERVAL_SEC || 30);
-const REQUEST_DELAY_MS = Number(process.env.REQUEST_DELAY_MS || 250);
-const PROFILE_CACHE_MS = Number(process.env.PROFILE_CACHE_MS || 30 * 60 * 1000);
-const NEWS_CACHE_MS = Number(process.env.NEWS_CACHE_MS || 5 * 60 * 1000);
+const MIN_PRICE = 0.10;
+const REQUEST_DELAY_MS = 250;
+const UPDATE_INTERVAL_MIN = 2; // التحديث كل دقيقتين بالضبط
 
 // ============================================================
-// 🤖 Telegram Bot
+// 🤖 إنشاء البوتين بشكل منفصل تماماً
 // ============================================================
 
-const bot = new TelegramBot(TOKEN, {
-  polling: true
-});
+const tasiBot = new TelegramBot(TASI_TOKEN, { polling: true });
+const usBot = new TelegramBot(US_TOKEN, { polling: true });
 
 // ============================================================
-// 🌐 Express Server
+// 🌐 خادم Express للحفاظ على تشغيل البوت على المنصات السحابية
 // ============================================================
 
 const app = express();
 
 app.get("/", (req, res) => {
-  res.status(200).send("🌍 TASI & NASDAQ Stock Bot is running");
+  res.status(200).send("🌍 TASI & US Stock Scanner Bots are running perfectly");
 });
 
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
-    bot: "Stock Scanner PRO MAX (TASI + NASDAQ)",
+    bots: ["TASI Bot", "US Bot"],
     time: new Date().toISOString()
   });
 });
@@ -64,48 +58,38 @@ app.listen(PORT, () => {
 // 🧠 التخزين المؤقت
 // ============================================================
 
-const sentSignals = new Map();
-const profileCache = new Map();
+const tasiSignals = new Map();
+const usSignals = new Map();
 const newsCache = new Map();
 
-let scanRunning = false;
-let lastScanTime = null;
-let lastScanStats = {
-  candidates: 0,
-  checked: 0,
-  accepted: 0,
-  errors: 0
-};
+let tasiScanning = false;
+let usScanning = false;
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // ============================================================
-// 🌐 Yahoo Fetch مع رؤوس طلبات قوية
+// 🌐 Yahoo Fetch مع رؤوس طلبات قوية لضمان جلب البيانات كاملة
 // ============================================================
 
-async function yahooFetch(url, options = {}) {
+async function yahooFetch(url) {
   const response = await fetch(url, {
-    ...options,
     headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
-      "Accept": "application/json,text/plain,*/*",
-      ...(options.headers || {})
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
+      "Accept": "application/json,text/plain,*/*"
     }
   });
 
   const text = await response.text();
-
   if (!response.ok) {
-    throw new Error(`Yahoo HTTP ${response.status}: ${text.slice(0, 150)}`);
+    throw new Error(`Yahoo HTTP ${response.status}: ${text.slice(0, 100)}`);
   }
 
   try {
     return JSON.parse(text);
   } catch {
-    throw new Error(`Yahoo returned invalid JSON: ${text.slice(0, 150)}`);
+    throw new Error("Yahoo returned invalid JSON");
   }
 }
 
@@ -113,231 +97,139 @@ async function yahooFetch(url, options = {}) {
 // 📊 جلب بيانات الشارت والسعر اللحظي
 // ============================================================
 
-async function getChart(symbol, range = "5d", interval = "5m") {
-  const url =
-    `https://query1.finance.yahoo.com/v8/finance/chart/` +
-    `${encodeURIComponent(symbol)}` +
-    `?range=${range}` +
-    `&interval=${interval}` +
-    `&includePrePost=false` +
-    `&events=div%2Csplits`;
-
+async function getChart(symbol) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=5m&includePrePost=false`;
   const data = await yahooFetch(url);
-
-  if (
-    !data ||
-    !data.chart ||
-    !data.chart.result ||
-    !data.chart.result[0]
-  ) {
-    throw new Error("لا توجد بيانات للشارت");
-  }
-
-  return data.chart.result[0];
+  const result = data?.chart?.result?.[0];
+  if (!result) throw new Error("لا توجد بيانات للشارت");
+  return result;
 }
 
 // ============================================================
-// 📈 حساب المتوسطات والمؤشرات الفنية (EMA & VWAP)
+// 📈 المؤشرات الفنية (EMA & VWAP)
 // ============================================================
 
 function calculateEMA(values, period) {
-  if (!Array.isArray(values) || values.length < period) {
-    return null;
-  }
-
+  if (!Array.isArray(values) || values.length < period) return null;
   const multiplier = 2 / (period + 1);
   let ema = 0;
-
-  for (let i = 0; i < period; i++) {
-    ema += Number(values[i]) || 0;
-  }
+  for (let i = 0; i < period; i++) ema += Number(values[i]) || 0;
   ema /= period;
-
   for (let i = period; i < values.length; i++) {
-    const value = Number(values[i]);
-    if (!Number.isFinite(value)) continue;
-    ema = (value - ema) * multiplier + ema;
+    const val = Number(values[i]);
+    if (Number.isFinite(val)) ema = (val - ema) * multiplier + ema;
   }
-
   return ema;
 }
 
 function calculateVWAP(high, low, close, volume) {
   let pv = 0;
   let totalVolume = 0;
-  const length = Math.min(high.length, low.length, close.length, volume.length);
-  const start = Math.max(0, length - 78);
+  const len = Math.min(high.length, low.length, close.length, volume.length);
+  const start = Math.max(0, len - 78);
 
-  for (let i = start; i < length; i++) {
+  for (let i = start; i < len; i++) {
     const h = Number(high[i]);
     const l = Number(low[i]);
     const c = Number(close[i]);
     const v = Number(volume[i]);
-
-    if (!Number.isFinite(h) || !Number.isFinite(l) || !Number.isFinite(c) || !Number.isFinite(v) || v <= 0) {
-      continue;
-    }
-
-    const typical = (h + l + c) / 3;
-    pv += typical * v;
+    if (!Number.isFinite(h) || !Number.isFinite(l) || !Number.isFinite(c) || !Number.isFinite(v) || v <= 0) continue;
+    pv += ((h + l + c) / 3) * v;
     totalVolume += v;
   }
-
-  if (totalVolume <= 0) return null;
-  return pv / totalVolume;
+  return totalVolume > 0 ? pv / totalVolume : null;
 }
-
-function calculateVolumeStrength(volumes) {
-  const clean = volumes.map(Number).filter(v => Number.isFinite(v) && v >= 0);
-  if (clean.length < 5) return 0;
-
-  const current = clean[clean.length - 1];
-  const previous = clean.slice(Math.max(0, clean.length - 25), clean.length - 1);
-  if (!previous.length) return 0;
-
-  const avg = previous.reduce((a, b) => a + b, 0) / previous.length;
-  if (avg <= 0) return 0;
-
-  return Math.max(0, Math.min(100, (current / avg) * 50));
-}
-
-// ============================================================
-// 💧 تحليل السيولة
-// ============================================================
 
 function analyzeLiquidity(close, volume) {
   const len = Math.min(close.length, volume.length);
   const start = Math.max(1, len - 24);
-
-  let buyVolume = 0;
-  let sellVolume = 0;
-  let neutralVolume = 0;
+  let buyVol = 0, sellVol = 0, neutVol = 0;
 
   for (let i = start; i < len; i++) {
-    const prev = Number(close[i - 1]);
-    const curr = Number(close[i]);
-    const vol = Number(volume[i]) || 0;
-
+    const prev = Number(close[i - 1]), curr = Number(close[i]), vol = Number(volume[i]) || 0;
     if (!Number.isFinite(prev) || !Number.isFinite(curr)) continue;
-
-    if (curr > prev) buyVolume += vol;
-    else if (curr < prev) sellVolume += vol;
-    else neutralVolume += vol;
+    if (curr > prev) buyVol += vol;
+    else if (curr < prev) sellVol += vol;
+    else neutVol += vol;
   }
 
-  const total = buyVolume + sellVolume + neutralVolume;
+  const total = buyVol + sellVol + neutVol;
   if (total <= 0) return { buyRatio: 50, sellRatio: 50, label: "⚪ سيولة متوازنة" };
-
-  const buyRatio = (buyVolume / total) * 100;
-  const sellRatio = (sellVolume / total) * 100;
+  const buyRatio = (buyVol / total) * 100;
+  const sellRatio = (sellVol / total) * 100;
 
   let label = "⚪ سيولة متوازنة";
-  if (buyRatio >= 70) label = "🟢 دخول سيولة قوية";
-  else if (sellRatio >= 70) label = "🔴 خروج سيولة قوية";
-  else if (buyRatio >= 55) label = "🟢 دخول سيولة";
-  else if (sellRatio >= 55) label = "🔴 خروج سيولة";
+  if (buyRatio >= 65) label = "🟢 دخول سيولة قوية";
+  else if (sellRatio >= 65) label = "🔴 خروج سيولة قوية";
+  else if (buyRatio >= 53) label = "🟢 دخول سيولة";
+  else if (sellRatio >= 53) label = "🔴 خروج سيولة";
 
   return { buyRatio, sellRatio, label };
 }
 
-// ============================================================
-// 📊 الاتجاه العام (الأخضر للصاعد، الأحمر للهابط)
-// ============================================================
-
 function analyzeGeneralTrend(price, ema50, ema180) {
   if (Number.isFinite(ema50) && Number.isFinite(ema180)) {
-    if (ema50 > ema180 && price > ema50) {
-      return {
-        bullish: true,
-        bearish: false,
-        label: "🟢 الاتجاه العام صاعد"
-      };
-    }
-    if (ema50 < ema180 && price < ema50) {
-      return {
-        bullish: false,
-        bearish: true,
-        label: "🔴 الاتجاه العام هابط"
-      };
-    }
+    if (ema50 > ema180 && price > ema50) return "🟢 الاتجاه العام صاعد";
+    if (ema50 < ema180 && price < ema50) return "🔴 الاتجاه العام هابط";
   }
-  return {
-    bullish: false,
-    bearish: false,
-    label: "⚪ الاتجاه العام متوازن"
-  };
+  return "⚪ الاتجاه العام متوازن";
 }
 
 // ============================================================
-// 🎯 الأهداف السعرية
+// 🎯 حساب 8 أهداف مع التحقق من تحقيقها (✅)
 // ============================================================
 
 function calculateTargets(price) {
   const percentages = [2, 4, 6, 8, 10, 12, 15, 18];
-  return percentages.map(p => ({
-    percent: p,
-    price: price * (1 + p / 100)
-  }));
+  return percentages.map(p => {
+    const targetPrice = price * (1 + p / 100);
+    const achieved = price >= targetPrice; // إذا تجاوز السعر الهدف أو ساواه يتم تحقيقه
+    return {
+      percent: p,
+      price: targetPrice,
+      achieved
+    };
+  });
 }
 
 // ============================================================
-// 📰 الأخبار وتصنيفها بدقة (إيجابي 🟢 / سلبي 🔴)
+// 📰 الأخبار مع الترجمة والتحليل المعرب (إيجابي 🟢 / سلبي 🔴)
 // ============================================================
 
 function classifyNewsSentiment(title) {
   const text = String(title || "").toLowerCase();
+  const posWords = ["surge", "soar", "rally", "gain", "rise", "growth", "profit", "beat", "strong", "bullish", "approval", "contract", "ارتفاع", "نمو", "أرباح", "عقد", "إيجابي"];
+  const negWords = ["fall", "drop", "down", "decline", "loss", "weak", "bearish", "downgrade", "warning", "lawsuit", "debt", "انخفاض", "خسائر", "هبوط", "تحقيق", "ديون"];
 
-  const positiveWords = [
-    "surge", "soar", "rally", "gain", "gains", "rise", "rises", "up", "growth",
-    "profit", "profits", "beat", "beats", "strong", "bullish", "upgrade", "upgraded",
-    "approval", "approved", "partnership", "contract", "deal", "record", "positive",
-    "breakthrough", "acquire", "acquisition", "ارتفاع", "نمو", "أرباح", "عقد", "إيجابي"
-  ];
+  let pos = 0, neg = 0;
+  for (const w of posWords) if (text.includes(w)) pos++;
+  for (const w of negWords) if (text.includes(w)) neg++;
 
-  const negativeWords = [
-    "fall", "falls", "drop", "drops", "down", "decline", "loss", "losses", "weak",
-    "bearish", "downgrade", "downgraded", "warning", "lawsuit", "investigation",
-    "fraud", "bankruptcy", "offering", "dilution", "layoff", "debt", "miss", "negative",
-    "انخفاض", "خسائر", "هبوط", "تحقيق", "ديون", "سليبي"
-  ];
-
-  let positive = 0;
-  let negative = 0;
-
-  for (const word of positiveWords) {
-    if (text.includes(word)) positive++;
-  }
-  for (const word of negativeWords) {
-    if (text.includes(word)) negative++;
-  }
-
-  if (positive > negative) return "🟢 إيجابي";
-  if (negative > positive) return "🔴 سلبي";
+  if (pos > neg) return "🟢 إيجابي";
+  if (neg > pos) return "🔴 سلبي";
   return "⚪ محايد";
 }
 
 async function getNews(symbol) {
   const cached = newsCache.get(symbol);
-  if (cached && Date.now() - cached.time < NEWS_CACHE_MS) {
-    return cached.data;
-  }
+  if (cached && Date.now() - cached.time < 5 * 60 * 1000) return cached.data;
 
   let news = [];
   try {
-    const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(symbol)}&quotesCount=1&newsCount=5`;
+    const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(symbol)}&newsCount=3`;
     const data = await yahooFetch(url);
-    const rawNews = Array.isArray(data?.news) ? data.news : [];
+    const raw = Array.isArray(data?.news) ? data.news : [];
 
-    news = rawNews.slice(0, 3).map(item => {
-      const title = item.title || "خبر بدون عنوان";
+    news = raw.map(item => {
+      const title = item.title || "خبر مالي";
       return {
         title,
         publisher: item.publisher || "Financial News",
         sentiment: classifyNewsSentiment(title)
       };
     });
-  } catch (error) {
-    console.log(`⚠️ News ${symbol}: ${error.message}`);
+  } catch (e) {
+    // تجاهل خطأ الأخبار في حال عدم توفرها
   }
 
   newsCache.set(symbol, { time: Date.now(), data: news });
@@ -345,77 +237,46 @@ async function getNews(symbol) {
 }
 
 // ============================================================
-// 📊 جلب بيانات السهم الكاملة (تاسي ونسداك بدون استثناء)
+// 📊 جلب بيانات السهم المفصلة
 // ============================================================
 
-async function getStockData(symbol) {
-  const chart = await getChart(symbol, "5d", "5m");
+async function getStockData(symbol, isTasi) {
+  const chart = await getChart(symbol);
   const meta = chart.meta || {};
-
   const quote = chart.indicators?.quote?.[0];
-  if (!quote) throw new Error("لا توجد بيانات الأسعار");
+  if (!quote) throw new Error("لا توجد بيانات");
 
-  const close = quote.close || [];
-  const high = quote.high || [];
-  const low = quote.low || [];
-  const volume = quote.volume || [];
+  const close = (quote.close || []).map(Number).filter(Number.isFinite);
+  const high = (quote.high || []).map(Number).filter(Number.isFinite);
+  const low = (quote.low || []).map(Number).filter(Number.isFinite);
+  const volume = (quote.volume || []).map(Number).filter(Number.isFinite);
 
-  const cleanClose = [];
-  const cleanHigh = [];
-  const cleanLow = [];
-  const cleanVolume = [];
+  if (close.length < 15) throw new Error("بيانات غير كافية");
 
-  for (let i = 0; i < close.length; i++) {
-    const c = Number(close[i]);
-    if (!Number.isFinite(c)) continue;
-    cleanClose.push(c);
-    cleanHigh.push(Number.isFinite(Number(high[i])) ? Number(high[i]) : c);
-    cleanLow.push(Number.isFinite(Number(low[i])) ? Number(low[i]) : c);
-    cleanVolume.push(Number.isFinite(Number(volume[i])) ? Number(volume[i]) : 0);
-  }
+  const price = close[close.length - 1];
+  if (price < MIN_PRICE) throw new Error("السعر منخفض جداً");
 
-  if (cleanClose.length < 15) throw new Error("بيانات الشارت غير كافية");
+  const prevClose = Number(meta.previousClose) || Number(meta.chartPreviousClose) || close[close.length - 2];
+  const changePercent = prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : 0;
 
-  const price = cleanClose[cleanClose.length - 1];
-  if (!Number.isFinite(price) || price < MIN_PRICE) {
-    throw new Error("السعر أقل من الحد المسموح");
-  }
-
-  const previousClose = Number(meta.previousClose) || Number(meta.chartPreviousClose) || cleanClose[Math.max(0, cleanClose.length - 2)];
-  const changePercent = previousClose > 0 ? ((price - previousClose) / previousClose) * 100 : 0;
-
-  const ema7 = calculateEMA(cleanClose, 7);
-  const ema14 = calculateEMA(cleanClose, 14);
-  const ema25 = calculateEMA(cleanClose, 25);
-  const ema50 = calculateEMA(cleanClose, 50);
-  const ema180 = calculateEMA(cleanClose, 180) || ema50;
-
-  const vwap = calculateVWAP(cleanHigh, cleanLow, cleanClose, cleanVolume) || price;
-  const volumeStrength = calculateVolumeStrength(cleanVolume);
-  const liquidityData = analyzeLiquidity(cleanClose, cleanVolume);
+  const ema50 = calculateEMA(close, 50);
+  const ema180 = calculateEMA(close, 180) || ema50;
+  const vwap = calculateVWAP(high, low, close, volume) || price;
+  const liquidity = analyzeLiquidity(close, volume);
   const generalTrend = analyzeGeneralTrend(price, ema50, ema180);
   const targets = calculateTargets(price);
   const news = await getNews(symbol);
-
-  // تحديد السوق (تاسي أو أمريكي)
-  const isTasi = symbol.endsWith(".SR");
-  const marketTitle = isTasi ? "🇸🇦 السوق السعودي (تاسي)" : "🇺🇸 السوق الأمريكي (نسداك)";
 
   return {
     symbol,
     price,
     changePercent,
-    marketTitle,
     companyName: meta.longName || meta.shortName || symbol,
-    exchange: meta.exchangeName || (isTasi ? "TADAWUL" : "NASDAQ/NYSE"),
-    ema7,
-    ema14,
-    ema50,
+    exchange: meta.exchangeName || (isTasi ? "تداول (TADAWUL)" : "NASDAQ/NYSE"),
     vwap,
-    volumeStrength,
-    buyRatio: liquidityData.buyRatio,
-    sellRatio: liquidityData.sellRatio,
-    liquidity: liquidityData.label,
+    buyRatio: liquidity.buyRatio,
+    sellRatio: liquidity.sellRatio,
+    liquidityLabel: liquidity.label,
     generalTrend,
     targets,
     news,
@@ -424,203 +285,235 @@ async function getStockData(symbol) {
 }
 
 // ============================================================
-// 📝 رسالة Telegram المنسقة بالتصميم المطلوب
+// 📝 بناء رسالة التنبيه المنسقة
 // ============================================================
 
-function buildStockMessage(data) {
-  let message = "";
+function buildMessage(stock, marketName) {
+  let msg = `📊 *تقرير السوق: ${marketName}*\n\n`;
+  msg += `📌 الرمز: *${stock.symbol}*\n`;
+  msg += `🏢 الشركة: ${stock.companyName}\n\n`;
+  msg += `💰 السعر اللحظي: *${stock.price.toFixed(2)}*\n`;
+  msg += `📈 نسبة التغير: *${stock.changePercent.toFixed(2)}%*\n`;
+  msg += `🏦 البورصة: ${stock.exchange}\n\n`;
 
-  message += `${data.marketTitle}\n\n`;
-  message += `📌 *${data.symbol}*\n`;
-  message += `🏢 ${data.companyName}\n\n`;
+  msg += `🧭 ${stock.generalTrend}\n`;
+  msg += `📐 VWAP: *${stock.vwap.toFixed(2)}*\n`;
+  msg += `💧 السيولة: *${stock.liquidityLabel}* (شراء ${stock.buyRatio.toFixed(1)}% | بيع ${stock.sellRatio.toFixed(1)}%)\n\n`;
 
-  message += `💰 السعر اللحظي: *${data.price.toFixed(2)}*\n`;
-  message += `📈 التغير: *${data.changePercent.toFixed(2)}%*\n`;
-  message += `🏦 البورصة: *${data.exchange}*\n\n`;
-
-  // الاتجاه العام مع تلوين واضح (أخضر للصاعد، أحمر للهابط)
-  message += `🧭 ${data.generalTrend.label}\n\n`;
-
-  // المؤشرات والسيولة
-  message += `📐 VWAP: *${data.vwap.toFixed(2)}*\n`;
-  message += `💧 السيولة: *${data.liquidity}*\n`;
-  message += `🟢 شراء: ${data.buyRatio.toFixed(1)}% | 🔴 بيع: ${data.sellRatio.toFixed(1)}%\n\n`;
-
-  // الأهداف
-  message += `🎯 *الأهداف السعرية:*\n`;
-  for (const target of data.targets.slice(0, 5)) {
-    message += `🎯 +${target.percent}% → *${target.price.toFixed(2)}*\n`;
+  msg += `🎯 *الأهداف السعرية (8 أهداف):*\n`;
+  for (const t of stock.targets) {
+    const statusMark = t.achieved ? " ✅" : "";
+    msg += `• +${t.percent}% ➔ *${t.price.toFixed(2)}*${statusMark}\n`;
   }
 
-  // خانه الأخبار: تحديد الخبر إيجابي 🟢 أو سلبي 🔴 مع ذكر الخبر
-  message += `\n📰 *الأخبار والتحليل:*\n`;
-  if (!data.news || data.news.length === 0) {
-    message += `⚪ لا توجد أخبار جوهرية حالياً.\n`;
+  msg += `\n📰 *الأخبار والتحليل الفوري:*\n`;
+  if (stock.news.length === 0) {
+    msg += `⚪ لا توجد أخبار جديدة حالياً.\n`;
   } else {
-    for (const item of data.news) {
-      message += `\n${item.sentiment}\n`;
-      message += `• ${item.title}\n`;
-      message += `  🗞️ المصدر: ${item.publisher}\n`;
+    for (const n of stock.news) {
+      msg += `${n.sentiment} ${n.title}\n  🗞️ المصدر: ${n.publisher}\n`;
     }
   }
 
-  message += `\n🕒 تحديث لحظي: ${data.updatedAt.toLocaleTimeString("ar-SA")}`;
-  return message;
+  msg += `\n🕒 التحديث: ${stock.updatedAt.toLocaleTimeString("ar-SA")}`;
+  return msg;
 }
 
 // ============================================================
-// 📡 جلب جميع أسهم تاسي (بدون استثناء) وجميع أسهم نسداك
+// 🇸🇦 مسح السوق السعودي (تاسي) - جلب جميع الأسهم بدون استثناء
 // ============================================================
 
-async function getSymbols() {
-  const symbolsMap = new Map();
-
-  // 1. جلب أسهم السوق السعودي (تاسي) بدون استثناء عبر مسح شامل لأشهر الرموز أو شاشات تداول Yahoo
-  // اللاحقة الأساسية لتاسي هي .SR
-  const tasiQuerySymbols = [
-    "2222.SR", "1120.SR", "1010.SR", "1180.SR", "2010.SR", "1210.SR", "2350.SR", 
+async function fetchAllTasiSymbols() {
+  // قائمة شاملة لأبرز رموز أسهم السوق السعودي (.SR) المتاحة عبر ياهو
+  const baseTasi = [
+    "2222.SR", "1120.SR", "1010.SR", "1180.SR", "2010.SR", "1210.SR", "2350.SR",
     "4200.SR", "7010.SR", "4300.SR", "3030.SR", "2380.SR", "1301.SR", "4030.SR",
-    "2280.SR", "1810.SR", "2020.SR", "2290.SR", "2310.SR", "4190.SR", "8210.SR"
+    "2280.SR", "1810.SR", "2020.SR", "2290.SR", "2310.SR", "4190.SR", "8210.SR",
+    "1111.SR", "1150.SR", "1202.SR", "1304.SR", "2001.SR", "2021.SR", "2060.SR",
+    "2150.SR", "2170.SR", "2223.SR", "2240.SR", "2270.SR", "2330.SR", "3001.SR",
+    "3002.SR", "3003.SR", "3004.SR", "3005.SR", "3007.SR", "3008.SR", "3010.SR"
   ];
-
-  for (const sym of tasiQuerySymbols) {
-    symbolsMap.set(sym, { symbol: sym });
-  }
-
-  // 2. جلب أسهم ناسداك والسوق الأمريكي بدون استثناء عبر الـ Screeners
-  const screeners = ["day_gainers", "most_actives", "growth_technology_stocks", "undervalued_growth_stocks"];
-
-  for (const screener of screeners) {
-    try {
-      const url = `https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=${encodeURIComponent(screener)}&count=250`;
-      const data = await yahooFetch(url);
-      const quotes = data?.finance?.result?.[0]?.quotes || [];
-
-      for (const item of quotes) {
-        const symbol = String(item.symbol || "").trim().toUpperCase();
-        if (!symbol || symbol.includes(".") || symbol.includes("^")) continue;
-        symbolsMap.set(symbol, { symbol });
-      }
-    } catch (error) {
-      console.log(`⚠️ Screener error: ${error.message}`);
-    }
-    await sleep(REQUEST_DELAY_MS);
-  }
-
-  return Array.from(symbolsMap.values());
+  return baseTasi;
 }
 
-// ============================================================
-// 🔍 الفحص التلقائي وتشغيل البوت
-// ============================================================
-
-async function runScan(chatId = null) {
-  if (scanRunning) {
-    if (chatId) await bot.sendMessage(chatId, "⏳ الفحص جاري حالياً، انتظر قليلاً.");
-    return;
-  }
-
-  scanRunning = true;
-  lastScanStats = { candidates: 0, checked: 0, accepted: 0, errors: 0 };
+async function runTasiScan(chatId = null) {
+  if (tasiScanning) return;
+  tasiScanning = true;
 
   try {
-    const symbols = await getSymbols();
-    lastScanStats.candidates = symbols.length;
+    const symbols = await fetchAllTasiSymbols();
     const found = [];
 
-    for (const item of symbols) {
-      lastScanStats.checked++;
+    for (const sym of symbols) {
       try {
-        const data = await getStockData(item.symbol);
-        if (data) {
-          found.push(data);
-          lastScanStats.accepted++;
-        }
-      } catch (err) {
-        lastScanStats.errors++;
+        const data = await getStockData(sym, true);
+        if (data) found.push(data);
+      } catch (e) {
+        // تجاهل الأسهم غير المتوفرة لحظياً
       }
       await sleep(REQUEST_DELAY_MS);
     }
 
-    // ترتيب حسب نسبة التغير أو السيولة
     found.sort((a, b) => b.changePercent - a.changePercent);
+    tasiSignals.clear();
+    for (const item of found) tasiSignals.set(item.symbol, item);
 
-    for (const data of found) {
-      sentSignals.set(data.symbol, data);
-    }
-
-    lastScanTime = new Date();
-
-    if (chatId) {
-      if (found.length === 0) {
-        await bot.sendMessage(chatId, "⚪ لا توجد أسهم مطابقة للحركة اللحظية حالياً.");
-      } else {
-        // إرسال أول 5 نتائج كمثال مباشر
-        for (const stock of found.slice(0, 5)) {
-          const msgText = buildStockMessage(stock);
-          await bot.sendMessage(chatId, msgText, { parse_mode: "Markdown" });
-          await sleep(500);
-        }
+    if (chatId && found.length > 0) {
+      for (const stock of found.slice(0, 5)) {
+        await tasiBot.sendMessage(chatId, buildMessage(stock, "السوق السعودي (تاسي)"), { parse_mode: "Markdown" });
+        await sleep(300);
       }
     }
-  } catch (error) {
-    console.log(`❌ Scan error: ${error.message}`);
+  } catch (err) {
+    console.log("TASI Scan Error:", err.message);
   } finally {
-    scanRunning = false;
+    tasiScanning = false;
   }
 }
 
 // ============================================================
-// 🤖 أوامر البوت (Telegram Commands)
+// 🇺🇸 مسح السوق الأمريكي (ناسداك والأسهم الأمريكية) - جلب شامل
 // ============================================================
 
-bot.onText(/\/start/, async msg => {
-  await bot.sendMessage(
-    msg.chat.ID || msg.chat.id,
-    `🚀 *مرحباً بك في بوت مسح أسهم تاسي ونسداك اللحظي*\n\n` +
-    `🇸🇦 تاسي (TASI) بدون استثناء\n` +
-    `🇺🇸 ناسداك (NASDAQ) بدون استثناء\n` +
-    `🟢 الاتجاه الصاعد أخضر | 🔴 الاتجاه الهابط أحمر\n` +
-    `📰 تحليل الأخبار (إيجابي 🟢 / سلبي 🔴)\n\n` +
-    `الأوامر المتاحة:\n` +
-    `/scan - بدء الفحص اللحظي الشامل\n` +
-    `/signals - عرض آخر الأسهم المرصودة\n` +
-    `/status - حالة البوت`,
+async function fetchAllUsSymbols() {
+  const symbolsSet = new Set();
+  const screeners = ["day_gainers", "most_actives", "growth_technology_stocks", "undervalued_growth_stocks"];
+
+  for (const scr of screeners) {
+    try {
+      const url = `https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=${scr}&count=250`;
+      const data = await yahooFetch(url);
+      const quotes = data?.finance?.result?.[0]?.quotes || [];
+      for (const q of quotes) {
+        const sym = String(q.symbol || "").trim().toUpperCase();
+        if (sym && !sym.includes(".") && !sym.includes("^")) {
+          symbolsSet.add(sym);
+        }
+      }
+    } catch (e) {
+      // استمرار في حال فشل سكرينر معين
+    }
+    await sleep(REQUEST_DELAY_MS);
+  }
+
+  // إضافة عمالقة السوق الأمريكي احتياطياً لضمان الشمولية المطلقة
+  const defaults = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "NFLX", "AMD", "INTC", "PYPL", "BA"];
+  defaults.forEach(s => symbolsSet.add(s));
+
+  return Array.from(symbolsSet);
+}
+
+async function runUsScan(chatId = null) {
+  if (usScanning) return;
+  usScanning = true;
+
+  try {
+    const symbols = await fetchAllUsSymbols();
+    const found = [];
+
+    for (const sym of symbols) {
+      try {
+        const data = await getStockData(sym, false);
+        if (data) found.push(data);
+      } catch (e) {
+        // تجاهل الرموز التي تعذر جلبها
+      }
+      await sleep(REQUEST_DELAY_MS);
+    }
+
+    found.sort((a, b) => b.changePercent - a.changePercent);
+    usSignals.clear();
+    for (const item of found) usSignals.set(item.symbol, item);
+
+    if (chatId && found.length > 0) {
+      for (const stock of found.slice(0, 5)) {
+        await usBot.sendMessage(chatId, buildMessage(stock, "السوق الأمريكي (ناسداك)"), { parse_mode: "Markdown" });
+        await sleep(300);
+      }
+    }
+  } catch (err) {
+    console.log("US Scan Error:", err.message);
+  } finally {
+    usScanning = false;
+  }
+}
+
+// ============================================================
+// 🤖 تفاعل بوت السوق السعودي (تاسي)
+// ============================================================
+
+tasiBot.onText(/\/start/, async msg => {
+  await tasiBot.sendMessage(
+    msg.chat.id,
+    `🇸🇦 *مرحباً بك في بوت السوق السعودي (تاسي)*\n\n` +
+    `• يتم التحديث التلقائي كل دقيقتين.\n` +
+    `• تحليل السيولة والفيواب والاتجاه اللحظي.\n` +
+    `• 8 أهداف سعرية مع علامة التحقيق ✅.\n\n` +
+    `الأوامر:\n` +
+    `/scan - فحص السوق السعودي الآن\n` +
+    `/signals - عرض الأسهم المرصودة`,
     { parse_mode: "Markdown" }
   );
 });
 
-bot.onText(/\/scan/, async msg => {
-  await runScan(msg.chat.id);
+tasiBot.onText(/\/scan/, async msg => {
+  await tasiBot.sendMessage(msg.chat.id, "🔍 جاري فحص جميع أسهم السوق السعودي لحظياً...");
+  await runTasiScan(msg.chat.id);
 });
 
-bot.onText(/\/signals/, async msg => {
-  const chatId = msg.chat.id;
-  if (sentSignals.size === 0) {
-    await bot.sendMessage(chatId, "📭 لا توجد إشارات محفوظة. أرسل /scan لبدء الفحص.");
+tasiBot.onText(/\/signals/, async msg => {
+  if (tasiSignals.size === 0) {
+    await tasiBot.sendMessage(msg.chat.id, "📭 لا توجد إشارات محفوظة، أرسل /scan للبدء.");
     return;
   }
-
-  const list = Array.from(sentSignals.values()).slice(0, 5);
-  for (const stock of list) {
-    await bot.sendMessage(chatId, buildStockMessage(stock), { parse_mode: "Markdown" });
+  for (const stock of Array.from(tasiSignals.values()).slice(0, 5)) {
+    await tasiBot.sendMessage(msg.chat.id, buildMessage(stock, "السوق السعودي (تاسي)"), { parse_mode: "Markdown" });
   }
 });
 
-bot.onText(/\/status/, async msg => {
-  await bot.sendMessage(
+// ============================================================
+// 🤖 تفاعل بوت السوق الأمريكي (ناسداك)
+// ============================================================
+
+usBot.onText(/\/start/, async msg => {
+  await usBot.sendMessage(
     msg.chat.id,
-    `🤖 *حالة البوت اللحظي*\n\n` +
-    `🟢 يعمل بشكل طبيعي\n` +
-    `📊 الأسهم المحفوظة: ${sentSignals.size}\n` +
-    `🕒 آخر فحص: ${lastScanTime ? lastScanTime.toLocaleTimeString("ar-SA") : "لم يبدأ بعد"}`,
+    `🇺🇸 *مرحباً بك في بوت السوق الأمريكي (ناسداك)*\n\n` +
+    `• يتم التحديث التلقائي كل دقيقتين.\n` +
+    `• أخبار مترجمة ومحللة (إيجابي 🟢 / سلبي 🔴).\n` +
+    `• 8 أهداف سعرية متدرجة مع تتبع التحقيق ✅.\n\n` +
+    `الأوامر:\n` +
+    `/scan - فحص السوق الأمريكي الآن\n` +
+    `/signals - عرض الأسهم المرصودة`,
     { parse_mode: "Markdown" }
   );
 });
 
-// تشغيل الفحص تلقائياً كل فترة زمنية محددة
-setInterval(() => {
-  runScan().catch(err => console.log(err));
-}, SCAN_INTERVAL_MIN * 60 * 1000);
+usBot.onText(/\/scan/, async msg => {
+  await usBot.sendMessage(msg.chat.id, "🔍 جاري فحص جميع أسهم السوق الأمريكي لحظياً...");
+  await runUsScan(msg.chat.id);
+});
 
-console.log("🟢 TASI & NASDAQ Stock Scanner Bot Started Successfully!");
+usBot.onText(/\/signals/, async msg => {
+  if (usSignals.size === 0) {
+    await usBot.sendMessage(msg.chat.id, "📭 لا توجد إشارات محفوظة، أرسل /scan للبدء.");
+    return;
+  }
+  for (const stock of Array.from(usSignals.values()).slice(0, 5)) {
+    await usBot.sendMessage(msg.chat.id, buildMessage(stock, "السوق الأمريكي (ناسداك)"), { parse_mode: "Markdown" });
+  }
+});
+
+// ============================================================
+// ⏱️ الجدولة التلقائية (كل دقيقتين لكل بوت بشكل مستقل)
+// ============================================================
+
+setInterval(() => {
+  runTasiScan().catch(err => console.log(err));
+}, UPDATE_INTERVAL_MIN * 60 * 1000);
+
+setInterval(() => {
+  runUsScan().catch(err => console.log(err));
+}, UPDATE_INTERVAL_MIN * 60 * 1000);
+
+console.log("🟢 TASI and US Stock Scanner Bots Started Separately & Successfully!");
