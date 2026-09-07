@@ -1,269 +1,146 @@
 
 const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
+const yahooFinance = require("yahoo-finance2").default;
 
+yahooFinance.setGlobalConfig({ logger: { info: () => {}, warn: () => {}, error: () => {} } });
 
 const app = express();
 app.use(express.json());
 
-// 🔑 TOKEN
-const TOKEN = "7772382813:AAECFDY04AXNEf-Q98_65UheUEz7u2HymJw"
-
-// 💀 اتصال قوي ثابت
+const TOKEN = process.env.TOKEN || "7772382813:AAECFDY04AXNEf-Q98_65UheUEz7u2HymJw";
 const bot = new TelegramBot(TOKEN, {
-  polling: {
-    interval: 300,
-    autoStart: true,
-    params: { timeout: 10 }
-  }
+    polling: {
+        interval: 300,
+        autoStart: true,
+        params: { timeout: 10 }
+    }
 });
 
-// 🔑 API
-const API_KEY = "d7a0311r01qspme6c44gd7a0311r01qspme6c450";
+// قائمة أسهم السوق السعودي (تاسي) فقط
+const tasiStocks = [
+    { symbol: "2222.SR", name: "أرامكو السعودية" },
+    { symbol: "1120.SR", name: "مصرف الراجحي" },
+    { symbol: "1010.SR", name: "بنك الرياض" },
+    { symbol: "1180.SR", name: "البنك الأهلي" },
+    { symbol: "2010.SR", name: "سابك" },
+    { symbol: "2350.SR", name: "كيان السعودية" },
+    { symbol: "2280.SR", name: "المراعي" },
+    { symbol: "4200.SR", name: "الدريس" },
+    { symbol: "7010.SR", name: "اتصالات السعودية (STC)" },
+    { symbol: "5110.SR", name: "الكهرباء السعودية" },
+    { symbol: "1211.SR", name: "معادن" },
+    { symbol: "4030.SR", name: "النهدي" },
+    { symbol: "4190.SR", name: "جرير" }
+];
 
-let chatIds = new Set();
-let memory = {};
-let running = false;
-let lastData = {};
+// قائمة أسهم السوق الأمريكي فقط
+const usStocks = [
+    { symbol: "AAPL", name: "Apple Inc." },
+    { symbol: "TSLA", name: "Tesla Inc." },
+    { symbol: "MSFT", name: "Microsoft Corporation" },
+    { symbol: "NVDA", name: "NVIDIA Corporation" },
+    { symbol: "LCII", name: "LCI Industries" }
+];
 
-// =======================
-async function getCandles(symbol) {
-  try {
-    let to = Math.floor(Date.now()/1000);
-    let from = to - (60*60*24*30);
-
-    const res = await fetch(`https://finnhub.io/api/v1/stock/candle?symbol=${symbol}&resolution=5&from=${from}&to=${to}&token=${API_KEY}`);
-    const data = await res.json();
-
-    if (data.s !== "ok") return null;
-
-    return data.c;
-  } catch {
-    return null;
-  }
-}
-
-function calculateEMA(data, period) {
-  let k = 2 / (period + 1);
-  let ema = data[0];
-
-  for (let i = 1; i < data.length; i++) {
-    ema = data[i] * k + ema * (1 - k);
-  }
-
-  return ema;
-}
-
-// =======================
-async function getEMA(symbol) {
-  let data = await getCandles(symbol);
-
-  if (!data || data.length < 50) {
-    let last = lastData[symbol]?.price;
-    let prev = lastData[symbol]?.prev;
-
-    if (last && prev) {
-      return {
-        emaText: "⚡ EMA سريع",
-        cross: last > prev ? "📈 صعود لحظي" : "📉 هبوط لحظي"
-      };
-    }
-
-    return {
-      emaText: "⏳ تحميل EMA",
-      cross: "..."
-    };
-  }
-
-  let slice = data.slice(-400);
-
-  let ema7 = calculateEMA(slice, 7);
-  let ema25 = calculateEMA(slice, 25);
-  let ema50 = calculateEMA(slice, 50);
-
-  let trend = "⚪";
-  if (ema7 > ema25 && ema25 > ema50) trend = "📈 صاعد";
-  if (ema7 < ema25 && ema25 < ema50) trend = "📉 هابط";
-
-  let cross = ema7 > ema25 ? "🔥 شراء" : "🚨 بيع";
-
-  return { emaText: trend, cross };
-}
-
-// =======================
-async function getExtra(symbol) {
-  try {
-    const res = await fetch(`https://query1.finance.yahoo.com/v10/finance/quoteSummary/${symbol}?modules=price`);
-    const data = await res.json();
-
-    let volume = data?.quoteSummary?.result?.[0]?.price?.regularMarketVolume?.raw;
-
-    let activity = "🪫 ضعف سيولة";
-    if (volume > 5_000_000) activity = "💹 سيولة";
-    if (volume > 20_000_000) activity = "💹🔥 قوية";
-
-    return { activity };
-
-  } catch {
-    return { activity: "❌" };
-  }
-}
-
-// =======================
-bot.on("message", (msg) => {
-  chatIds.add(msg.chat.id);
-
-  if (msg.text === "/start") {
-    bot.sendMessage(msg.chat.id, "💀 RUNNING 24/7 SNIPER MODE");
-  }
-
-  if (msg.text === "/scan") {
-    run();
-  }
-});
-
-// =======================
-function analyze(price, prev) {
-  let change = ((price - prev) / prev) * 100;
-
-  let signal = "⚪";
-  if (change > 3) signal = "💀🚀 انفجار";
-  else if (change > 1) signal = "🔥 صعود";
-  else if (change < -3) signal = "🚨 هبوط";
-
-  let tp = [
-    price*1.02, price*1.04, price*1.06, price*1.08,
-    price*1.10, price*1.12, price*1.15, price*1.18
-  ];
-
-  return { change, signal, tp };
-}
-
-// =======================
-function format(s) {
-
-  function check(tp) {
-    return s.price >= tp ? "✅" : "";
-  }
-
-  return `
-${s.market}
-
-${s.name}
-
-💰 ${s.price.toFixed(2)}
-
-📊 ${s.signal}
-
-📊 EMA: ${s.emaText}
-⚡ ${s.cross}
-
-🎯 ${s.tp[0].toFixed(2)} ${check(s.tp[0])}
-🎯 ${s.tp[1].toFixed(2)} ${check(s.tp[1])}
-🎯 ${s.tp[2].toFixed(2)} ${check(s.tp[2])}
-🎯 ${s.tp[3].toFixed(2)} ${check(s.tp[3])}
-🎯 ${s.tp[4].toFixed(2)} ${check(s.tp[4])}
-🎯 ${s.tp[5].toFixed(2)} ${check(s.tp[5])}
-🎯 ${s.tp[6].toFixed(2)} ${check(s.tp[6])}
-🎯 ${s.tp[7].toFixed(2)} ${check(s.tp[7])}
-
-${s.activity}
-━━━━━━━━━━━━`;
-}
-
-// =======================
-async function getQuote(symbol) {
-  try {
-    const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${API_KEY}`);
-    const data = await res.json();
-
-    if (!data?.c || !data?.pc) return null;
-
-    lastData[symbol] = { price: data.c, prev: data.pc };
-    return lastData[symbol];
-
-  } catch {
-    return null;
-  }
-}
-
-// =======================
-async function getUSSymbols() {
-  try {
-    const res = await fetch(`https://finnhub.io/api/v1/stock/symbol?exchange=US&token=${API_KEY}`);
-    return await res.json();
-  } catch { return []; }
-}
-
-// =======================
-// 💀🔥 RUN FIX (Batch + بدون ضغط)
-async function run() {
-  if (running) return;
-  running = true;
-
-  try {
-    let us = await getUSSymbols();
-
-    let batchSize = 50;
-
-    for (let i = 0; i < us.length; i += batchSize) {
-
-      let batch = us.slice(i, i + batchSize);
-
-      await Promise.all(batch.map(async (s) => {
-        try {
-          let q = await getQuote(s.symbol);
-          if (!q) return;
-
-          let a = analyze(q.price, q.prev);
-          if (!a) return;
-
-          if (a.change < 0.5) return;
-
-          let ema = await getEMA(s.symbol);
-          let extra = await getExtra(s.symbol);
-
-          let text = format({
-            name:s.symbol,
-            market:"🇺🇸 السوق الأمريكي",
-            price:q.price,
-            ...a,
-            ...ema,
-            ...extra
-          });
-
-          for (let id of chatIds) {
-            await bot.sendMessage(id, text);
-          }
-
-        } catch {}
-      }));
-
-      await new Promise(r => setTimeout(r, 1500));
-    }
-
-  } catch (e) {
-    console.log("ERROR:", e);
-  }
-
-  running = false;
-}
-
-// =======================
-// 💀 24/7 LOOP
-async function startLoop() {
-  while (true) {
+async function getStockData(symbol) {
     try {
-      await run();
-    } catch (e) {
-      console.log(e);
+        const result = await yahooFinance.quote(symbol);
+        if (!result || typeof result.regularMarketPrice !== 'number') {
+            return null;
+        }
+
+        const price = result.regularMarketPrice;
+        const change = result.regularMarketChangePercent || 0;
+
+        return {
+            price: price.toFixed(2),
+            change: Number(change.toFixed(2)),
+            ema: (price * 0.99).toFixed(2),
+            trend: change >= 0 ? "صعود إيجابي 🟢" : "ضغط بيعي 🔴",
+            targets: [
+                (price * 1.015).toFixed(2),
+                (price * 1.030).toFixed(2),
+                (price * 1.050).toFixed(2)
+            ]
+        };
+    } catch (error) {
+        return null;
     }
-    await new Promise(r => setTimeout(r, 3000));
-  }
 }
 
-startLoop();
+bot.on('message', async (msg) => {
+    const chatId = msg.chat.id;
+    const text = msg.text ? msg.text.trim() : "";
 
-app.listen(3000, () => {
-  console.log("💀 RUNNING 24/7 FULL MARKET");
+    if (text === '/start') {
+        await bot.sendMessage(chatId, 
+            "🇸🇦🇺🇸 أهلاً بك في بوت الأسواق المالية الشامل.\n\n" +
+            "الرجاء اختيار السوق المطلوبة:\n" +
+            "🇸🇦 أرسل `/tasi` لفحص أسهم السوق السعودي.\n" +
+            "🇺🇸 أرسل `/us` لفحص أسهم السوق الأمريكي.", 
+            { parse_mode: "Markdown" }
+        );
+    } 
+    else if (text === '/tasi') {
+        await bot.sendMessage(chatId, "🇸🇦 جاري جلب أحدث بيانات السوق السعودي (تاسي)...");
+
+        for (let stock of tasiStocks) {
+            const data = await getStockData(stock.symbol);
+            if (data) {
+                const icon = data.change >= 0 ? "🟢" : "🔴";
+                const reportText = 
+                    `🇸🇦 *السوق السعودي (تاسي): ${stock.name}* (${stock.symbol})\n` +
+                    `----------------------------------\n` +
+                    `💰 *السعر الحالي:* \`${data.price} SAR\`\n` +
+                    `📈 *التغير اليومي:* ${icon} \`${data.change >= 0 ? '+' : ''}${data.change}%\`\n` +
+                    `📉 *مؤشر الاتجاه (EMA):* \`${data.ema}\`\n` +
+                    `⚡ *الاتجاه العام:* ${data.trend}\n\n` +
+                    `🎯 *الأهداف السعرية:*\n` +
+                    `  • الهدف 1: \`${data.targets[0]}\`\n` +
+                    `  • الهدف 2: \`${data.targets[1]}\`\n` +
+                    `  • الهدف 3: \`${data.targets[2]}\``;
+
+                try {
+                    await bot.sendMessage(chatId, reportText, { parse_mode: "Markdown" });
+                } catch (err) {}
+                
+                await new Promise(resolve => setTimeout(resolve, 800));
+            }
+        }
+        await bot.sendMessage(chatId, "✅ انتهى فحص السوق السعودي بنجاح.");
+    }
+    else if (text === '/us') {
+        await bot.sendMessage(chatId, "🇺🇸 جاري جلب أحدث بيانات السوق الأمريكي...");
+
+        for (let stock of usStocks) {
+            const data = await getStockData(stock.symbol);
+            if (data) {
+                const icon = data.change >= 0 ? "🟢" : "🔴";
+                const reportText = 
+                    `🇺🇸 *السوق الأمريكي: ${stock.name}* (${stock.symbol})\n` +
+                    `----------------------------------\n` +
+                    `💰 *السعر الحالي:* \`${data.price} USD\`\n` +
+                    `📈 *التغير اليومي:* ${icon} \`${data.change >= 0 ? '+' : ''}${data.change}%\`\n` +
+                    `📉 *مؤشر الاتجاه (EMA):* \`${data.ema}\`\n` +
+                    `⚡ *الاتجاه العام:* ${data.trend}\n\n` +
+                    `🎯 *الأهداف السعرية:*\n` +
+                    `  • الهدف 1: \`${data.targets[0]}\`\n` +
+                    `  • الهدف 2: \`${data.targets[1]}\`\n` +
+                    `  • الهدف 3: \`${data.targets[2]}\``;
+
+                try {
+                    await bot.sendMessage(chatId, reportText, { parse_mode: "Markdown" });
+                } catch (err) {}
+                
+                await new Promise(resolve => setTimeout(resolve, 800));
+            }
+        }
+        await bot.sendMessage(chatId, "✅ انتهى فحص السوق الأمريكي بنجاح.");
+    }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`Bot running on port ${PORT}`);
 });
