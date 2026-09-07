@@ -3,10 +3,12 @@ const TelegramBot = require("node-telegram-bot-api");
 const { createCanvas } = require("canvas");
 const yahooFinance = require("yahoo-finance2").default;
 
+// إيقاف رسائل التحذير الخاصة بالمكتبة لتنظيف السجلات
+yahooFinance.setGlobalConfig({ logger: { info: () => {}, warn: () => {}, error: () => {} } });
+
 const app = express();
 app.use(express.json());
 
-// 🔑 قراءة التوكن من متغيرات البيئة أو القيمة المباشرة
 const TOKEN = process.env.TOKEN || "7772382813:AAECFDY04AXNEf-Q98_65UheUEz7u2HymJw";
 const bot = new TelegramBot(TOKEN, {
     polling: {
@@ -16,7 +18,7 @@ const bot = new TelegramBot(TOKEN, {
     }
 });
 
-// 🇸🇦 قائمة أسهم السوق السعودي (تاسي)
+// قائمة أسهم السوق السعودي (تاسي)
 const tasiStocks = [
     { symbol: "2222.SR", name: "أرامكو السعودية" },
     { symbol: "1120.SR", name: "مصرف الراجحي" },
@@ -33,38 +35,33 @@ const tasiStocks = [
     { symbol: "4190.SR", name: "جرير" }
 ];
 
-// 📊 دالة جلب بيانات السهم الآمنة
 async function getStockData(symbol) {
     try {
-        const queryOptions = { validateResult: false };
-        const quote = await yahooFinance.quote(symbol, queryOptions);
-        
-        if (!quote || typeof quote.regularMarketPrice !== 'number') {
-            console.log(`بيانات غير صالحة للسهم: ${symbol}`);
+        const result = await yahooFinance.quote(symbol);
+        if (!result || typeof result.regularMarketPrice !== 'number') {
             return null;
         }
 
-        const currentPrice = quote.regularMarketPrice;
-        const change = quote.regularMarketChangePercent || 0;
+        const price = result.regularMarketPrice;
+        const change = result.regularMarketChangePercent || 0;
 
         return {
-            price: currentPrice.toFixed(2),
+            price: price.toFixed(2),
             change: Number(change.toFixed(2)),
-            ema: (currentPrice * 0.99).toFixed(2),
+            ema: (price * 0.99).toFixed(2),
             trend: change >= 0 ? "صعود إيجابي" : "ضغط بيعي",
             targets: [
-                (currentPrice * 1.015).toFixed(2),
-                (currentPrice * 1.030).toFixed(2),
-                (currentPrice * 1.050).toFixed(2)
+                (price * 1.015).toFixed(2),
+                (price * 1.030).toFixed(2),
+                (price * 1.050).toFixed(2)
             ]
         };
     } catch (error) {
-        console.error(`خطأ في جلب بيانات ${symbol}:`, error.message);
+        console.error(`خطأ في سحب سهم ${symbol}:`, error.message);
         return null;
     }
 }
 
-// 🎨 رسم البطاقة البصرية الملونة
 async function generateStockImage(stockData, stockName, symbol) {
     const canvas = createCanvas(800, 1000);
     const ctx = canvas.getContext("2d");
@@ -90,8 +87,7 @@ async function generateStockImage(stockData, stockName, symbol) {
     ctx.fillText(`التغير اليومي: ${stockData.change >= 0 ? '+' : ''}${stockData.change}%`, 750, 220);
 
     ctx.fillStyle = "rgba(0, 0, 0, 0.3)";
-    ctx.roundRect(50, 280, 700, 250, 20);
-    ctx.fill();
+    ctx.fillRect(50, 280, 700, 250);
 
     ctx.fillStyle = "#ffffff";
     ctx.font = "28px Arial";
@@ -113,16 +109,15 @@ async function generateStockImage(stockData, stockName, symbol) {
     return canvas.toBuffer("image/png");
 }
 
-// 🤖 الأوامر
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
 
     if (text === '/start') {
-        bot.sendMessage(chatId, "🇸🇦 أهلاً بك في بوت السوق السعودي (TASI SENTINEL).\n\nأرسل /signals لبدء فحص أسهم تاسي وإرسال التقارير البصرية الملونة.");
+        bot.sendMessage(chatId, "🇸🇦 أهلاً بك في بوت السوق السعودي (TASI SENTINEL).\n\nأرسل /signals لبدء فحص أسهم تاسي وإرسال التقارير البصرية.");
     } 
     else if (text === '/signals') {
-        bot.sendMessage(chatId, "🔍 جاري جلب أحدث بيانات أسهم تاسي وإنشاء التقارير البصرية...");
+        bot.sendMessage(chatId, "🔍 جاري جلب أحدث بيانات أسهم تاسي وتوليد البطاقات...");
 
         for (let stock of tasiStocks) {
             const data = await getStockData(stock.symbol);
@@ -132,10 +127,10 @@ bot.on('message', async (msg) => {
                     await bot.sendPhoto(chatId, imageBuffer, {
                         caption: `📊 التقرير الفني الملون لشركة ${stock.name}`
                     });
-                } catch (imgError) {
-                    console.error("خطأ في إنشاء أو إرسال الصورة:", imgError.message);
+                } catch (err) {
+                    console.error("خطأ في إرسال صورة السهم:", err.message);
                 }
-                await new Promise(resolve => setTimeout(resolve, 1500));
+                await new Promise(resolve => setTimeout(resolve, 1000));
             }
         }
 
@@ -144,5 +139,5 @@ bot.on('message', async (msg) => {
 });
 
 app.listen(3000, () => {
-    console.log("TASI SENTINEL is running smoothly...");
+    console.log("TASI SENTINEL يعمل بسلاسة...");
 });
