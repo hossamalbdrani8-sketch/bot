@@ -17,7 +17,6 @@ const bot = new TelegramBot(TOKEN, {
     }
 });
 
-// قائمة أسهم السوق السعودي (تاسي) فقط
 const tasiStocks = [
     { symbol: "2222.SR", name: "أرامكو السعودية" },
     { symbol: "1120.SR", name: "مصرف الراجحي" },
@@ -34,7 +33,6 @@ const tasiStocks = [
     { symbol: "4190.SR", name: "جرير" }
 ];
 
-// قائمة أسهم السوق الأمريكي فقط
 const usStocks = [
     { symbol: "AAPL", name: "Apple Inc." },
     { symbol: "TSLA", name: "Tesla Inc." },
@@ -75,8 +73,8 @@ bot.on('message', async (msg) => {
 
     if (text === '/start') {
         await bot.sendMessage(chatId, 
-            "🇸🇦🇺🇸 أهلاً بك في بوت الأسواق المالية الشامل.\n\n" +
-            "الرجاء اختيار السوق المطلوبة:\n" +
+            "🇸🇦🇺🇸 أهلاً بك في بوت الأسواق المالية.\n\n" +
+            "الأوامر المتاحة:\n" +
             "🇸🇦 أرسل `/tasi` لفحص أسهم السوق السعودي.\n" +
             "🇺🇸 أرسل `/us` لفحص أسهم السوق الأمريكي.", 
             { parse_mode: "Markdown" }
@@ -90,16 +88,16 @@ bot.on('message', async (msg) => {
             if (data) {
                 const icon = data.change >= 0 ? "🟢" : "🔴";
                 const reportText = 
-                    `🇸🇦 *السوق السعودي (تاسي): ${stock.name}* (${stock.symbol})\n` +
+                    `🇸🇦 *السوق السعودي: ${stock.name}* (${stock.symbol})\n` +
                     `----------------------------------\n` +
-                    `💰 *السعر الحالي:* \`${data.price} SAR\`\n` +
-                    `📈 *التغير اليومي:* ${icon} \`${data.change >= 0 ? '+' : ''}${data.change}%\`\n` +
-                    `📉 *مؤشر الاتجاه (EMA):* \`${data.ema}\`\n` +
-                    `⚡ *الاتجاه العام:* ${data.trend}\n\n` +
-                    `🎯 *الأهداف السعرية:*\n` +
-                    `  • الهدف 1: \`${data.targets[0]}\`\n` +
-                    `  • الهدف 2: \`${data.targets[1]}\`\n` +
-                    `  • الهدف 3: \`${data.targets[2]}\``;
+                    `💰 *السعر:* \`${data.price} SAR\`\n` +
+                    `📈 *التغير:* ${icon} \`${data.change >= 0 ? '+' : ''}${data.change}%\`\n` +
+                    `📉 *EMA:* \`${data.ema}\`\n` +
+                    `⚡ *الاتجاه:* ${data.trend}\n\n` +
+                    `🎯 *الأهداف:*\n` +
+                    `  • 1: \`${data.targets[0]}\`\n` +
+                    `  • 2: \`${data.targets[1]}\`\n` +
+                    `  • 3: \`${data.targets[2]}\``;
 
                 try {
                     await bot.sendMessage(chatId, reportText, { parse_mode: "Markdown" });
@@ -108,7 +106,7 @@ bot.on('message', async (msg) => {
                 await new Promise(resolve => setTimeout(resolve, 800));
             }
         }
-        await bot.sendMessage(chatId, "✅ انتهى فحص السوق السعودي بنجاح.");
+        await bot.sendMessage(chatId, "✅ انتهى فحص السوق السعودي.");
     }
     else if (text === '/us') {
         await bot.sendMessage(chatId, "🇺🇸 جاري جلب أحدث بيانات السوق الأمريكي...");
@@ -120,14 +118,14 @@ bot.on('message', async (msg) => {
                 const reportText = 
                     `🇺🇸 *السوق الأمريكي: ${stock.name}* (${stock.symbol})\n` +
                     `----------------------------------\n` +
-                    `💰 *السعر الحالي:* \`${data.price} USD\`\n` +
-                    `📈 *التغير اليومي:* ${icon} \`${data.change >= 0 ? '+' : ''}${data.change}%\`\n` +
-                    `📉 *مؤشر الاتجاه (EMA):* \`${data.ema}\`\n` +
-                    `⚡ *الاتجاه العام:* ${data.trend}\n\n` +
-                    `🎯 *الأهداف السعرية:*\n` +
-                    `  • الهدف 1: \`${data.targets[0]}\`\n` +
-                    `  • الهدف 2: \`${data.targets[1]}\`\n` +
-                    `  • الهدف 3: \`${data.targets[2]}\``;
+                    `💰 *السعر:* \`${data.price} USD\`\n` +
+                    `📈 *التغير:* ${icon} \`${data.change >= 0 ? '+' : ''}${data.change}%\`\n` +
+                    `📉 *EMA:* \`${data.ema}\`\n` +
+                    `⚡ *الاتجاه:* ${data.trend}\n\n` +
+                    `🎯 *الأهداف:*\n` +
+                    `  • 1: \`${data.targets[0]}\`\n` +
+                    `  • 2: \`${data.targets[1]}\`\n` +
+                    `  • 3: \`${data.targets[2]}\``;
 
                 try {
                     await bot.sendMessage(chatId, reportText, { parse_mode: "Markdown" });
@@ -136,11 +134,11 @@ bot.on('message', async (msg) => {
                 await new Promise(resolve => setTimeout(resolve, 800));
             }
         }
-        await bot.sendMessage(chatId, "✅ انتهى فحص السوق الأمريكي بنجاح.");
+        await bot.sendMessage(chatId, "✅ انتهى فحص السوق الأمريكي.");
     }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Bot running on port ${PORT}`);
+    console.log(`Server running on port ${PORT}`);
 });
