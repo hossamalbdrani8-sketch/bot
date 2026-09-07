@@ -17,7 +17,6 @@ const bot = new TelegramBot(TOKEN, {
     }
 });
 
-// قائمة أسهم السوق السعودي (تاسي)
 const tasiStocks = [
     { symbol: "2222.SR", name: "أرامكو السعودية" },
     { symbol: "1120.SR", name: "مصرف الراجحي" },
@@ -56,7 +55,6 @@ async function getStockData(symbol) {
             ]
         };
     } catch (error) {
-        console.error(`خطأ في سحب سهم ${symbol}:`, error.message);
         return null;
     }
 }
@@ -89,9 +87,8 @@ bot.on('message', async (msg) => {
 
                 try {
                     await bot.sendMessage(chatId, reportText, { parse_mode: "Markdown" });
-                } catch (err) {
-                    console.error("خطأ في إرسال رسالة السهم:", err.message);
-                }
+                } catch (err) {}
+                
                 await new Promise(resolve => setTimeout(resolve, 800));
             }
         }
@@ -102,5 +99,5 @@ bot.on('message', async (msg) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`TASI SENTINEL يعمل بنجاح على البورت ${PORT}...`);
+    console.log(`TASI SENTINEL running on port ${PORT}`);
 });
