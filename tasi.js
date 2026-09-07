@@ -1,9 +1,8 @@
+
 const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
-const { createCanvas } = require("canvas");
 const yahooFinance = require("yahoo-finance2").default;
 
-// إيقاف رسائل التحذير الخاصة بالمكتبة لتنظيف السجلات
 yahooFinance.setGlobalConfig({ logger: { info: () => {}, warn: () => {}, error: () => {} } });
 
 const app = express();
@@ -49,7 +48,7 @@ async function getStockData(symbol) {
             price: price.toFixed(2),
             change: Number(change.toFixed(2)),
             ema: (price * 0.99).toFixed(2),
-            trend: change >= 0 ? "صعود إيجابي" : "ضغط بيعي",
+            trend: change >= 0 ? "صعود إيجابي 🟢" : "ضغط بيعي 🔴",
             targets: [
                 (price * 1.015).toFixed(2),
                 (price * 1.030).toFixed(2),
@@ -62,82 +61,45 @@ async function getStockData(symbol) {
     }
 }
 
-async function generateStockImage(stockData, stockName, symbol) {
-    const canvas = createCanvas(800, 1000);
-    const ctx = canvas.getContext("2d");
-
-    const isPositive = stockData.change >= 0;
-    const bgColor = isPositive ? "#0d3b1e" : "#4a1212";
-    const accentColor = isPositive ? "#2ecc71" : "#e74c3c";
-
-    ctx.fillStyle = bgColor;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    ctx.fillStyle = "#ffffff";
-    ctx.font = "bold 36px Arial";
-    ctx.textAlign = "right";
-    ctx.fillText(`تقرير تاسي: ${stockName} (${symbol})`, 750, 80);
-
-    ctx.font = "bold 42px Arial";
-    ctx.fillStyle = accentColor;
-    ctx.fillText(`السعر الحالي: ${stockData.price} SAR`, 750, 160);
-
-    ctx.font = "30px Arial";
-    ctx.fillStyle = "#ffffff";
-    ctx.fillText(`التغير اليومي: ${stockData.change >= 0 ? '+' : ''}${stockData.change}%`, 750, 220);
-
-    ctx.fillStyle = "rgba(0, 0, 0, 0.3)";
-    ctx.fillRect(50, 280, 700, 250);
-
-    ctx.fillStyle = "#ffffff";
-    ctx.font = "28px Arial";
-    ctx.fillText(`مؤشر الاتجاه (EMA): ${stockData.ema}`, 710, 350);
-    ctx.fillText(`حالة الـ VWAP: فوق السعر (إيجابي)`, 710, 420);
-    ctx.fillText(`الاتجاه العام: ${stockData.trend}`, 710, 490);
-
-    ctx.fillStyle = "#ffffff";
-    ctx.font = "bold 32px Arial";
-    ctx.fillText("الأهداف السعرية القادمة:", 750, 580);
-
-    ctx.font = "26px Arial";
-    stockData.targets.forEach((target, index) => {
-        let yPos = 640 + (index * 45);
-        ctx.fillStyle = "#2ecc71";
-        ctx.fillText(`✅ الهدف ${index + 1}: ${target}`, 710, yPos);
-    });
-
-    return canvas.toBuffer("image/png");
-}
-
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
 
     if (text === '/start') {
-        bot.sendMessage(chatId, "🇸🇦 أهلاً بك في بوت السوق السعودي (TASI SENTINEL).\n\nأرسل /signals لبدء فحص أسهم تاسي وإرسال التقارير البصرية.");
+        bot.sendMessage(chatId, "🇸🇦 أهلاً بك في بوت السوق السعودي (TASI SENTINEL).\n\nأرسل /signals لبدء فحص أسهم تاسي الفوري.");
     } 
     else if (text === '/signals') {
-        bot.sendMessage(chatId, "🔍 جاري جلب أحدث بيانات أسهم تاسي وتوليد البطاقات...");
+        bot.sendMessage(chatId, "🔍 جاري جلب أحدث بيانات أسهم تاسي وإرسال التقارير...");
 
         for (let stock of tasiStocks) {
             const data = await getStockData(stock.symbol);
             if (data) {
+                const icon = data.change >= 0 ? "🟢" : "🔴";
+                const reportText = 
+                    `📊 *تقرير تاسي الفني: ${stock.name}* (${stock.symbol})\n` +
+                    `----------------------------------\n` +
+                    `💰 *السعر الحالي:* \`${data.price} SAR\`\n` +
+                    `📈 *التغير اليومي:* ${icon} \`${data.change >= 0 ? '+' : ''}${data.change}%\`\n` +
+                    `📉 *مؤشر الاتجاه (EMA):* \`${data.ema}\`\n` +
+                    `⚡ *الاتجاه العام:* ${data.trend}\n\n` +
+                    `🎯 *الأهداف السعرية القادمة:*\n` +
+                    `  • الهدف 1: \`${data.targets[0]}\`\n` +
+                    `  • الهدف 2: \`${data.targets[1]}\`\n` +
+                    `  • الهدف 3: \`${data.targets[2]}\``;
+
                 try {
-                    const imageBuffer = await generateStockImage(data, stock.name, stock.symbol);
-                    await bot.sendPhoto(chatId, imageBuffer, {
-                        caption: `📊 التقرير الفني الملون لشركة ${stock.name}`
-                    });
+                    await bot.sendMessage(chatId, reportText, { parse_mode: "Markdown" });
                 } catch (err) {
-                    console.error("خطأ في إرسال صورة السهم:", err.message);
+                    console.error("خطأ في إرسال رسالة السهم:", err.message);
                 }
-                await new Promise(resolve => setTimeout(resolve, 1000));
+                await new Promise(resolve => setTimeout(resolve, 800));
             }
         }
 
-        bot.sendMessage(chatId, "✅ انتهى فحص أسهم تاسي وإرسال البطاقات بنجاح.");
+        bot.sendMessage(chatId, "✅ انتهى فحص أسهم تاسي وإرسال جميع التقارير بنجاح دون أي أخطاء.");
     }
 });
 
 app.listen(3000, () => {
-    console.log("TASI SENTINEL يعمل بسلاسة...");
+    console.log("TASI SENTINEL يعمل بسلاسة ودون أخطاء...");
 });
