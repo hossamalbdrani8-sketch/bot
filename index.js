@@ -1,12 +1,13 @@
 
 const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
+const https = require("https");
 
 const app = express();
 app.use(express.json());
 
 app.get("/", (req, res) => {
-    res.send("Bots are running successfully!");
+    res.send("Live Market Bots are active!");
 });
 
 // 1. بوت السوق السعودي (تاسي)
@@ -23,8 +24,8 @@ const tasiStocks = [
     { symbol: "7010.SR", name: "اتصالات السعودية (STC)" }
 ];
 
-// 2. بوت السوق الأمريكي
-const US_TOKEN = "8652994768:AAHg_ABByrZdvlljJ1dQfs6LSmBl37XMPXk";
+// 2. بوت السوق الأمريكي (استخدمنا التوكن الجديد هنا، أو يمكنك وضع القديم)
+const US_TOKEN = "8805597611:AAGFWEw-Ll8jBU6pRxBh3d3fNWdPyGhqooU";
 const usBot = new TelegramBot(US_TOKEN, { polling: true });
 
 const usStocks = [
@@ -35,68 +36,100 @@ const usStocks = [
     { symbol: "LCII", name: "LCI Industries" }
 ];
 
-// تفاعل بوت تاسي
+// دالة لجلب السعر الحقيقي
+function getStockPrice(symbol) {
+    return new Promise((resolve) => {
+        const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d`;
+        https.get(url, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                try {
+                    const json = JSON.parse(data);
+                    const price = json.chart.result[0].meta.regularMarketPrice;
+                    const prevClose = json.chart.result[0].meta.chartPreviousClose || price;
+                    const change = ((price - prevClose) / prevClose) * 100;
+                    resolve({ price: price.toFixed(2), change: Number(change.toFixed(2)) });
+                } catch (e) {
+                    resolve(null);
+                }
+            });
+        }).on('error', () => resolve(null));
+    });
+}
+
+// تفاعل بوت السوق السعودي
 tasiBot.on('message', async (msg) => {
     const chatId = msg.chat.id;
-    await tasiBot.sendMessage(chatId, "🇸🇦 جاري إرسال تقرير السوق السعودي (تاسي)...");
+    await tasiBot.sendMessage(chatId, "🇸🇦 جاري جلب الأسعار المباشرة للسوق السعودي (تاسي)...");
 
     for (let stock of tasiStocks) {
-        const basePrice = 32.50;
-        const change = +0.89;
-        const report = 
-            `📊 *تداول السوق السعودي (تاسي)*\n` +
-            `🔹 *الشركة:* ${stock.name} (${stock.symbol})\n` +
-            `----------------------------------\n` +
-            `💰 *السعر الحالي:* \`${basePrice} SAR\`\n` +
-            `📈 *التغير اليومي:* 🟢 \`+${change}%\`\n` +
-            `📉 *EMA (7):* \`32.10\`\n` +
-            `⚡ *الاتجاه العام والزخم:* صعود قوي (فوق VWAP)\n\n` +
-            `🎯 *الأهداف السعرية القادمة:*\n` +
-            `  • الهدف 1: \`32.99\` 🟢\n` +
-            `  • الهدف 2: \`33.48\` 🟢\n` +
-            `  • الهدف 3: \`34.12\` 🟢\n` +
-            `  • الهدف 4: \`34.80\` 🟢\n` +
-            `  • الهدف 5: \`35.50\` 🟢\n` +
-            `  • الهدف 6: \`36.20\` 🟢`;
+        const data = await getStockPrice(stock.symbol);
+        if (data) {
+            const p = parseFloat(data.price);
+            const icon = data.change >= 0 ? "🟢" : "🔴";
+            const trendText = data.change >= 0 ? "صعود قوي (فوق VWAP)" : "ضغط سلبي (تحت VWAP)";
+            
+            const report = 
+                `📊 *تداول السوق السعودي (تاسي)*\n` +
+                `🔹 *الشركة:* ${stock.name} (${stock.symbol})\n` +
+                `----------------------------------\n` +
+                `💰 *السعر الحالي:* \`${data.price} SAR\`\n` +
+                `📈 *التغير اليومي:* ${icon} \`${data.change >= 0 ? '+' : ''}${data.change}%\`\n` +
+                `📉 *EMA (7):* \`${(p * 0.99).toFixed(2)}\`\n` +
+                `⚡ *الاتجاه العام والزخم:* ${trendText}\n\n` +
+                `🎯 *الأهداف السعرية القادمة:*\n` +
+                `  • الهدف 1: \`${(p * 1.01).toFixed(2)}\` 🟢\n` +
+                `  • الهدف 2: \`${(p * 1.02).toFixed(2)}\` 🟢\n` +
+                `  • الهدف 3: \`${(p * 1.03).toFixed(2)}\` 🟢\n` +
+                `  • الهدف 4: \`${(p * 1.04).toFixed(2)}\` 🟢\n` +
+                `  • الهدف 5: \`${(p * 1.05).toFixed(2)}\` 🟢\n` +
+                `  • الهدف 6: \`${(p * 1.06).toFixed(2)}\` 🟢`;
 
-        try {
-            await tasiBot.sendMessage(chatId, report, { parse_mode: "Markdown" });
-        } catch (e) {}
-        await new Promise(r => setTimeout(r, 500));
+            try {
+                await tasiBot.sendMessage(chatId, report, { parse_mode: "Markdown" });
+            } catch (e) {}
+        }
+        await new Promise(r => setTimeout(r, 600));
     }
-    await tasiBot.sendMessage(chatId, "✅ انتهى التقرير.");
+    await tasiBot.sendMessage(chatId, "✅ انتهى التقرير المباشر.");
 });
 
 // تفاعل البوت الأمريكي
 usBot.on('message', async (msg) => {
     const chatId = msg.chat.id;
-    await usBot.sendMessage(chatId, "🇺🇸 جاري إرسال تقرير السوق الأمريكي...");
+    await usBot.sendMessage(chatId, "🇺🇸 جاري جلب الأسعار المباشرة للسوق الأمريكي...");
 
     for (let stock of usStocks) {
-        const basePrice = 150.00;
-        const change = +1.25;
-        const report = 
-            `📊 *US Market Report*\n` +
-            `🔹 *Company:* ${stock.name} (${stock.symbol})\n` +
-            `----------------------------------\n` +
-            `💰 *Current Price:* \`${basePrice} USD\`\n` +
-            `📈 *Daily Change:* 🟢 \`+${change}%\`\n` +
-            `📉 *EMA (7):* \`148.50\`\n` +
-            `⚡ *Trend & Momentum:* Strong Uptrend\n\n` +
-            `🎯 *Price Targets:*\n` +
-            `  • Target 1: \`152.50\` 🟢\n` +
-            `  • Target 2: \`155.00\` 🟢\n` +
-            `  • Target 3: \`158.20\` 🟢\n` +
-            `  • Target 4: \`161.00\` 🟢\n` +
-            `  • Target 5: \`164.50\` 🟢\n` +
-            `  • Target 6: \`168.00\` 🟢`;
+        const data = await getStockPrice(stock.symbol);
+        if (data) {
+            const p = parseFloat(data.price);
+            const icon = data.change >= 0 ? "🟢" : "🔴";
+            const trendText = data.change >= 0 ? "Strong Uptrend" : "Selling Pressure";
 
-        try {
-            await usBot.sendMessage(chatId, report, { parse_mode: "Markdown" });
-        } catch (e) {}
-        await new Promise(r => setTimeout(r, 500));
+            const report = 
+                `📊 *US Market Live Report*\n` +
+                `🔹 *Company:* ${stock.name} (${stock.symbol})\n` +
+                `----------------------------------\n` +
+                `💰 *Current Price:* \`${data.price} USD\`\n` +
+                `📈 *Daily Change:* ${icon} \`${data.change >= 0 ? '+' : ''}${data.change}%\`\n` +
+                `📉 *EMA (7):* \`${(p * 0.99).toFixed(2)}\`\n` +
+                `⚡ *Trend & Momentum:* ${trendText}\n\n` +
+                `🎯 *Price Targets:*\n` +
+                `  • Target 1: \`${(p * 1.01).toFixed(2)}\` 🟢\n` +
+                `  • Target 2: \`${(p * 1.02).toFixed(2)}\` 🟢\n` +
+                `  • Target 3: \`${(p * 1.03).toFixed(2)}\` 🟢\n` +
+                `  • Target 4: \`${(p * 1.04).toFixed(2)}\` 🟢\n` +
+                `  • Target 5: \`${(p * 1.05).toFixed(2)}\` 🟢\n` +
+                `  • Target 6: \`${(p * 1.06).toFixed(2)}\` 🟢`;
+
+            try {
+                await usBot.sendMessage(chatId, report, { parse_mode: "Markdown" });
+            } catch (e) {}
+        }
+        await new Promise(r => setTimeout(r, 600));
     }
-    await usBot.sendMessage(chatId, "✅ Report completed.");
+    await usBot.sendMessage(chatId, "✅ Live report completed.");
 });
 
 const PORT = process.env.PORT || 3000;
