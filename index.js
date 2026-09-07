@@ -1,140 +1,23 @@
 
 const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
-const yahooFinance = require("yahoo-finance2").default;
-
-yahooFinance.setGlobalConfig({ logger: { info: () => {}, warn: () => {}, error: () => {} } });
 
 const app = express();
 app.use(express.json());
 
 const TOKEN = process.env.TOKEN || "7772382813:AAECFDY04AXNEf-Q98_65UheUEz7u2HymJw";
-const bot = new TelegramBot(TOKEN, {
-    polling: {
-        interval: 300,
-        autoStart: true,
-        params: { timeout: 10 }
-    }
-});
+const bot = new TelegramBot(TOKEN, { polling: true });
 
-const tasiStocks = [
-    { symbol: "2222.SR", name: "أرامكو السعودية" },
-    { symbol: "1120.SR", name: "مصرف الراجحي" },
-    { symbol: "1010.SR", name: "بنك الرياض" },
-    { symbol: "1180.SR", name: "البنك الأهلي" },
-    { symbol: "2010.SR", name: "سابك" },
-    { symbol: "2350.SR", name: "كيان السعودية" },
-    { symbol: "2280.SR", name: "المراعي" },
-    { symbol: "4200.SR", name: "الدريس" },
-    { symbol: "7010.SR", name: "اتصالات السعودية (STC)" },
-    { symbol: "5110.SR", name: "الكهرباء السعودية" },
-    { symbol: "1211.SR", name: "معادن" },
-    { symbol: "4030.SR", name: "النهدي" },
-    { symbol: "4190.SR", name: "جرير" }
-];
-
-const usStocks = [
-    { symbol: "AAPL", name: "Apple Inc." },
-    { symbol: "TSLA", name: "Tesla Inc." },
-    { symbol: "MSFT", name: "Microsoft Corporation" },
-    { symbol: "NVDA", name: "NVIDIA Corporation" },
-    { symbol: "LCII", name: "LCI Industries" }
-];
-
-async function getStockData(symbol) {
-    try {
-        const result = await yahooFinance.quote(symbol);
-        if (!result || typeof result.regularMarketPrice !== 'number') {
-            return null;
-        }
-
-        const price = result.regularMarketPrice;
-        const change = result.regularMarketChangePercent || 0;
-
-        return {
-            price: price.toFixed(2),
-            change: Number(change.toFixed(2)),
-            ema: (price * 0.99).toFixed(2),
-            trend: change >= 0 ? "صعود إيجابي 🟢" : "ضغط بيعي 🔴",
-            targets: [
-                (price * 1.015).toFixed(2),
-                (price * 1.030).toFixed(2),
-                (price * 1.050).toFixed(2)
-            ]
-        };
-    } catch (error) {
-        return null;
-    }
-}
-
-bot.on('message', async (msg) => {
+bot.on('message', (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text ? msg.text.trim() : "";
 
     if (text === '/start') {
-        await bot.sendMessage(chatId, 
-            "🇸🇦🇺🇸 أهلاً بك في بوت الأسواق المالية.\n\n" +
-            "الأوامر المتاحة:\n" +
-            "🇸🇦 أرسل `/tasi` لفحص أسهم السوق السعودي.\n" +
-            "🇺🇸 أرسل `/us` لفحص أسهم السوق الأمريكي.", 
-            { parse_mode: "Markdown" }
-        );
-    } 
-    else if (text === '/tasi') {
-        await bot.sendMessage(chatId, "🇸🇦 جاري جلب أحدث بيانات السوق السعودي (تاسي)...");
-
-        for (let stock of tasiStocks) {
-            const data = await getStockData(stock.symbol);
-            if (data) {
-                const icon = data.change >= 0 ? "🟢" : "🔴";
-                const reportText = 
-                    `🇸🇦 *السوق السعودي: ${stock.name}* (${stock.symbol})\n` +
-                    `----------------------------------\n` +
-                    `💰 *السعر:* \`${data.price} SAR\`\n` +
-                    `📈 *التغير:* ${icon} \`${data.change >= 0 ? '+' : ''}${data.change}%\`\n` +
-                    `📉 *EMA:* \`${data.ema}\`\n` +
-                    `⚡ *الاتجاه:* ${data.trend}\n\n` +
-                    `🎯 *الأهداف:*\n` +
-                    `  • 1: \`${data.targets[0]}\`\n` +
-                    `  • 2: \`${data.targets[1]}\`\n` +
-                    `  • 3: \`${data.targets[2]}\``;
-
-                try {
-                    await bot.sendMessage(chatId, reportText, { parse_mode: "Markdown" });
-                } catch (err) {}
-                
-                await new Promise(resolve => setTimeout(resolve, 800));
-            }
-        }
-        await bot.sendMessage(chatId, "✅ انتهى فحص السوق السعودي.");
-    }
-    else if (text === '/us') {
-        await bot.sendMessage(chatId, "🇺🇸 جاري جلب أحدث بيانات السوق الأمريكي...");
-
-        for (let stock of usStocks) {
-            const data = await getStockData(stock.symbol);
-            if (data) {
-                const icon = data.change >= 0 ? "🟢" : "🔴";
-                const reportText = 
-                    `🇺🇸 *السوق الأمريكي: ${stock.name}* (${stock.symbol})\n` +
-                    `----------------------------------\n` +
-                    `💰 *السعر:* \`${data.price} USD\`\n` +
-                    `📈 *التغير:* ${icon} \`${data.change >= 0 ? '+' : ''}${data.change}%\`\n` +
-                    `📉 *EMA:* \`${data.ema}\`\n` +
-                    `⚡ *الاتجاه:* ${data.trend}\n\n` +
-                    `🎯 *الأهداف:*\n` +
-                    `  • 1: \`${data.targets[0]}\`\n` +
-                    `  • 2: \`${data.targets[1]}\`\n` +
-                    `  • 3: \`${data.targets[2]}\``;
-
-                try {
-                    await bot.sendMessage(chatId, reportText, { parse_mode: "Markdown" });
-                } catch (err) {}
-                
-                await new Promise(resolve => setTimeout(resolve, 800));
-            }
-        }
-        await bot.sendMessage(chatId, "✅ انتهى فحص السوق الأمريكي.");
+        bot.sendMessage(chatId, "✅ البوت يعمل بنجاح تام! أرسل /tasi للسوق السعودي أو /us للسوق الأمريكي.");
+    } else if (text === '/tasi') {
+        bot.sendMessage(chatId, "🇸🇦 تم استلام أمر السوق السعودي (تاسي).");
+    } else if (text === '/us') {
+        bot.sendMessage(chatId, "🇺🇸 تم استلام أمر السوق الأمريكي.");
     }
 });
 
