@@ -1,3 +1,22 @@
+
+
+{
+  "name": "us-stock-telegram-bot",
+  "version": "3.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js & node tasi.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "node-telegram-bot-api": "^0.66.0",
+    "canvas": "^2.11.2"
+  }
+}
+
 const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
 
