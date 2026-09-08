@@ -1,8 +1,8 @@
 
 // ============================================================
 // 📊 DUAL AUTONOMOUS STOCK SCANNER BOTS - TASI & US
-// EODHD API | FULL TASI + FULL US
-// Node.js 18+ (Webhook Fix for 409 Conflict)
+// EODHD API | NO CHANNEL RESTRICTION (DIRECT NOTIFICATIONS)
+// Node.js 18+
 // ============================================================
 
 "use strict";
@@ -19,11 +19,9 @@ const MIN_PRICE_US = 0.20;
 const REQUEST_DELAY_MS = 250;
 const UPDATE_INTERVAL_MIN = 2;
 
-// إنشاء خادم Express أولاً
 const app = express();
 app.use(express.json());
 
-// تشغيل البوتات بدون Polling لتجنب تعارض 409 تماماً، أو استخدام الويب هوك
 const tasiBot = new TelegramBot(TASI_TOKEN, { polling: false });
 const usBot = new TelegramBot(US_TOKEN, { polling: false });
 
@@ -32,17 +30,6 @@ const usSubscribers = new Set();
 
 let tasiScanRunning = false;
 let usScanRunning = false;
-
-// نقطة استقبال الويب هوك من تليجرام (اختياري لتفعيل التفاعل الفوري)
-app.post(`/bot${TASI_TOKEN}`, (req, res) => {
-  tasiBot.processUpdate(req.body);
-  res.sendStatus(200);
-});
-
-app.post(`/bot${US_TOKEN}`, (req, res) => {
-  usBot.processUpdate(req.body);
-  res.sendStatus(200);
-});
 
 app.get("/", (req, res) => {
   res.status(200).send("🌍 TASI & US EODHD Autonomous Bots are running smoothly");
@@ -61,18 +48,14 @@ app.get("/health", (req, res) => {
 
 app.listen(PORT, async () => {
   console.log(`🌐 Server running on port ${PORT}`);
-  
-  // تنظيف أي ويبهوك قديم أو تداخل في اتصالات تليجرام تلقائياً عند بدء التشغيل
   try {
     await tasiBot.deleteWebHook();
     await usBot.deleteWebHook();
-    
-    // إعادة تفعيل الـ Polling بطريقة آمنة نظيفة بعد مسح القديم
     await tasiBot.startPolling();
     await usBot.startPolling();
-    console.log("✅ Telegram bots polling started successfully without conflicts.");
+    console.log("✅ Telegram bots polling started successfully.");
   } catch (e) {
-    console.log("⚠️ Webhook/Polling reset notice:", e.message);
+    console.log("⚠️ Polling reset notice:", e.message);
   }
 });
 
@@ -312,17 +295,44 @@ async function runTasiAutoScan() {
   }
 }
 
+async function runUsAutoScan() {
+  if (usScanRunning || usSubscribers.size === 0) return;
+  usScanRunning = true;
+  try {
+    const symbols = await getFullUsSymbols();
+    for (const sym of symbols) {
+      try {
+        const stock = await getStockDataFromEodhd(sym, "US", MIN_PRICE_US);
+        if (stock) {
+          for (const chatId of usSubscribers) {
+            await usBot.sendMessage(chatId, buildMessage(stock, "🇺🇸 السوق الأمريكي"), { parse_mode: "Markdown" });
+            await sleep(200);
+          }
+        }
+      } catch (e) {}
+      await sleep(REQUEST_DELAY_MS);
+    }
+  } finally {
+    usScanRunning = false;
+  }
+}
+
+// استقبال الأوامر مباشرة بدون شروط اشتراك
 tasiBot.onText(/\/start|\/scan/, async msg => {
   const chatId = msg.chat.id;
   tasiSubscribers.add(chatId);
-  await tasiBot.sendMessage(chatId, "🇸🇦 تم تفعيل بوت السوق السعودي وبدء الفحص...");
+  await tasiBot.sendMessage(chatId, "🇸🇦 تم تفعيل بوت السوق السعودي وبدء الفحص المباشر...");
   runTasiAutoScan();
 });
 
 usBot.onText(/\/start|\/scan/, async msg => {
   const chatId = msg.chat.id;
   usSubscribers.add(chatId);
-  await usBot.sendMessage(chatId, "🇺🇸 تم تفعيل بوت السوق الأمريكي وبدء الفحص...");
+  await usBot.sendMessage(chatId, "🇺🇸 تم تفعيل بوت السوق الأمريكي وبدء الفحص المباشر...");
+  runUsAutoScan();
 });
 
 setInterval(runTasiAutoScan, UPDATE_INTERVAL_MIN * 60 * 1000);
+setInterval(runUsAutoScan, UPDATE_INTERVAL_MIN * 60 * 1000);
+
+console.log("🟢 Clean Stock Scanners are running successfully!");
