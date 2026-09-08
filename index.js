@@ -15,9 +15,9 @@ const TelegramBot = require("node-telegram-bot-api");
 // ============================================================
 
 // ضع نفس التوكنات والمفتاح الموجودين لديك
-const TASI_TOKEN = process.env.TASI_TOKEN "7772382813:AAECFDY04AXNEf-Q98_65UheUEz7u2HymJw"
-const US_TOKEN = process.env.US_TOKEN "8652994768:AAHg_ABByrZdvlljJ1dQfs6LSmBl37XMPXk"
-const EODHD_API_KEY = process.env.EODHD_API_KEY "6a9ef3fd5c9378.52846267"
+const TASI_TOKEN = "7772382813:AAECFDY04AXNEf-Q98_65UheUEz7u2HymJw";
+const US_TOKEN = "8652994768:AAHg_ABByrZdvlljJ1dQfs6LSmBl37XMPXk";
+const EODHD_API_KEY = "6a9ef3fd5c9378.52846267";
 
 if (
   !TASI_TOKEN ||
