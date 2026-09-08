@@ -1,8 +1,7 @@
 
 // ============================================================
 // 📊 DUAL AUTONOMOUS STOCK SCANNER BOTS - TASI & US
-// EODHD API | NO CHANNEL RESTRICTION (DIRECT NOTIFICATIONS)
-// Node.js 18+
+// DIRECT TOKENS TEST VERSION
 // ============================================================
 
 "use strict";
@@ -10,9 +9,10 @@
 const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
 
-const TASI_TOKEN = process.env.TASI_TOKEN || "7772382813:AAECFDY04AXNEf-Q98_65UheUEz7u2HymJw";
-const US_TOKEN = process.env.US_TOKEN || "8652994768:AAHg_ABByrZdvlljJ1dQfs6LSmBl37XMPXk";
-const EODHD_API_KEY = process.env.EODHD_API_KEY || "6a9ef3fd5c9378.52846267";
+// التوكنات والمفاتيح مباشرة للتجربة
+const TASI_TOKEN = "7772382813:AAECFDY04AXNEf-Q98_65UheUEz7u2HymJw";
+const US_TOKEN = "8652994768:AAHg_ABByrZdvlljJ1dQfs6LSmBl37XMPXk";
+const EODHD_API_KEY = "6a9ef3fd5c9378.52846267";
 
 const PORT = Number(process.env.PORT || 3000);
 const MIN_PRICE_US = 0.20;
@@ -32,18 +32,7 @@ let tasiScanRunning = false;
 let usScanRunning = false;
 
 app.get("/", (req, res) => {
-  res.status(200).send("🌍 TASI & US EODHD Autonomous Bots are running smoothly");
-});
-
-app.get("/health", (req, res) => {
-  res.json({
-    ok: true,
-    tasiSubscribers: tasiSubscribers.size,
-    usSubscribers: usSubscribers.size,
-    tasiScanRunning,
-    usScanRunning,
-    time: new Date().toISOString()
-  });
+  res.status(200).send("🌍 TASI & US EODHD Direct Test Bots are running");
 });
 
 app.listen(PORT, async () => {
@@ -53,9 +42,9 @@ app.listen(PORT, async () => {
     await usBot.deleteWebHook();
     await tasiBot.startPolling();
     await usBot.startPolling();
-    console.log("✅ Telegram bots polling started successfully.");
+    console.log("✅ Direct polling started successfully.");
   } catch (e) {
-    console.log("⚠️ Polling reset notice:", e.message);
+    console.log("⚠️ Notice:", e.message);
   }
 });
 
@@ -93,18 +82,6 @@ async function getFullTasiSymbols() {
     .filter(item => {
       const type = String(item.Type || "").toLowerCase();
       return type.includes("stock") || type.includes("common");
-    })
-    .map(item => String(item.Code || "").trim())
-    .filter(Boolean);
-  return [...new Set(symbols)];
-}
-
-async function getFullUsSymbols() {
-  const rows = await getExchangeSymbols("US");
-  const symbols = rows
-    .filter(item => {
-      const type = String(item.Type || "").toLowerCase();
-      return type.includes("stock") || type.includes("common") || type.includes("preferred");
     })
     .map(item => String(item.Code || "").trim())
     .filter(Boolean);
@@ -295,29 +272,6 @@ async function runTasiAutoScan() {
   }
 }
 
-async function runUsAutoScan() {
-  if (usScanRunning || usSubscribers.size === 0) return;
-  usScanRunning = true;
-  try {
-    const symbols = await getFullUsSymbols();
-    for (const sym of symbols) {
-      try {
-        const stock = await getStockDataFromEodhd(sym, "US", MIN_PRICE_US);
-        if (stock) {
-          for (const chatId of usSubscribers) {
-            await usBot.sendMessage(chatId, buildMessage(stock, "🇺🇸 السوق الأمريكي"), { parse_mode: "Markdown" });
-            await sleep(200);
-          }
-        }
-      } catch (e) {}
-      await sleep(REQUEST_DELAY_MS);
-    }
-  } finally {
-    usScanRunning = false;
-  }
-}
-
-// استقبال الأوامر مباشرة بدون شروط اشتراك
 tasiBot.onText(/\/start|\/scan/, async msg => {
   const chatId = msg.chat.id;
   tasiSubscribers.add(chatId);
@@ -329,10 +283,8 @@ usBot.onText(/\/start|\/scan/, async msg => {
   const chatId = msg.chat.id;
   usSubscribers.add(chatId);
   await usBot.sendMessage(chatId, "🇺🇸 تم تفعيل بوت السوق الأمريكي وبدء الفحص المباشر...");
-  runUsAutoScan();
 });
 
 setInterval(runTasiAutoScan, UPDATE_INTERVAL_MIN * 60 * 1000);
-setInterval(runUsAutoScan, UPDATE_INTERVAL_MIN * 60 * 1000);
 
-console.log("🟢 Clean Stock Scanners are running successfully!");
+console.log("🟢 Direct Test Bot is running successfully!");
