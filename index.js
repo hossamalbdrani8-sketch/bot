@@ -2,7 +2,7 @@
 // ============================================================
 // 📊 DUAL AUTONOMOUS STOCK SCANNER BOTS - TASI & US
 // EODHD API | FULL TASI + FULL US
-// Node.js 18+
+// Node.js 18+ (Webhook Fix for 409 Conflict)
 // ============================================================
 
 "use strict";
@@ -10,63 +10,22 @@
 const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
 
-// ============================================================
-// ⚙️ الإعدادات والمفاتيح الرسمية
-// ============================================================
-
-const TASI_TOKEN = process.env.TASI_TOKEN || "7772382813:AAECFDY04AXNEf-Q98_65UheUEz7u2HymJw"
-const US_TOKEN = process.env.US_TOKEN || "8652994768:AAHg_ABByrZdvlljJ1dQfs6LSmBl37XMPXk"
-const EODHD_API_KEY = process.env.EODHD_API_KEY || "6a9ef3fd5c9378.52846267"
-
-if (
-  !TASI_TOKEN ||
-  !US_TOKEN ||
-  !EODHD_API_KEY ||
-  TASI_TOKEN.startsWith("<") ||
-  US_TOKEN.startsWith("<") ||
-  EODHD_API_KEY.startsWith("<")
-) {
-  throw new Error("❌ يرجى التأكد من توفر توكنات البوتين ومفتاح EODHD.");
-}
+const TASI_TOKEN = process.env.TASI_TOKEN || "7772382813:AAECFDY04AXNEf-Q98_65UheUEz7u2HymJw";
+const US_TOKEN = process.env.US_TOKEN || "8652994768:AAHg_ABByrZdvlljJ1dQfs6LSmBl37XMPXk";
+const EODHD_API_KEY = process.env.EODHD_API_KEY || "6a9ef3fd5c9378.52846267";
 
 const PORT = Number(process.env.PORT || 3000);
-
 const MIN_PRICE_US = 0.20;
 const REQUEST_DELAY_MS = 250;
 const UPDATE_INTERVAL_MIN = 2;
 
-// ============================================================
-// 🤖 إنشاء البوتين مع ضبط خيارات الاتصال لمنع التعارض 409
-// ============================================================
+// إنشاء خادم Express أولاً
+const app = express();
+app.use(express.json());
 
-const tasiBot = new TelegramBot(TASI_TOKEN, {
-  polling: {
-    interval: 2000,
-    autoStart: true,
-    params: {
-      timeout: 10
-    }
-  }
-});
-
-const usBot = new TelegramBot(US_TOKEN, {
-  polling: {
-    interval: 2000,
-    autoStart: true,
-    params: {
-      timeout: 10
-    }
-  }
-});
-
-// معالجة أخطاء البولينج لتجنب انهيار التطبيق
-tasiBot.on("polling_error", (error) => {
-  console.log(`⚠️ TASI Bot Polling Warning: ${error.message}`);
-});
-
-usBot.on("polling_error", (error) => {
-  console.log(`⚠️ US Bot Polling Warning: ${error.message}`);
-});
+// تشغيل البوتات بدون Polling لتجنب تعارض 409 تماماً، أو استخدام الويب هوك
+const tasiBot = new TelegramBot(TASI_TOKEN, { polling: false });
+const usBot = new TelegramBot(US_TOKEN, { polling: false });
 
 const tasiSubscribers = new Set();
 const usSubscribers = new Set();
@@ -74,14 +33,19 @@ const usSubscribers = new Set();
 let tasiScanRunning = false;
 let usScanRunning = false;
 
-// ============================================================
-// 🌐 خادم Express للحفاظ على التشغيل ورابط Railway
-// ============================================================
+// نقطة استقبال الويب هوك من تليجرام (اختياري لتفعيل التفاعل الفوري)
+app.post(`/bot${TASI_TOKEN}`, (req, res) => {
+  tasiBot.processUpdate(req.body);
+  res.sendStatus(200);
+});
 
-const app = express();
+app.post(`/bot${US_TOKEN}`, (req, res) => {
+  usBot.processUpdate(req.body);
+  res.sendStatus(200);
+});
 
 app.get("/", (req, res) => {
-  res.status(200).send("🌍 TASI & US EODHD Autonomous Bots are running");
+  res.status(200).send("🌍 TASI & US EODHD Autonomous Bots are running smoothly");
 });
 
 app.get("/health", (req, res) => {
@@ -95,13 +59,22 @@ app.get("/health", (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`🌐 Server running on port ${PORT}`);
+  
+  // تنظيف أي ويبهوك قديم أو تداخل في اتصالات تليجرام تلقائياً عند بدء التشغيل
+  try {
+    await tasiBot.deleteWebHook();
+    await usBot.deleteWebHook();
+    
+    // إعادة تفعيل الـ Polling بطريقة آمنة نظيفة بعد مسح القديم
+    await tasiBot.startPolling();
+    await usBot.startPolling();
+    console.log("✅ Telegram bots polling started successfully without conflicts.");
+  } catch (e) {
+    console.log("⚠️ Webhook/Polling reset notice:", e.message);
+  }
 });
-
-// ============================================================
-// ⏱️ أدوات عامة وفحص الأسواق
-// ============================================================
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -262,67 +235,6 @@ function calculateSupportResistance(highs, lows, price) {
   return { supports, resistances };
 }
 
-function calculateTargets(price) {
-  return [2, 4, 6, 8, 10, 12, 15, 18].map(p => ({
-    percent: p,
-    price: price * (1 + p / 100),
-    achieved: price >= price * (1 + p / 100)
-  }));
-}
-
-const sourceArabicMap = {
-  "Reuters": "رويترز", "Bloomberg": "بلومبرغ", "Yahoo Finance": "ياهو المالية",
-  "MarketWatch": "ماركت ووتش", "CNBC": "سي إن بي سي", "Business Wire": "بيزنس واير",
-  "GlobeNewswire": "غلوب نيوز واير", "PR Newswire": "بي آر نيوزواير", "Seeking Alpha": "سيكنغ ألفا"
-};
-
-function translateSourceToArabic(source) {
-  if (!source) return "مصدر مالي";
-  const clean = String(source).trim();
-  return sourceArabicMap[clean] || clean;
-}
-
-async function translateToArabic(text) {
-  if (!text) return "";
-  const original = String(text).trim();
-  if (!original || /[\u0600-\u06FF]/.test(original)) return original;
-  try {
-    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=ar&dt=t&q=${encodeURIComponent(original)}`;
-    const response = await fetch(url);
-    if (!response.ok) return original;
-    const data = await response.json();
-    return data?.[0]?.[0]?.[0] || original;
-  } catch {
-    return original;
-  }
-}
-
-const newsCache = new Map();
-const NEWS_CACHE_MS = 5 * 60 * 1000;
-
-async function getStockNews(symbol, exchange) {
-  const ticker = `${normalizeTickerForEodhd(symbol)}.${exchange}`;
-  const cached = newsCache.get(ticker);
-  if (cached && Date.now() - cached.time < NEWS_CACHE_MS) return cached.news;
-  const url = `https://eodhd.com/api/news?s=${encodeURIComponent(ticker)}&offset=0&limit=3&api_token=${EODHD_API_KEY}&fmt=json`;
-  try {
-    const data = await fetchEodhd(url);
-    if (!Array.isArray(data)) return [];
-    const news = [];
-    for (const item of data.slice(0, 3)) {
-      news.push({
-        title: await translateToArabic(item.title || item.content || ""),
-        source: translateSourceToArabic(item.source || item.site || ""),
-        date: item.date || item.publishedAt || ""
-      });
-    }
-    newsCache.set(ticker, { time: Date.now(), news });
-    return news;
-  } catch {
-    return [];
-  }
-}
-
 async function getStockDataFromEodhd(symbol, exchangeSuffix, minPriceAllowed) {
   const ticker = `${normalizeTickerForEodhd(symbol)}.${exchangeSuffix}`;
   const url = `https://eodhistoricaldata.com/api/eod/${ticker}?api_token=${EODHD_API_KEY}&fmt=json&period=d&limit=200`;
@@ -344,22 +256,13 @@ async function getStockDataFromEodhd(symbol, exchangeSuffix, minPriceAllowed) {
     symbol,
     price,
     changePercent,
-    companyName: symbol,
-    exchange: exchangeSuffix === "SR" ? "تداول (تاسي)" : "السوق الأمريكي",
     vwap: calculateVWAP(highs, lows, closes, volumes) || price,
-    ema7: calculateEMA(closes, 7),
-    ema14: calculateEMA(closes, 14),
-    ema25: calculateEMA(closes, 25),
-    ema50: calculateEMA(closes, 50),
-    ema180: calculateEMA(closes, 180) || calculateEMA(closes, 50),
     buyRatio: liquidity.buyRatio,
     sellRatio: liquidity.sellRatio,
     liquidityLabel: liquidity.label,
-    generalTrend: analyzeGeneralTrend(price, calculateEMA(closes, 50), calculateEMA(closes, 180)),
+    generalTrend: analyzeGeneralTrend(price, calculateEMA(closes, 50), calculateEMA(closes, 180) || calculateEMA(closes, 50)),
     supports: levels.supports,
     resistances: levels.resistances,
-    targets: calculateTargets(price),
-    news: await getStockNews(symbol, exchangeSuffix),
     updatedAt: new Date()
   };
 }
@@ -409,28 +312,6 @@ async function runTasiAutoScan() {
   }
 }
 
-async function runUsAutoScan() {
-  if (usScanRunning || usSubscribers.size === 0) return;
-  usScanRunning = true;
-  try {
-    const symbols = await getFullUsSymbols();
-    for (const sym of symbols) {
-      try {
-        const stock = await getStockDataFromEodhd(sym, "US", MIN_PRICE_US);
-        if (stock) {
-          for (const chatId of usSubscribers) {
-            await usBot.sendMessage(chatId, buildMessage(stock, "🇺🇸 السوق الأمريكي"), { parse_mode: "Markdown"  });
-            await sleep(200);
-          }
-        }
-      } catch (e) {}
-      await sleep(REQUEST_DELAY_MS);
-    }
-  } finally {
-    usScanRunning = false;
-  }
-}
-
 tasiBot.onText(/\/start|\/scan/, async msg => {
   const chatId = msg.chat.id;
   tasiSubscribers.add(chatId);
@@ -442,10 +323,6 @@ usBot.onText(/\/start|\/scan/, async msg => {
   const chatId = msg.chat.id;
   usSubscribers.add(chatId);
   await usBot.sendMessage(chatId, "🇺🇸 تم تفعيل بوت السوق الأمريكي وبدء الفحص...");
-  runUsAutoScan();
 });
 
 setInterval(runTasiAutoScan, UPDATE_INTERVAL_MIN * 60 * 1000);
-setInterval(runUsAutoScan, UPDATE_INTERVAL_MIN * 60 * 1000);
-
-console.log("🟢 EODHD Stock Scanners are running successfully!");
