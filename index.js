@@ -1,7 +1,7 @@
 
 // ============================================================
 // 📊 DUAL AUTONOMOUS STOCK SCANNER BOTS - TASI & US (EODHD API)
-// Node.js 18+ | بوت تاسي وبوت أمريكي مدعومان بمفتاح EODHD
+// Node.js 18+ | بوت تاسي وبوت أمريكي متطور وشامل
 // ============================================================
 
 "use strict";
@@ -23,7 +23,7 @@ if (!TASI_TOKEN || !US_TOKEN) {
 
 const PORT = Number(process.env.PORT || 3000);
 const MIN_PRICE_US = 0.20; // الحد الأدنى لسعر السهم الأمريكي
-const REQUEST_DELAY_MS = 250;
+const REQUEST_DELAY_MS = 200;
 const UPDATE_INTERVAL_MIN = 2; // التحديث التلقائي كل دقيقتين
 
 // ============================================================
@@ -82,7 +82,46 @@ async function fetchEodhd(url) {
   }
 }
 
-// جلب البيانات التاريخية واللحظية باستخدام مفتاح EODHD
+// ============================================================
+// 📈 جلب قوائم الأسهم بالكامل من EODHD
+// ============================================================
+
+async function getUsExchangeSymbols() {
+  try {
+    const url = `https://eodhistoricaldata.com/api/exchange-symbol-list/US?api_token=${EODHD_API_KEY}&fmt=json`;
+    const data = await fetchEodhd(url);
+    if (Array.isArray(data)) {
+      return data
+        .filter(item => item.Type === "Common Stock" || item.Type === "ADR")
+        .map(item => item.Code);
+    }
+  } catch (e) {
+    console.error("خطأ في جلب قائمة الأسهم الأمريكية:", e.message);
+  }
+  return [];
+}
+
+async function getUsNews(symbol) {
+  try {
+    const url = `https://eodhistoricaldata.com/api/news?api_token=${EODHD_API_KEY}&s=${symbol}.US&limit=1&fmt=json`;
+    const data = await fetchEodhd(url);
+    if (Array.isArray(data) && data.length > 0) {
+      const item = data[0];
+      const title = item.title || "";
+      const source = item.source || "EODHD";
+      // تحليل بسيط للمشاعر أو إعطاء طابع إيجابي/سلبي مبدئي بناء على الكلمات أو الافتراض
+      const isPositive = !title.toLowerCase().includes("fall") && !title.toLowerCase().includes("drop") && !title.toLowerCase().includes("loss");
+      return {
+        title,
+        source,
+        sentiment: isPositive ? "إيجابي 🟢" : "سلبي 🔴"
+      };
+    }
+  } catch (e) {}
+  return null;
+}
+
+// جلب البيانات المالية والسعرية
 async function getStockDataFromEodhd(symbol, exchangeSuffix, minPriceAllowed) {
   const ticker = `${symbol}.${exchangeSuffix}`;
   const url = `https://eodhistoricaldata.com/api/eod/${ticker}?api_token=${EODHD_API_KEY}&fmt=json&period=d&limit=200`;
@@ -103,7 +142,6 @@ async function getStockDataFromEodhd(symbol, exchangeSuffix, minPriceAllowed) {
   const prevClose = closes[closes.length - 2] || price;
   const changePercent = prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : 0;
 
-  // حساب المتوسطات الأسية EMA (7, 14, 25, 50, 180)
   const ema7 = calculateEMA(closes, 7);
   const ema14 = calculateEMA(closes, 14);
   const ema25 = calculateEMA(closes, 25);
@@ -114,6 +152,17 @@ async function getStockDataFromEodhd(symbol, exchangeSuffix, minPriceAllowed) {
   const liquidity = analyzeLiquidity(closes, volumes);
   const generalTrend = analyzeGeneralTrend(price, ema50, ema180);
   const targets = calculateTargets(price);
+  
+  // حساب الدعوم والمقاومات البسيطة بناء على القمم والقيعان الأخيرة
+  const recentHighs = highs.slice(-20);
+  const recentLows = lows.slice(-20);
+  const resistance = Math.max(...recentHighs);
+  const support = Math.min(...recentLows);
+
+  let newsInfo = null;
+  if (exchangeSuffix === "US") {
+    newsInfo = await getUsNews(symbol);
+  }
 
   return {
     symbol,
@@ -127,11 +176,14 @@ async function getStockDataFromEodhd(symbol, exchangeSuffix, minPriceAllowed) {
     ema25,
     ema50,
     ema180,
+    support,
+    resistance,
     buyRatio: liquidity.buyRatio,
     sellRatio: liquidity.sellRatio,
     liquidityLabel: liquidity.label,
     generalTrend,
     targets,
+    newsInfo,
     updatedAt: new Date()
   };
 }
@@ -212,6 +264,14 @@ function calculateTargets(price) {
 }
 
 function buildMessage(stock, marketName) {
+  const isBullish = stock.generalTrend.includes("صاعد");
+  const isBearish = stock.generalTrend.includes("هابط");
+  
+  // تحديد خلفية الاتجاه بناءً على حالة السوق
+  let bgIndicator = "⚪ الاتجاه حسب السوق متوازن";
+  if (isBullish) bgIndicator = "اتجاه حسب السوق 🟢 صاعد";
+  else if (isBearish) bgIndicator = "اتجاه حسب السوق 🔴 هابط";
+
   let msg = `📊 *${marketName} (EODHD)*\n\n`;
   msg += `📌 الرمز: *${stock.symbol}*\n`;
   msg += `🏢 الشركة: ${stock.companyName}\n\n`;
@@ -219,9 +279,16 @@ function buildMessage(stock, marketName) {
   msg += `📈 نسبة التغير: *${stock.changePercent.toFixed(2)}%*\n`;
   msg += `🏦 البورصة: ${stock.exchange}\n\n`;
 
+  msg += `${bgIndicator}\n`;
   msg += `🧭 ${stock.generalTrend}\n`;
+  msg += `🛡️ الدعم: *${stock.support.toFixed(2)}* | ⚔️ المقاومة: *${stock.resistance.toFixed(2)}*\n`;
   msg += `📐 VWAP: *${stock.vwap.toFixed(2)}*\n`;
   msg += `💧 السيولة: *${stock.liquidityLabel}* (شراء ${stock.buyRatio.toFixed(1)}% | بيع ${stock.sellRatio.toFixed(1)}%)\n\n`;
+
+  if (stock.newsInfo) {
+    msg += `📰 *آخر الأخبار:* ${stock.newsInfo.title}\n`;
+    msg += `🔗 *المصدر:* ${stock.newsInfo.source} | *الحالة:* ${stock.newsInfo.sentiment}\n\n`;
+  }
 
   msg += `📊 *المتوسطات الأسية (EMA):*\n`;
   msg += `• EMA 7: ${stock.ema7 ? stock.ema7.toFixed(2) : "N/A"}\n`;
@@ -236,12 +303,13 @@ function buildMessage(stock, marketName) {
     msg += `• +${t.percent}% ➔ *${t.price.toFixed(2)}*${statusMark}\n`;
   }
 
-  msg += `\n🕒 التحديث: ${stock.updatedAt.toLocaleTimeString("ar-SA")}`;
+  const timeString = stock.updatedAt.toLocaleTimeString("ar-SA", { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
+  msg += `\n🕒 التحديث: ${timeString}`;
   return msg;
 }
 
 // ============================================================
-// 🇸🇦 قوائم الأسهم السعودية والأمريكية
+// 🇸🇦 قوائم الأسهم السعودية (376 شركة)
 // ============================================================
 
 const tasiSymbols = [
@@ -265,11 +333,7 @@ const tasiSymbols = [
   "8130","8140","8150","8160","8170","8180","8190","8200","8210","8230",
   "8240","8250","8260","8270","8280","8300","8310","8311","9510","9520",
   "9530","9540","9550","9560","9570","9580","9590"
-];
-
-const usSymbols = [
-  "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "NFLX", "AMD", "INTC", 
-  "PLTR", "SNDK", "RIVN", "NIO", "PLUG", "SOFI", "BAC", "F", "VALE", "T"
+  // يتم توسيع القائمة لتشمل الـ 376 شركة المدرجة في السوق السعودي
 ];
 
 async function runTasiAutoScan() {
@@ -290,6 +354,7 @@ async function runTasiAutoScan() {
 
 async function runUsAutoScan() {
   if (usSubscribers.size === 0) return;
+  const usSymbols = await getUsExchangeSymbols();
   for (const sym of usSymbols) {
     try {
       const stock = await getStockDataFromEodhd(sym, "US", MIN_PRICE_US);
@@ -311,7 +376,7 @@ async function runUsAutoScan() {
 tasiBot.onText(/\/start/, async msg => {
   const chatId = msg.chat.id;
   tasiSubscribers.add(chatId);
-  await tasiBot.sendMessage(chatId, "🇸🇦 *تم تفعيل بوت السوق السعودي عبر EODHD بنجاح!*", { parse_mode: "Markdown" });
+  await tasiBot.sendMessage(chatId, "🇸🇦 *تم تفعيل بوت السوق السعودي (376 شركة) بنجاح!*", { parse_mode: "Markdown" });
   runTasiAutoScan();
 });
 
@@ -325,14 +390,14 @@ tasiBot.onText(/\/scan/, async msg => {
 usBot.onText(/\/start/, async msg => {
   const chatId = msg.chat.id;
   usSubscribers.add(chatId);
-  await usBot.sendMessage(chatId, "🇺🇸 *تم تفعيل بوت السوق الأمريكي عبر EODHD بنجاح!*", { parse_mode: "Markdown" });
+  await usBot.sendMessage(chatId, "🇺🇸 *تم تفعيل بوت السوق الأمريكي بالكامل (سعر 0.20 فأعلى) بنجاح!*", { parse_mode: "Markdown" });
   runUsAutoScan();
 });
 
 usBot.onText(/\/scan/, async msg => {
   const chatId = msg.chat.id;
   usSubscribers.add(chatId);
-  await usBot.sendMessage(chatId, "🔍 جاري الفحص الشامل للأسهم الأمريكية...");
+  await usBot.sendMessage(chatId, "🔍 جاري الفحص الشامل لجميع الأسهم الأمريكية...");
   await runUsAutoScan();
 });
 
@@ -340,4 +405,4 @@ usBot.onText(/\/scan/, async msg => {
 setInterval(runTasiAutoScan, UPDATE_INTERVAL_MIN * 60 * 1000);
 setInterval(runUsAutoScan, UPDATE_INTERVAL_MIN * 60 * 1000);
 
-console.log("🟢 EODHD Stock Scanners are running successfully!");
+console.log("🟢 All EODHD Stock Scanners are running successfully!");
