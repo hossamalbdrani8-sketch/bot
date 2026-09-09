@@ -5,25 +5,6 @@
 // EODHD API | Node.js 18+ | Telegram
 // ============================================================
 
-"use strict";
-
-const express = require("express");
-const TelegramBot = require("node-telegram-bot-api");
-
-// ============================================================
-// 🔐 CONFIGURATION — RAILWAY VARIABLES
-// ============================================================
-
-const TASI_TOKEN = process.env.TASI_TOKEN || "";
-const US_TOKEN = process.env.US_TOKEN || "";
-const EODHD_API_KEY = process.env.EODHD_API_KEY || "";
-
-if (!TASI_TOKEN || !US_TOKEN || !EODHD_API_KEY) {
-  throw new Error(
-    "❌ Missing TASI_TOKEN / US_TOKEN / EODHD_API_KEY in Railway Variables."
-  );
-}
-
 // ============================================================
 // ⚙️ GENERAL CONFIGURATION
 // ============================================================
