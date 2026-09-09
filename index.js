@@ -8,7 +8,6 @@
 const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
 
-// قراءة المتغيرات مباشرة من البيئة (Environment Variables) في Railway
 const TASI_TOKEN = process.env.TASI_TOKEN;
 const US_TOKEN = process.env.US_TOKEN;
 const EODHD_API_KEY = process.env.EODHD_API_KEY;
@@ -78,7 +77,6 @@ async function getExchangeSymbols(exchange) {
     .filter(Boolean);
 }
 
-// حساب مؤشر التقلب ATR(14)
 async function calculateATR(highs, lows, closes, period = 14) {
   if (highs.length < period + 1) return 0;
   let trList = [];
@@ -90,11 +88,9 @@ async function calculateATR(highs, lows, closes, period = 14) {
     trList.push(tr);
   }
   const recentTr = trList.slice(-period);
-  const atr = recentTr.reduce((a, b) => a + b, 0) / recentTr.length;
-  return atr;
+  return recentTr.reduce((a, b) => a + b, 0) / recentTr.length;
 }
 
-// تحليل السيولة
 function analyzeLiquidity(closes, volumes) {
   const len = Math.min(closes.length, volumes.length);
   const start = Math.max(1, len - 10);
@@ -119,7 +115,6 @@ function analyzeLiquidity(closes, volumes) {
   return { buyRatio, sellRatio, label };
 }
 
-// محرك AI PRO MAX للاتجاه
 function aiProMaxTrend(closes, highs, lows) {
   const currentPrice = closes[closes.length - 1];
   const shortLen = Math.min(closes.length, 14);
@@ -141,7 +136,6 @@ function aiProMaxTrend(closes, highs, lows) {
   return { direction: "NEUTRAL", label: "⚖️ اتجاه عرضي متوازن (AI PRO MAX)" };
 }
 
-// حساب الدعوم والمقاومات
 function calculateSupportResistance(highs, lows, price) {
   const pivotHighs = [];
   const pivotLows = [];
@@ -254,7 +248,7 @@ async function runUsScan() {
     const symbols = await getExchangeSymbols("US");
     for (const sym of symbols.slice(0, 15)) {
       try {
-        const stock = await getStockData(sym, "US", 0.20); // حد أدنى 0.20 دولار
+        const stock = await getStockData(sym, "US", 0.20);
         for (const chatId of usSubscribers) {
           await usBot.sendMessage(chatId, buildAlertMessage(stock, "🇺🇸 السوق الأمريكي"), { parse_mode: "Markdown" });
           await sleep(200);
@@ -267,18 +261,18 @@ async function runUsScan() {
   }
 }
 
-// استقبال الأوامر مباشرة بدون شروط قنوات
+// تشغيل البوتات واستقبال الأوامر مباشرة دون أي شروط
 tasiBot.onText(/\/start|\/scan/, async msg => {
   const chatId = msg.chat.id;
   tasiSubscribers.add(chatId);
-  await tasiBot.sendMessage(chatId, "🇸🇦 أهلاً بك! تم تفعيل فحص السوق السعودي (تاسي) بنجاح.", { parse_mode: "Markdown" });
+  await tasiBot.sendMessage(chatId, "🇸🇦 تم تفعيل فحص السوق السعودي بنجاح، جاري جلب التحليلات...", { parse_mode: "Markdown" });
   runTasiScan();
 });
 
 usBot.onText(/\/start|\/scan/, async msg => {
   const chatId = msg.chat.id;
   usSubscribers.add(chatId);
-  await usBot.sendMessage(chatId, "🇺🇸 أهلاً بك! تم تفعيل فحص السوق الأمريكي بنجاح.", { parse_mode: "Markdown" });
+  await usBot.sendMessage(chatId, "🇺🇸 تم تفعيل فحص السوق الأمريكي بنجاح، جاري جلب التحليلات...", { parse_mode: "Markdown" });
   runUsScan();
 });
 
