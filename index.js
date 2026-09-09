@@ -78,7 +78,7 @@ async function getExchangeSymbols(exchange) {
     .filter(Boolean);
 }
 
-// حساب مؤشر الحظر والتقلب ATR(14)
+// حساب مؤشر التقلب ATR(14)
 async function calculateATR(highs, lows, closes, period = 14) {
   if (highs.length < period + 1) return 0;
   let trList = [];
@@ -119,7 +119,7 @@ function analyzeLiquidity(closes, volumes) {
   return { buyRatio, sellRatio, label };
 }
 
-// محرك AI PRO MAX لتحديد الاتجاه بدقة بناءً على الزخم السعري والقمم والقيعان
+// محرك AI PRO MAX للاتجاه
 function aiProMaxTrend(closes, highs, lows) {
   const currentPrice = closes[closes.length - 1];
   const shortLen = Math.min(closes.length, 14);
@@ -149,8 +149,8 @@ function calculateSupportResistance(highs, lows, price) {
     if (highs[i] > highs[i - 1] && highs[i] > highs[i + 1]) pivotHighs.push(highs[i]);
     if (lows[i] < lows[i - 1] && lows[i] < lows[i + 1]) pivotLows.push(lows[i]);
   }
-  const supports = pivotLows.filter(l => l < price).sort((a, b) => b.price - a.price).slice(0, 2);
-  const resistances = pivotHighs.filter(h => h > price).sort((a, b) => a.price - b.price).slice(0, 2);
+  const supports = pivotLows.filter(l => l < price).sort((a, b) => b - a).slice(0, 2);
+  const resistances = pivotHighs.filter(h => h > price).sort((a, b) => a - b).slice(0, 2);
   return {
     supports: supports.length ? supports : [price * 0.95],
     resistances: resistances.length ? resistances : [price * 1.05]
@@ -180,7 +180,6 @@ async function getStockData(symbol, exchangeSuffix, minPrice) {
   const liquidity = analyzeLiquidity(closes, volumes);
   const levels = calculateSupportResistance(highs, lows, price);
 
-  // حساب الأهداف بناءً على اتجاه السوق ومؤشر ATR
   let targets = [];
   const icon = trendObj.direction === "UP" ? "✅" : "🔴";
   
@@ -233,7 +232,7 @@ async function runTasiScan() {
   tasiScanRunning = true;
   try {
     const symbols = await getExchangeSymbols("SR");
-    for (const sym of symbols.slice(0, 20)) { // عينة نشطة للفحص السريع
+    for (const sym of symbols.slice(0, 15)) {
       try {
         const stock = await getStockData(sym, "SR", 0.01);
         for (const chatId of tasiSubscribers) {
@@ -253,7 +252,7 @@ async function runUsScan() {
   usScanRunning = true;
   try {
     const symbols = await getExchangeSymbols("US");
-    for (const sym of symbols.slice(0, 20)) {
+    for (const sym of symbols.slice(0, 15)) {
       try {
         const stock = await getStockData(sym, "US", 0.20); // حد أدنى 0.20 دولار
         for (const chatId of usSubscribers) {
@@ -268,17 +267,18 @@ async function runUsScan() {
   }
 }
 
+// استقبال الأوامر مباشرة بدون شروط قنوات
 tasiBot.onText(/\/start|\/scan/, async msg => {
   const chatId = msg.chat.id;
   tasiSubscribers.add(chatId);
-  await tasiBot.sendMessage(chatId, "🇸🇦 تم تفعيل بوت السوق السعودي (AI PRO MAX) بنجاح!");
+  await tasiBot.sendMessage(chatId, "🇸🇦 أهلاً بك! تم تفعيل فحص السوق السعودي (تاسي) بنجاح.", { parse_mode: "Markdown" });
   runTasiScan();
 });
 
 usBot.onText(/\/start|\/scan/, async msg => {
   const chatId = msg.chat.id;
   usSubscribers.add(chatId);
-  await usBot.sendMessage(chatId, "🇺🇸 تم تفعيل بوت السوق الأمريكي (AI PRO MAX) بنجاح!");
+  await usBot.sendMessage(chatId, "🇺🇸 أهلاً بك! تم تفعيل فحص السوق الأمريكي بنجاح.", { parse_mode: "Markdown" });
   runUsScan();
 });
 
