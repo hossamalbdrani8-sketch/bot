@@ -2,6 +2,8 @@
 // ============================================================
 // 📊 CLEAN PURE STOCK SCANNER BOT (TASI & US)
 // ============================================================
+// ✅ هذه النسخة جديدة ونظيفة تماماً - لا يوجد شرط قناة
+// ============================================================
 
 "use strict";
 
@@ -28,6 +30,14 @@ const usSubscribers = new Set();
 let tasiScanRunning = false;
 let usScanRunning = false;
 
+// ----------------------------------------------
+// 🟢 رسالة تمييز تظهر في سجلات Railway
+// ----------------------------------------------
+console.log("🚀 THIS IS THE NEW CLEAN VERSION WITHOUT CHANNEL CHECK");
+console.log("✅ TASI_TOKEN exists:", !!TASI_TOKEN);
+console.log("✅ US_TOKEN exists:", !!US_TOKEN);
+console.log("✅ EODHD_API_KEY exists:", !!EODHD_API_KEY);
+
 app.get("/", (req, res) => {
   res.status(200).send("🚀 Clean Stock Scanner Bot is Online");
 });
@@ -35,9 +45,11 @@ app.get("/", (req, res) => {
 app.listen(PORT, async () => {
   console.log(`🌐 Server running on port ${PORT}`);
   try {
+    // إلغاء أي Webhook عالق بالقوة
     await tasiBot.deleteWebHook({ drop_pending_updates: true });
     await usBot.deleteWebHook({ drop_pending_updates: true });
-    
+    console.log("✅ Webhooks deleted successfully.");
+
     await tasiBot.startPolling();
     await usBot.startPolling();
     console.log("✅ Telegram Bots started polling cleanly.");
@@ -258,21 +270,39 @@ async function runUsScan() {
   }
 }
 
+// ----------------------------------------------
+// 🟢 أوامر البوت مع رسائل ترحيب مميزة
+// ----------------------------------------------
 tasiBot.onText(/\/start|\/scan/, async msg => {
   const chatId = msg.chat.id;
+  console.log(`📩 TASI command received from ${chatId}: ${msg.text}`); // تأكد من وصول الأمر
+
   tasiSubscribers.add(chatId);
-  await tasiBot.sendMessage(chatId, "🇸🇦 تم تفعيل بوت السوق السعودي بنجاح، جاري جلب التحليلات الفورية...", { parse_mode: "Markdown" });
+  // رسالة جديدة تماماً مختلفة عن القديمة
+  await tasiBot.sendMessage(
+    chatId,
+    "🟢 مرحباً! هذا البوت الجديد للسوق السعودي (بدون شرط قناة).\nجاري جلب التحليلات الفورية...",
+    { parse_mode: "Markdown" }
+  );
   runTasiScan();
 });
 
 usBot.onText(/\/start|\/scan/, async msg => {
   const chatId = msg.chat.id;
+  console.log(`📩 US command received from ${chatId}: ${msg.text}`); // تأكد من وصول الأمر
+
   usSubscribers.add(chatId);
-  await usBot.sendMessage(chatId, "🇺🇸 تم تفعيل بوت السوق الأمريكي بنجاح، جاري جلب التحليلات الفورية...", { parse_mode: "Markdown" });
+  // رسالة جديدة تماماً مختلفة عن القديمة
+  await usBot.sendMessage(
+    chatId,
+    "🟢 مرحباً! هذا البوت الجديد للسوق الأمريكي (بدون شرط قناة).\nجاري جلب التحليلات الفورية...",
+    { parse_mode: "Markdown" }
+  );
   runUsScan();
 });
 
+// جداول التحديث التلقائي
 setInterval(runTasiScan, UPDATE_INTERVAL_MIN * 60 * 1000);
 setInterval(runUsScan, UPDATE_INTERVAL_MIN * 60 * 1000);
 
-console.log("💎 Bot Engine Running Cleanly.");
+console.log("💎 Bot Engine Running Cleanly (New Version).");
