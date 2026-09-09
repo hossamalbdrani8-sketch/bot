@@ -1,6 +1,6 @@
 
 // ============================================================
-// 📊 EODHD AI PRO MAX STOCK SCANNER BOT (TASI & US)
+// 📊 CLEAN PURE STOCK SCANNER BOT (TASI & US)
 // ============================================================
 
 "use strict";
@@ -29,7 +29,7 @@ let tasiScanRunning = false;
 let usScanRunning = false;
 
 app.get("/", (req, res) => {
-  res.status(200).send("🚀 EODHD AI PRO MAX Stock Scanner is Online");
+  res.status(200).send("🚀 Clean Stock Scanner Bot is Online");
 });
 
 app.listen(PORT, async () => {
@@ -127,9 +127,9 @@ function aiProMaxTrend(closes, highs, lows) {
   const recentLow = Math.min(...lows.slice(-10));
   
   if (momentumScore >= 3 && currentPrice >= recentLow * 1.02) {
-    return { direction: "UP", label: "🚀 اتجاه صاعد (AI PRO MAX)" };
+    return { direction: "UP", label: "🚀 اتجاه صاعد" };
   } else if (momentumScore <= -3 || currentPrice <= recentHigh * 0.98) {
-    return { direction: "DOWN", label: "⚠️ اتجاه هابط (AI PRO MAX)" };
+    return { direction: "DOWN", label: "⚠️ اتجاه هابط" };
   }
   return { direction: "NEUTRAL", label: "⚖️ اتجاه عرضي متوازن" };
 }
