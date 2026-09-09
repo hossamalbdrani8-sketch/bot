@@ -261,18 +261,18 @@ async function runUsScan() {
   }
 }
 
-// تشغيل البوتات واستقبال الأوامر مباشرة دون أي شروط
+// تشغيل الفحص المباشر للأوامر بدون أي قيود قنوات
 tasiBot.onText(/\/start|\/scan/, async msg => {
   const chatId = msg.chat.id;
   tasiSubscribers.add(chatId);
-  await tasiBot.sendMessage(chatId, "🇸🇦 تم تفعيل فحص السوق السعودي بنجاح، جاري جلب التحليلات...", { parse_mode: "Markdown" });
+  await tasiBot.sendMessage(chatId, "🇸🇦 تم تفعيل فحص السوق السعودي، جاري جلب التحليلات الفورية...", { parse_mode: "Markdown" });
   runTasiScan();
 });
 
 usBot.onText(/\/start|\/scan/, async msg => {
   const chatId = msg.chat.id;
   usSubscribers.add(chatId);
-  await usBot.sendMessage(chatId, "🇺🇸 تم تفعيل فحص السوق الأمريكي بنجاح، جاري جلب التحليلات...", { parse_mode: "Markdown" });
+  await usBot.sendMessage(chatId, "🇺🇸 تم تفعيل فحص السوق الأمريكي، جاري جلب التحليلات الفورية...", { parse_mode: "Markdown" });
   runUsScan();
 });
 
