@@ -15,9 +15,8 @@ const TelegramBot = require("node-telegram-bot-api");
 // 🔐 مفاتيح Railway
 // ============================================================
 
-const TASI_TOKEN = process.env.TASI_TOKEN;
-const US_TOKEN = process.env.US_TOKEN;
-const EODHD_API_KEY = process.env.EODHD_API_KEY;
+const TASI_TOKEN = process.env.||TASI_TOKEN"";
+const US_TOKEN = process.env.||US_TOKEN"";
 
 const PORT = Number(process.env.PORT || 3000);
 
