@@ -27,7 +27,7 @@ const TASI_CONFIG = {
   exchange: "SR",
   name: "🇸🇦 السوق السعودي AI PRO MAX",
   minSignalScore: 0,
-  maxAlertsPerScan: 10,
+  maxAlertsPerScan: 0,
 };
 
 // ============================================================
@@ -40,7 +40,7 @@ const US_CONFIG = {
   name: "🇺🇸 السوق الأمريكي AI PRO MAX",
   minPrice: 0.20,
   minSignalScore: 0,
-  maxAlertsPerScan: 10,
+  maxAlertsPerScan: 0,
 };
 
 // ============================================================
