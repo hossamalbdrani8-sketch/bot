@@ -1,16 +1,10 @@
 {
-  "name": "ai-pro-max-telegram-scanner",
-  "version": "1.0.0",
-  "description": "AI PRO MAX - TASI + US/NASDAQ + Crypto Autonomous Telegram Scanner",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "engines": {
-    "node": ">=18"
-  },
-  "dependencies": {
-    "express": "^5.1.0",
-    "node-telegram-bot-api": "^0.66.0"
-  }
+  "count": 25,
+  "has_eodhd_token": true,
+  "has_crypto_key": true,
+  "keys": [
+    "CRYPTO_API_KEY",
+    "EODHD_API_TOKEN",
+    ...
+  ]
 }
