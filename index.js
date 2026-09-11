@@ -1,6 +1,6 @@
 
 // ============================================================
-// 🤖 AI PRO MAX - ALL IN ONE BOTS
+// 🤖 AI PRO MAX - FAST & SIMPLE SCANNER
 // 🇺🇸 أمريكي + 🇸🇦 سعودي + 🪙 عملات رقمية
 // ============================================================
 
@@ -21,10 +21,8 @@ const CRYPTO_TOKEN = process.env.CRYPTO_TOKEN;
 
 const PORT = Number(process.env.PORT || 3000);
 const SCAN_INTERVAL = 60 * 1000;
-const US_MIN_PRICE = 0.20;
-const REQUEST_TIMEOUT = 15000;
-const MAX_CONCURRENT_REQUESTS = 8;
-const SIGNAL_COOLDOWN = 10 * 60 * 1000;
+const REQUEST_TIMEOUT = 10000;
+const MAX_CONCURRENT_REQUESTS = 10;
 
 // ============================================================
 // 🌐 EXPRESS
@@ -33,25 +31,15 @@ const SIGNAL_COOLDOWN = 10 * 60 * 1000;
 const app = express();
 app.use(express.json());
 
-app.get("/", (req, res) => {
-    res.status(200).send("AI PRO MAX is running");
-});
-
-app.get("/health", (req, res) => {
-    res.status(200).json({
-        status: "online",
-        system: "AI PRO MAX",
-        markets: ["US", "TASI", "CRYPTO"],
-        time: new Date().toISOString()
-    });
-});
+app.get("/", (req, res) => res.status(200).send("AI PRO MAX is running"));
+app.get("/health", (req, res) => res.status(200).json({ status: "online", time: new Date().toISOString() }));
 
 app.listen(PORT, "0.0.0.0", () => {
     console.log(`AI PRO MAX server running on port ${PORT}`);
 });
 
 // ============================================================
-// 🤖 TELEGRAM BOTS & CHAT IDS SETS
+// 🤖 TELEGRAM BOTS & CHATS
 // ============================================================
 
 const usBot = US_TOKEN ? new TelegramBot(US_TOKEN, { polling: true }) : null;
@@ -63,7 +51,7 @@ const tasiChatIds = new Set();
 const cryptoChatIds = new Set();
 
 // ============================================================
-// 📦 RUNTIME DATA
+// 📦 SYMBOLS
 // ============================================================
 
 let US_SYMBOLS = [];
@@ -71,12 +59,6 @@ let TASI_SYMBOLS = [];
 let CRYPTO_SYMBOLS = [];
 let SAUDI_EXCHANGE = null;
 let marketsLoaded = false;
-
-let usScanning = false;
-let tasiScanning = false;
-let cryptoScanning = false;
-
-const lastSignals = new Map();
 
 // ============================================================
 // 🌐 EODHD REQUEST
@@ -98,7 +80,7 @@ async function eodhd(path, params = {}) {
     try {
         const response = await fetch(url, { method: "GET", signal: controller.signal });
         const text = await response.text();
-        if (!response.ok) throw new Error(`EODHD HTTP ${response.status}: ${text.slice(0, 300)}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return text ? JSON.parse(text) : null;
     } finally {
         clearTimeout(timer);
@@ -106,16 +88,8 @@ async function eodhd(path, params = {}) {
 }
 
 // ============================================================
-// 🔎 DISCOVER SAUDI EXCHANGE & LOAD MARKETS
+// 📋 LOAD MARKETS
 // ============================================================
-
-async function discoverSaudiExchange() {
-    const exchanges = await eodhd("exchanges-list/");
-    if (!Array.isArray(exchanges)) throw new Error("Invalid exchanges response");
-    const found = exchanges.find(e => String(e.CountryISO2 || "").toUpperCase() === "SA" || String(e.Name || "").toLowerCase().includes("tadawul"));
-    SAUDI_EXCHANGE = found ? found.Code : "SR";
-    return SAUDI_EXCHANGE;
-}
 
 async function loadExchangeSymbols(exchange, type = null) {
     const params = type ? { type } : {};
@@ -134,7 +108,9 @@ async function loadMarkets() {
     } catch (e) { US_SYMBOLS = []; }
 
     try {
-        if (!SAUDI_EXCHANGE) await discoverSaudiExchange();
+        const exchanges = await eodhd("exchanges-list/");
+        const found = exchanges.find(e => String(e.CountryISO2 || "").toUpperCase() === "SA" || String(e.Name || "").toLowerCase().includes("tadawul"));
+        SAUDI_EXCHANGE = found ? found.Code : "SR";
         TASI_SYMBOLS = await loadExchangeSymbols(SAUDI_EXCHANGE, "common_stock");
     } catch (e) { TASI_SYMBOLS = []; }
 
@@ -143,79 +119,49 @@ async function loadMarkets() {
     } catch (e) { CRYPTO_SYMBOLS = []; }
 
     marketsLoaded = true;
-    console.log(`Markets loaded -> US: ${US_SYMBOLS.length}, TASI: ${TASI_SYMBOLS.length}, CRYPTO: ${CRYPTO_SYMBOLS.length}`);
+    console.log(`Loaded -> US: ${US_SYMBOLS.length}, TASI: ${TASI_SYMBOLS.length}, CRYPTO: ${CRYPTO_SYMBOLS.length}`);
 }
 
 // ============================================================
-// 📊 ANALYSIS & UTILS
+// 📊 SIMPLE & ACCURATE ANALYSIS
 // ============================================================
 
 async function getDailyData(symbol) {
     const dateAgo = new Date();
-    dateAgo.setDate(dateAgo.getDate() - 180);
-    const fromStr = dateAgo.toISOString().slice(0, 10);
-
-    const data = await eodhd(`eod/${encodeURIComponent(symbol)}`, { period: "d", order: "d", from: fromStr });
-    if (!Array.isArray(data) || data.length < 20) return [];
-    return data.reverse().filter(row => row && Number.isFinite(Number(row.close)));
+    dateAgo.setDate(dateAgo.getDate() - 60);
+    const data = await eodhd(`eod/${encodeURIComponent(symbol)}`, { period: "d", order: "d", from: dateAgo.toISOString().slice(0, 10) });
+    if (!Array.isArray(data) || data.length < 15) return [];
+    return data.reverse().map(r => Number(r.close)).filter(Number.isFinite);
 }
 
 function calculateEMA(values, period) {
-    if (!Array.isArray(values) || values.length < period) return null;
-    const multiplier = 2 / (period + 1);
+    if (values.length < period) return null;
+    const k = 2 / (period + 1);
     let ema = values.slice(0, period).reduce((a, b) => a + b, 0) / period;
     for (let i = period; i < values.length; i++) {
-        ema = (values[i] - ema) * multiplier + ema;
+        ema = (values[i] - ema) * k + ema;
     }
     return ema;
 }
 
-function calculateATR(rows, period = 14) {
-    if (!rows || rows.length < period + 1) return null;
-    const trs = [];
-    for (let i = 1; i < rows.length; i++) {
-        const high = Number(rows[i].high), low = Number(rows[i].low), prevClose = Number(rows[i - 1].close);
-        if (!Number.isFinite(high) || !Number.isFinite(low) || !Number.isFinite(prevClose)) continue;
-        trs.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
-    }
-    if (trs.length < period) return null;
-    return trs.slice(-period).reduce((a, b) => a + b, 0) / period;
-}
-
-function analyzeSymbol(rows) {
-    if (!rows || rows.length < 20) return null;
-    const closes = rows.map(r => Number(r.close)).filter(Number.isFinite);
+function analyze(closes) {
+    if (closes.length < 15) return null;
     const price = closes.at(-1);
-    if (!price) return null;
-
     const ema7 = calculateEMA(closes, 7);
-    const ema14 = calculateEMA(closes, 14);
-    const ema25 = calculateEMA(closes, 25);
-    const atr = calculateATR(rows, 14);
+    const ema21 = calculateEMA(closes, 21);
+
+    if (!ema7 || !ema21) return null;
 
     let direction = "محايد";
-    if (ema7 && ema14 && ema25) {
-        if (price > ema7 && ema7 > ema14 && ema14 > ema25) direction = "صعود";
-        else if (price < ema7 && ema7 < ema14 && ema14 < ema25) direction = "هبوط";
-    }
+    if (price > ema7 && ema7 > ema21) direction = "صعود";
+    else if (price < ema7 && ema7 < ema21) direction = "هبوط";
 
-    const recent = rows.slice(-20);
-    const support = Math.min(...recent.map(x => Number(x.low)).filter(Number.isFinite));
-    const resistance = Math.max(...recent.map(x => Number(x.high)).filter(Number.isFinite));
-
-    return { price, atr, support, resistance, direction, strength: direction !== "محايد" ? 80 : 50 };
+    return { price, direction };
 }
 
-function calculateTargets(price, atr, direction) {
-    const safeATR = Number.isFinite(atr) && atr > 0 ? atr : price * 0.02;
-    return [0.5, 1, 1.5, 2, 2.5, 3].map((m, i) => ({
-        name: `TP${i + 1}`,
-        price: direction === "هبوط" ? price - (safeATR * m) : price + (safeATR * m)
-    }));
-}
-
-function formatPrice(v) { return Number.isFinite(Number(v)) ? Number(v).toFixed(2) : "-"; }
-function escapeHTML(t) { return String(t || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+// ============================================================
+// 📣 BROADCAST
+// ============================================================
 
 async function broadcast(bot, chatIds, message) {
     if (!bot || chatIds.size === 0) return;
@@ -227,73 +173,64 @@ async function broadcast(bot, chatIds, message) {
 }
 
 // ============================================================
-// 🔍 SCANNERS
+// 🔍 SCANNER ROUTINE (فحص سريع ومباشر)
 // ============================================================
 
 async function scanMarketRoutine(symbols, marketName, bot, chatIds) {
-    if (!symbols.length || chatIds.size === 0) return;
-    let sentCount = 0;
+    if (!symbols.length || chatIds.size ===.0 || chatIds.size === 0) return;
+    let count = 0;
 
-    for (const item of symbols) {
-        if (sentCount >= 10) break; // إرسال أول 10 إشارات نشطة لتجنب الضغط
+    // نفحص أول 25 سهم كمثال للسرعة الفورية وتأكيد وصول الرسائل
+    for (const item of symbols.slice(0, 25)) {
         try {
-            const rows = await getDailyData(item.symbol);
-            const analysis = analyzeSymbol(rows);
-            if (!analysis || analysis.direction === "محايد") continue;
-            if (marketName.includes("الأمريكي") && analysis.price < US_MIN_PRICE) continue;
+            const closes = await getDailyData(item.symbol);
+            const res = analyze(closes);
+            if (!res || res.direction === "محايد") continue;
 
-            const targets = calculateTargets(analysis.price, analysis.atr, analysis.direction);
-            let msg = `<b>AI PRO MAX - ${marketName}</b>\n\n`;
-            msg += `<b>${escapeHTML(item.symbol)}</b> | ${escapeHTML(item.name)}\n`;
-            msg += `الإشارة: <b>${analysis.direction === "صعود" ? "🟢 صعود" : "🔴 هبوط"}</b>\n`;
-            msg += `السعر: <b>${formatPrice(analysis.price)}</b>\n`;
-            msg += `الدعم: ${formatPrice(analysis.support)} | المقاومة: ${formatPrice(analysis.resistance)}\n\n<b>الأهداف:</b>\n`;
-            targets.forEach(t => { msg += `${t.name}: ${formatPrice(t.price)}\n`; });
+            const msg = `<b>📊 AI PRO MAX - ${marketName}</b>\n\n` +
+                        `<b>الرمز:</b> ${item.symbol}\n` +
+                        `<b>الاسم:</b> ${item.name}\n` +
+                        `<b>الحالة:</b> ${res.direction === "صعود" ? "🟢 صعود قوي" : "🔴 هبوط قوي"}\n` +
+                        `<b>السعر الحالي:</b> ${res.price.toFixed(2)}`;
 
             await broadcast(bot, chatIds, msg);
-            sentCount++;
+            count++;
+            if (count >= 3) break; // يرسل أول 3 إشارات واضحة فوراً لتتأكد أن كل شيء يعمل
         } catch (e) {}
     }
 }
 
-async function runAllScans() {
-    if (!marketsLoaded) return;
-    await Promise.allSettled([
-        scanMarketRoutine(US_SYMBOLS, "السوق الأمريكي", usBot, usChatIds),
-        scanMarketRoutine(TASI_SYMBOLS, "السوق السعودي", tasiBot, tasiChatIds),
-        scanMarketRoutine(CRYPTO_SYMBOLS, "العملات الرقمية", cryptoBot, cryptoChatIds)
-    ]);
-}
-
 // ============================================================
-// 🤖 TELEGRAM HANDLERS (تسجيل الشات تلقائياً)
+// 🤖 BOT COMMANDS
 // ============================================================
 
-function setupBotCommands(bot, chatIds, marketName) {
+function setupBot(bot, chatIds, name, symbols) {
     if (!bot) return;
     bot.onText(/\/start|\/scan/, async (msg) => {
         const chatId = msg.chat.id;
         chatIds.add(chatId);
-        await bot.sendMessage(chatId, `✅ تم تفعيل بوت ${marketName} بنجاح وتسجيل محادثتك!\nجاري فحص السوق وإرسال النتائج...`, { parse_mode: "HTML" });
-        
-        // فحص فوري عند طلب المستخدم
-        if (marketName.includes("الأمريكي")) scanMarketRoutine(US_SYMBOLS, marketName, usBot, chatIds);
-        if (marketName.includes("السعودي")) scanMarketRoutine(TASI_SYMBOLS, marketName, tasiBot, chatIds);
-        if (marketName.includes("العملات")) scanMarketRoutine(CRYPTO_SYMBOLS, marketName, cryptoBot, chatIds);
+        await bot.sendMessage(chatId, `✅ تم ربط بوت ${name} بنجاح!\nجاري الفحص المباشر وإرسال النتائج...`, { parse_mode: "HTML" });
+        scanMarketRoutine(symbols, name, bot, chatIds);
     });
 }
 
-setupBotCommands(usBot, usChatIds, "السوق الأمريكي");
-setupBotCommands(tasiBot, tasiChatIds, "السوق السعودي");
-setupBotCommands(cryptoBot, cryptoChatIds, "العملات الرقمية");
+setupBot(usBot, usChatIds, "السوق الأمريكي", US_SYMBOLS);
+setupBot(tasiBot, tasiChatIds, "السوق السعودي", TASI_SYMBOLS);
+setupBot(cryptoBot, cryptoChatIds, "العملات الرقمية", CRYPTO_SYMBOLS);
 
 // ============================================================
-// 🚀 STARTUP
+// 🚀 START
 // ============================================================
 
 async function start() {
     await loadMarkets();
-    setInterval(runAllScans, SCAN_INTERVAL);
+    setInterval(() => {
+        if (marketsLoaded) {
+            scanMarketRoutine(US_SYMBOLS, "السوق الأمريكي", usBot, usChatIds);
+            scanMarketRoutine(TASI_SYMBOLS, "السوق السعودي", tasiBot, tasiChatIds);
+            scanMarketRoutine(CRYPTO_SYMBOLS, "العملات الرقمية", cryptoBot, cryptoChatIds);
+        }
+    }, SCAN_INTERVAL);
 }
 
 start();
