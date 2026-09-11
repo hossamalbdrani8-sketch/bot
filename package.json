@@ -1,17 +1,13 @@
- 
+
 {
-  "name": "ai-pro-max-market-bots",
+  "name": "bot",
   "version": "1.0.0",
-  "description": "AI PRO MAX US TASI Crypto Telegram Scanner",
+  "description": "AI Pro Max Trading Bot",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
-  "engines": {
-    "node": ">=18"
-  },
   "dependencies": {
-    "express": "^5.1.0",
-    "node-telegram-bot-api": "^0.66.0"
+    "node-fetch": "^2.6.7"
   }
 }
