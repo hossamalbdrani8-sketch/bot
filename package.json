@@ -5,5 +5,10 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
+  },
+  "markets": {
+    "tasi": "Saudi Stock Market - تاسي كامل",
+    "us": "US Stocks & Nasdaq (>= $0.20) - أمريكي كامل",
+    "crypto": "Cryptocurrencies - عملات رقمية كاملة"
   }
 }
