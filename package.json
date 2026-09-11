@@ -1,11 +1,9 @@
-
 {
   "name": "ai-pro-max",
-  "version": "3.0.0",
+  "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "web": "node index.js"
+    "start": "node index.js"
   },
   "engines": {
     "node": ">=18"
