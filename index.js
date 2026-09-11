@@ -1,19 +1,32 @@
 
 "use strict";
 
+/*
+============================================================
+🤖 AI PRO MAX 💀🚀
+بوت تليجرام مستقل للفحص:
+🇸🇦 TASI
+🇺🇸 US / NASDAQ
+🪙 CRYPTO
+============================================================
+
+المتطلبات:
+- Node.js 18+
+- TELEGRAM_TOKEN
+- EODHD_API_KEY
+
+المتغيرات الموجودة عندك تبقى كما هي.
+============================================================
+*/
+
 const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
 
 // ============================================================
-// 🤖 AI PRO MAX 💀🚀
-// 🇸🇦 TASI + 🇺🇸 NASDAQ + 🪙 CRYPTO
-// ⏱️ فحص كل دقيقتين
+// ⚙️ الإعدادات
 // ============================================================
 
-
-// ============================================================
-// 🔐 TELEGRAM
-// ============================================================
+const PORT = Number(process.env.PORT || 8080);
 
 const TELEGRAM_TOKEN =
     process.env.TELEGRAM_TOKEN ||
@@ -21,38 +34,19 @@ const TELEGRAM_TOKEN =
     process.env.BOT_TOKEN ||
     "";
 
-const TELEGRAM_CHAT_ID =
-    process.env.TELEGRAM_CHAT_ID ||
-    process.env.CHAT_ID ||
-    "";
-
-
-// ============================================================
-// 🔑 EODHD
-// ============================================================
-
-const EODHD_TOKEN =
-    process.env.EODHD_TOKEN ||
+const EODHD_API_KEY =
     process.env.EODHD_API_KEY ||
+    process.env.EODHD_TOKEN ||
     process.env.EODHD_API_TOKEN ||
     process.env.API_TOKEN ||
     "";
 
-
-// ============================================================
-// 🇸🇦 TASI CONFIG
-// ============================================================
-
+// متغيراتك الحالية — لا نحذفها
 const TASI_CONFIG =
     process.env.TASI_CONFIG ||
     process.env.TASI_API ||
     process.env.TASI_TOKEN ||
     "";
-
-
-// ============================================================
-// 🇺🇸 US CONFIG
-// ============================================================
 
 const US_CONFIG =
     process.env.US_CONFIG ||
@@ -60,473 +54,470 @@ const US_CONFIG =
     process.env.US_TOKEN ||
     "";
 
-
-// ============================================================
-// 🪙 CRYPTO CONFIG
-// ============================================================
-
 const CRYPTO_CONFIG =
     process.env.CRYPTO_CONFIG ||
     process.env.CRYPTO_API ||
     process.env.CRYPTO_TOKEN ||
     "";
 
-
 // ============================================================
-// 🌐 PORT
-// ============================================================
-
-const PORT =
-    Number(process.env.PORT || 3000);
-
-
-// ============================================================
-// ⚙️ الإعدادات
+// 🧠 إعدادات البوت
 // ============================================================
 
-// ⏱️ الفحص كل دقيقتين
-const SCAN_INTERVAL =
-    2 * 60 * 1000;
+const SCAN_INTERVAL = 5 * 60 * 1000; // كل 5 دقائق
 
-// 🇺🇸 أقل سعر أمريكي
 const MIN_US_PRICE = 0.20;
 
-// تحديث قوائم الأسواق
-const SYMBOL_LIST_REFRESH =
-    6 * 60 * 60 * 1000;
-
-// تحديث بيانات TASI
-const TASI_REFRESH =
-    15 * 60 * 1000;
-
-// تحديث بيانات Crypto
-const CRYPTO_REFRESH =
-    15 * 60 * 1000;
-
-// تحديث التاريخ الفني
-const HISTORY_REFRESH =
-    30 * 60 * 1000;
-
+// منع إرسال نفس الإشارة بشكل متكرر
+const SIGNAL_MEMORY_TIME = 60 * 60 * 1000;
 
 // ============================================================
-// 🧠 الذاكرة
+// 🌐 الخادم
 // ============================================================
 
-let bot = null;
+const app = express();
 
-const subscribers =
-    new Set();
+app.get("/", (req, res) => {
+    res.json({
+        status: "ONLINE",
+        bot: "AI PRO MAX",
+        time: new Date().toISOString()
+    });
+});
 
-let running = false;
+app.get("/health", (req, res) => {
+    res.json({
+        ok: true,
+        bot: "AI PRO MAX 💀🚀"
+    });
+});
 
-let lastScan = {
-    tasi: 0,
-    us: 0,
-    crypto: 0
-};
-
-
-// ============================================================
-// 📦 CACHE
-// ============================================================
-
-const cache = {
-
-    nasdaqSymbols: new Set(),
-
-    nasdaqSymbolsUpdated: 0,
-
-    tasiRows: [],
-
-    tasiUpdated: 0,
-
-    cryptoRows: [],
-
-    cryptoUpdated: 0,
-
-    usQuotes: [],
-
-    usQuotesUpdated: 0,
-
-    history: new Map()
-};
-
+app.listen(PORT, () => {
+    console.log(`🌐 الخادم يعمل على المنفذ ${PORT}`);
+});
 
 // ============================================================
-// 🛑 TELEGRAM
+// 🔐 فحص الإعدادات
+// ============================================================
+
+console.log("==============================================");
+console.log("🤖 AI PRO MAX 💀🚀");
+console.log("==============================================");
+
+console.log(
+    TELEGRAM_TOKEN
+        ? "✅ TELEGRAM_TOKEN موجود"
+        : "❌ TELEGRAM_TOKEN غير موجود"
+);
+
+console.log(
+    EODHD_API_KEY
+        ? "✅ EODHD_API_KEY موجود"
+        : "❌ EODHD_API_KEY غير موجود"
+);
+
+console.log(
+    TASI_CONFIG
+        ? "✅ إعداد تاسي موجود"
+        : "ℹ️ إعداد تاسي غير مستخدم"
+);
+
+console.log(
+    US_CONFIG
+        ? "✅ إعداد الأمريكي موجود"
+        : "ℹ️ إعداد الأمريكي غير مستخدم"
+);
+
+console.log(
+    CRYPTO_CONFIG
+        ? "✅ إعداد العملات موجود"
+        : "ℹ️ إعداد العملات غير مستخدم"
+);
+
+// ============================================================
+// 🤖 TELEGRAM
 // ============================================================
 
 if (!TELEGRAM_TOKEN) {
+    console.error("❌ لا يوجد Telegram Token");
+    process.exit(1);
+}
 
-    console.error(
-        "❌ TELEGRAM_TOKEN غير موجود"
-    );
+const bot = new TelegramBot(TELEGRAM_TOKEN, {
+    polling: true
+});
 
-} else {
+// ============================================================
+// 👥 المحادثات التي بدأت البوت
+// ============================================================
+
+const CHAT_IDS = new Set();
+
+// إذا وضعت Chat ID اختياريًا
+if (process.env.TELEGRAM_CHAT_ID) {
+    CHAT_IDS.add(String(process.env.TELEGRAM_CHAT_ID));
+}
+
+// ============================================================
+// 🚀 START
+// ============================================================
+
+bot.onText(/^\/start$/, async (msg) => {
+
+    const chatId = String(msg.chat.id);
+
+    CHAT_IDS.add(chatId);
+
+    const text =
+`🤖 AI PRO MAX 💀🚀
+
+✅ تم تشغيل البوت بنجاح
+
+🇸🇦 تاسي: فحص تلقائي
+🇺🇸 الأمريكي / NASDAQ: فحص تلقائي
+🪙 العملات الرقمية: فحص تلقائي
+
+🧠 محرك الاتجاه: AI PRO MAX
+📏 ATR(14)
+🎯 8 أهداف ديناميكية
+📍 دعم ومقاومة
+💧 السيولة
+📰 الأخبار
+
+⏱ الفحص يعمل تلقائيًا كل 5 دقائق.
+
+لن تحتاج إلى إرسال أمر فحص يدوي.`;
 
     try {
-
-        bot =
-            new TelegramBot(
-                TELEGRAM_TOKEN,
-                {
-                    polling: true
-                }
-            );
-
-        console.log(
-            "✅ Telegram Bot يعمل"
-        );
-
-    } catch (error) {
-
-        console.error(
-            "❌ خطأ تشغيل Telegram:",
-            error.message
-        );
+        await bot.sendMessage(chatId, text);
+    } catch (err) {
+        console.error("❌ Telegram:", err.message);
     }
-}
-
-
-// ============================================================
-// 🔑 EODHD CHECK
-// ============================================================
-
-if (!EODHD_TOKEN) {
-
-    console.error(
-        "❌ EODHD Token غير موجود"
-    );
-
-} else {
-
-    console.log(
-        "✅ موجود رمز EODHD"
-    );
-}
-
+});
 
 // ============================================================
-// 📱 START
+// 📡 طلب EODHD
 // ============================================================
 
-if (bot) {
+async function eodhd(path) {
 
-    bot.onText(
-        /^\/start$/,
-        async (msg) => {
-
-            const chatId =
-                String(msg.chat.id);
-
-            subscribers.add(chatId);
-
-            console.log(
-                `✅ تمت إضافة Telegram Chat: ${chatId}`
-            );
-
-            await bot.sendMessage(
-                chatId,
-                [
-                    "🤖 AI PRO MAX 💀🚀",
-                    "",
-                    "✅ البوت يعمل الآن",
-                    "",
-                    "🇸🇦 تاسي: جاهز",
-                    "🇺🇸 NASDAQ: جاهز",
-                    "🪙 العملات الرقمية: جاهزة",
-                    "",
-                    "⚡ الفحص تلقائي",
-                    "⏱️ كل دقيقتين",
-                    "",
-                    "لا تحتاج إلى تشغيل الفحص يدويًا."
-                ].join("\n")
-            );
-        }
-    );
-
-
-    bot.on(
-        "polling_error",
-        (error) => {
-
-            console.error(
-                "❌ Telegram Polling:",
-                error.message
-            );
-        }
-    );
-}
-
-
-// ============================================================
-// 🌐 EODHD REQUEST
-// ============================================================
-
-async function eodhd(
-    path,
-    params = {}
-) {
-
-    if (!EODHD_TOKEN) {
-
-        throw new Error(
-            "EODHD_TOKEN غير موجود"
-        );
+    if (!EODHD_API_KEY) {
+        throw new Error("EODHD_API_KEY غير موجود");
     }
 
-    const query =
-        new URLSearchParams();
-
-    query.set(
-        "api_token",
-        EODHD_TOKEN
-    );
-
-    query.set(
-        "fmt",
-        "json"
-    );
-
-    for (
-        const [key, value]
-        of Object.entries(params)
-    ) {
-
-        if (
-            value !== undefined &&
-            value !== null &&
-            value !== ""
-        ) {
-
-            query.set(
-                key,
-                String(value)
-            );
-        }
-    }
+    const separator = path.includes("?") ? "&" : "?";
 
     const url =
-        `https://eodhd.com/api${path}?${query.toString()}`;
+        `https://eodhd.com/api/${path}${separator}api_token=${encodeURIComponent(EODHD_API_KEY)}&fmt=json`;
 
-    const response =
-        await fetch(url);
-
-    const body =
-        await response.text();
+    const response = await fetch(url);
 
     if (!response.ok) {
-
-        let message =
-            body;
-
-        try {
-
-            const json =
-                JSON.parse(body);
-
-            message =
-                json.message ||
-                json.error ||
-                body;
-
-        } catch (_) {}
+        const body = await response.text();
 
         throw new Error(
-            `EODHD HTTP ${response.status} - ${String(message).slice(0, 250)}`
+            `EODHD HTTP ${response.status} ${body.slice(0, 200)}`
         );
     }
 
-    try {
-
-        return JSON.parse(body);
-
-    } catch (_) {
-
-        throw new Error(
-            "EODHD أرسل بيانات غير JSON"
-        );
-    }
+    return await response.json();
 }
 
-
 // ============================================================
-// 📊 EMA
+// 🧮 حساب EMA
 // ============================================================
 
-function ema(
-    values,
-    period
-) {
+function ema(values, period) {
 
-    if (
-        !Array.isArray(values) ||
-        values.length < period
-    ) {
-
+    if (!values || values.length < period) {
         return null;
     }
 
-    const multiplier =
-        2 / (period + 1);
+    const multiplier = 2 / (period + 1);
 
     let result = 0;
 
-    for (
-        let i = 0;
-        i < period;
-        i++
-    ) {
-
-        result +=
-            Number(values[i]) || 0;
+    for (let i = 0; i < period; i++) {
+        result += Number(values[i]);
     }
 
-    result /=
-        period;
+    result /= period;
 
-    for (
-        let i = period;
-        i < values.length;
-        i++
-    ) {
-
-        const value =
-            Number(values[i]) || 0;
-
+    for (let i = period; i < values.length; i++) {
         result =
-            (
-                (value - result) *
-                multiplier
-            ) +
-            result;
+            (Number(values[i]) - result) * multiplier + result;
     }
 
     return result;
 }
 
-
 // ============================================================
-// 📏 ATR14
+// 🧮 ATR(14)
 // ============================================================
 
-function calculateATR(
-    candles,
-    period = 14
-) {
+function calculateATR(candles, period = 14) {
 
-    if (
-        !candles ||
-        candles.length <
-        period + 1
-    ) {
-
+    if (!candles || candles.length < period + 1) {
         return null;
     }
 
-    const tr = [];
+    const trs = [];
 
-    for (
-        let i = 1;
-        i < candles.length;
-        i++
-    ) {
+    for (let i = 1; i < candles.length; i++) {
 
-        const high =
-            Number(candles[i].high);
-
-        const low =
-            Number(candles[i].low);
-
-        const previousClose =
-            Number(
-                candles[i - 1].close
-            );
+        const high = Number(candles[i].high);
+        const low = Number(candles[i].low);
+        const previousClose = Number(candles[i - 1].close);
 
         if (
             !Number.isFinite(high) ||
             !Number.isFinite(low) ||
             !Number.isFinite(previousClose)
         ) {
-
             continue;
         }
 
-        const r1 =
-            high - low;
-
-        const r2 =
-            Math.abs(
-                high - previousClose
-            );
-
-        const r3 =
-            Math.abs(
-                low - previousClose
-            );
-
-        tr.push(
-            Math.max(
-                r1,
-                r2,
-                r3
-            )
+        const tr = Math.max(
+            high - low,
+            Math.abs(high - previousClose),
+            Math.abs(low - previousClose)
         );
+
+        trs.push(tr);
     }
 
-    if (
-        tr.length < period
-    ) {
-
+    if (trs.length < period) {
         return null;
     }
 
     let atr = 0;
 
-    for (
-        let i = 0;
-        i < period;
-        i++
-    ) {
-
-        atr += tr[i];
+    for (let i = 0; i < period; i++) {
+        atr += trs[i];
     }
 
-    atr /=
-        period;
+    atr /= period;
 
-    for (
-        let i = period;
-        i < tr.length;
-        i++
-    ) {
-
+    for (let i = period; i < trs.length; i++) {
         atr =
-            (
-                atr * (period - 1) +
-                tr[i]
-            ) / period;
+            ((atr * (period - 1)) + trs[i]) /
+            period;
     }
 
     return atr;
 }
 
+// ============================================================
+// 📍 دعم ومقاومة من حركة السعر
+// ============================================================
+
+function supportResistance(candles) {
+
+    if (!candles || candles.length < 20) {
+        return {
+            support: null,
+            resistance: null
+        };
+    }
+
+    const recent = candles.slice(-20);
+
+    let support = Infinity;
+    let resistance = -Infinity;
+
+    for (const candle of recent) {
+
+        const low = Number(candle.low);
+        const high = Number(candle.high);
+
+        if (Number.isFinite(low)) {
+            support = Math.min(support, low);
+        }
+
+        if (Number.isFinite(high)) {
+            resistance = Math.max(resistance, high);
+        }
+    }
+
+    return {
+        support:
+            Number.isFinite(support)
+                ? support
+                : null,
+
+        resistance:
+            Number.isFinite(resistance)
+                ? resistance
+                : null
+    };
+}
 
 // ============================================================
-// 🎯 أهداف ATR
+// 💧 تحليل السيولة
 // ============================================================
 
-function calculateTargets(
-    price,
-    atr
-) {
+function liquidity(candles) {
+
+    if (!candles || candles.length < 10) {
+        return {
+            volume: 0,
+            averageVolume: 0,
+            strength: 0
+        };
+    }
+
+    const last = candles[candles.length - 1];
+
+    const volumes = candles
+        .slice(-20)
+        .map(x => Number(x.volume))
+        .filter(Number.isFinite);
+
+    if (!volumes.length) {
+        return {
+            volume: 0,
+            averageVolume: 0,
+            strength: 0
+        };
+    }
+
+    const average =
+        volumes.reduce((a, b) => a + b, 0) /
+        volumes.length;
+
+    const volume = Number(last.volume || 0);
+
+    const ratio =
+        average > 0
+            ? volume / average
+            : 0;
+
+    let strength = 0;
+
+    if (ratio >= 3) {
+        strength = 100;
+    } else if (ratio >= 2) {
+        strength = 80;
+    } else if (ratio >= 1.5) {
+        strength = 65;
+    } else if (ratio >= 1) {
+        strength = 50;
+    } else {
+        strength = 25;
+    }
+
+    return {
+        volume,
+        averageVolume: average,
+        ratio,
+        strength
+    };
+}
+
+// ============================================================
+// 🧠 AI PRO MAX — الاتجاه
+// ============================================================
+
+function trendEngine(candles) {
+
+    if (!candles || candles.length < 50) {
+        return {
+            direction: "محايد",
+            bullish: false,
+            bearish: false,
+            strength: 0
+        };
+    }
+
+    const closes = candles
+        .map(x => Number(x.close))
+        .filter(Number.isFinite);
+
+    const e20 = ema(closes, 20);
+    const e50 = ema(closes, 50);
+
+    const price = closes[closes.length - 1];
+
+    if (
+        e20 === null ||
+        e50 === null ||
+        !Number.isFinite(price)
+    ) {
+        return {
+            direction: "محايد",
+            bullish: false,
+            bearish: false,
+            strength: 0
+        };
+    }
+
+    let strength = 0;
+
+    if (price > e20) {
+        strength += 30;
+    }
+
+    if (e20 > e50) {
+        strength += 30;
+    }
+
+    if (price > e50) {
+        strength += 40;
+    }
+
+    if (strength >= 70) {
+
+        return {
+            direction: "صاعد",
+            bullish: true,
+            bearish: false,
+            strength
+        };
+    }
+
+    let bearStrength = 0;
+
+    if (price < e20) {
+        bearStrength += 30;
+    }
+
+    if (e20 < e50) {
+        bearStrength += 30;
+    }
+
+    if (price < e50) {
+        bearStrength += 40;
+    }
+
+    if (bearStrength >= 70) {
+
+        return {
+            direction: "هابط",
+            bullish: false,
+            bearish: true,
+            strength: bearStrength
+        };
+    }
+
+    return {
+        direction: "محايد",
+        bullish: false,
+        bearish: false,
+        strength: Math.max(strength, bearStrength)
+    };
+}
+
+// ============================================================
+// 🎯 8 أهداف ATR
+// ============================================================
+
+function atrTargets(price, atr, direction) {
 
     if (
         !Number.isFinite(price) ||
         !Number.isFinite(atr) ||
         atr <= 0
     ) {
-
         return [];
     }
 
@@ -541,861 +532,270 @@ function calculateTargets(
         5
     ];
 
-    return multipliers.map(
-        (m, index) => ({
+    return multipliers.map((m, index) => {
 
-            name:
-                `TP${index + 1}`,
-
-            price:
-                price + atr * m,
-
-            distance:
-                atr * m
-        })
-    );
-}
-
-
-// ============================================================
-// 🟢🔴 SUPPORT / RESISTANCE
-// ============================================================
-
-function supportResistance(
-    candles,
-    lookback = 30
-) {
-
-    if (
-        !candles ||
-        candles.length < 5
-    ) {
+        const target =
+            direction === "صاعد"
+                ? price + atr * m
+                : price - atr * m;
 
         return {
-            support: null,
-            resistance: null
+            number: index + 1,
+            price: target
         };
-    }
-
-    const data =
-        candles.slice(-lookback);
-
-    const lows =
-        data
-            .map(
-                x => Number(x.low)
-            )
-            .filter(
-                Number.isFinite
-            );
-
-    const highs =
-        data
-            .map(
-                x => Number(x.high)
-            )
-            .filter(
-                Number.isFinite
-            );
-
-    if (
-        !lows.length ||
-        !highs.length
-    ) {
-
-        return {
-            support: null,
-            resistance: null
-        };
-    }
-
-    return {
-
-        support:
-            Math.min(...lows),
-
-        resistance:
-            Math.max(...highs)
-    };
+    });
 }
 
-
 // ============================================================
-// 💧 LIQUIDITY
-// ============================================================
-
-function liquidityStrength(
-    candles
-) {
-
-    if (
-        !candles ||
-        candles.length < 11
-    ) {
-
-        return 0;
-    }
-
-    const volumes =
-        candles
-            .map(
-                x => Number(x.volume)
-            )
-            .filter(
-                Number.isFinite
-            );
-
-    if (
-        volumes.length < 11
-    ) {
-
-        return 0;
-    }
-
-    const latest =
-        volumes[
-            volumes.length - 1
-        ];
-
-    const previous =
-        volumes.slice(
-            -11,
-            -1
-        );
-
-    const average =
-        previous.reduce(
-            (a, b) => a + b,
-            0
-        ) /
-        previous.length;
-
-    if (
-        average <= 0
-    ) {
-
-        return 0;
-    }
-
-    return (
-        latest /
-        average
-    );
-}
-
-
-// ============================================================
-// 🧠 التحليل الفني
+// 📰 الأخبار
 // ============================================================
 
-function analyze(
-    symbol,
-    candles,
-    market,
-    livePrice = null,
-    changePercent = null
-) {
-
-    if (
-        !candles ||
-        candles.length < 60
-    ) {
-
-        return null;
-    }
-
-    const closes =
-        candles
-            .map(
-                x => Number(x.close)
-            )
-            .filter(
-                Number.isFinite
-            );
-
-    if (
-        closes.length < 60
-    ) {
-
-        return null;
-    }
-
-    const historicalPrice =
-        closes[
-            closes.length - 1
-        ];
-
-    const price =
-        Number.isFinite(livePrice) &&
-        livePrice > 0
-            ? livePrice
-            : historicalPrice;
-
-    const ema10 =
-        ema(
-            closes,
-            10
-        );
-
-    const ema50 =
-        ema(
-            closes,
-            50
-        );
-
-    const ema200 =
-        ema(
-            closes,
-            200
-        );
-
-    const atr =
-        calculateATR(
-            candles,
-            14
-        );
-
-    const sr =
-        supportResistance(
-            candles
-        );
-
-    const liquidity =
-        liquidityStrength(
-            candles
-        );
-
-    let signal =
-        "محايد";
-
-    if (
-        ema10 &&
-        ema50 &&
-        price > ema10 &&
-        ema10 > ema50
-    ) {
-
-        signal =
-            "شراء قوي";
-
-    } else if (
-        ema10 &&
-        price > ema10
-    ) {
-
-        signal =
-            "شراء";
-    }
-
-    const targets =
-        calculateTargets(
-            price,
-            atr
-        );
-
-    return {
-
-        symbol,
-        market,
-        price,
-        signal,
-
-        emaFast:
-            ema10,
-
-        ema50,
-
-        ema200,
-
-        atr,
-
-        support:
-            sr.support,
-
-        resistance:
-            sr.resistance,
-
-        liquidity,
-
-        changePercent,
-
-        targets
-    };
-}
-
-
-// ============================================================
-// 📚 التاريخ الفني
-// ============================================================
-
-async function getHistory(
-    symbol
-) {
-
-    const old =
-        cache.history.get(symbol);
-
-    if (
-        old &&
-        Date.now() - old.time <
-        HISTORY_REFRESH
-    ) {
-
-        return old.data;
-    }
+async function getNews(symbol, exchange) {
 
     try {
 
-        const data =
-            await eodhd(
-                `/eod/${encodeURIComponent(symbol)}`,
-                {
-                    order: "a",
-                    period: "d",
-                    from: "2025-01-01"
-                }
-            );
+        const data = await eodhd(
+            `news?s=${encodeURIComponent(symbol)}&offset=0&limit=3`
+        );
 
-        if (
-            Array.isArray(data)
-        ) {
-
-            cache.history.set(
-                symbol,
-                {
-                    time:
-                        Date.now(),
-
-                    data
-                }
-            );
-
-            return data;
+        if (!Array.isArray(data)) {
+            return [];
         }
 
-    } catch (error) {
+        return data.slice(0, 3).map(item => ({
+
+            title:
+                item.title ||
+                item.headline ||
+                "خبر جديد",
+
+            source:
+                item.source ||
+                item.site ||
+                "EODHD",
+
+            date:
+                item.date ||
+                item.publishedAt ||
+                ""
+
+        }));
+
+    } catch (err) {
 
         console.log(
-            `⚠️ التاريخ ${symbol}: ${error.message}`
+            `⚠️ الأخبار ${symbol}: ${err.message}`
         );
-    }
 
-    return null;
+        return [];
+    }
 }
 
-
 // ============================================================
-// 🇺🇸 قائمة NASDAQ
+// 🔢 تنسيق الأرقام
 // ============================================================
 
-async function loadNASDAQSymbols() {
+function money(value, digits = 2) {
 
-    if (
-        cache.nasdaqSymbols.size &&
-        Date.now() -
-            cache.nasdaqSymbolsUpdated <
-            SYMBOL_LIST_REFRESH
-    ) {
-
-        return;
+    if (!Number.isFinite(Number(value))) {
+        return "-";
     }
 
-    console.log(
-        "📚 تحديث قائمة NASDAQ..."
+    return Number(value).toFixed(digits);
+}
+
+function bigNumber(value) {
+
+    const n = Number(value);
+
+    if (!Number.isFinite(n)) {
+        return "-";
+    }
+
+    if (Math.abs(n) >= 1_000_000_000) {
+        return `${(n / 1_000_000_000).toFixed(2)}B`;
+    }
+
+    if (Math.abs(n) >= 1_000_000) {
+        return `${(n / 1_000_000).toFixed(2)}M`;
+    }
+
+    if (Math.abs(n) >= 1_000) {
+        return `${(n / 1_000).toFixed(2)}K`;
+    }
+
+    return String(Math.round(n));
+}
+
+// ============================================================
+// 📊 تحليل سهم
+// ============================================================
+
+async function analyzeSymbol(symbol, exchange) {
+
+    const candles = await eodhd(
+        `eod/${encodeURIComponent(symbol)}?period=d&order=d&from=2025-01-01`
     );
 
-    const list =
-        await eodhd(
-            "/exchange-symbol-list/US"
+    if (!Array.isArray(candles) || candles.length < 20) {
+        return null;
+    }
+
+    const clean = candles
+        .filter(c =>
+            Number.isFinite(Number(c.close)) &&
+            Number.isFinite(Number(c.high)) &&
+            Number.isFinite(Number(c.low))
+        )
+        .sort(
+            (a, b) =>
+                new Date(a.date) - new Date(b.date)
         );
+
+    if (clean.length < 20) {
+        return null;
+    }
+
+    const last = clean[clean.length - 1];
+
+    const price = Number(last.close);
+
+    if (!Number.isFinite(price) || price <= 0) {
+        return null;
+    }
+
+    // 🇺🇸 أقل سعر 0.20$
+    if (
+        exchange === "US" &&
+        price < MIN_US_PRICE
+    ) {
+        return null;
+    }
+
+    const atr = calculateATR(clean, 14);
+
+    const trend = trendEngine(clean);
+
+    const sr = supportResistance(clean);
+
+    const liq = liquidity(clean);
+
+    if (!atr) {
+        return null;
+    }
+
+    const targets =
+        trend.direction === "صاعد" ||
+        trend.direction === "هابط"
+            ? atrTargets(
+                price,
+                atr,
+                trend.direction
+            )
+            : [];
+
+    let signal = "⚪ محايد";
 
     if (
-        !Array.isArray(list)
+        trend.bullish &&
+        liq.strength >= 50
     ) {
+        signal = "🟢 شراء قوي";
+    } else if (
+        trend.bullish
+    ) {
+        signal = "🟢 اتجاه صاعد";
+    } else if (
+        trend.bearish &&
+        liq.strength >= 50
+    ) {
+        signal = "🔴✓ هابط";
+    } else if (
+        trend.bearish
+    ) {
+        signal = "🔴 اتجاه هابط";
+    }
 
+    return {
+        symbol,
+        exchange,
+        price,
+        atr,
+        trend,
+        support: sr.support,
+        resistance: sr.resistance,
+        liquidity: liq,
+        targets,
+        signal
+    };
+}
+
+// ============================================================
+// 📋 الحصول على قائمة السوق
+// ============================================================
+
+async function getExchangeSymbols(exchange) {
+
+    const data = await eodhd(
+        `exchange-symbol-list/${exchange}`
+    );
+
+    if (!Array.isArray(data)) {
         throw new Error(
-            "قائمة US غير صحيحة"
+            `قائمة ${exchange} غير صالحة`
         );
     }
+
+    return data;
+}
+
+// ============================================================
+// 🇸🇦 تاسي
+// ============================================================
+
+async function scanTASI() {
+
+    console.log("🇸🇦 بدء فحص تاسي...");
 
     const symbols =
-        new Set();
-
-    for (
-        const item of list
-    ) {
-
-        const code =
-            item.Code ||
-            item.code ||
-            item.Symbol ||
-            item.symbol;
-
-        const exchange =
-            String(
-                item.Exchange ||
-                item.exchange ||
-                item.SubExchange ||
-                item.sub_exchange ||
-                ""
-            ).toUpperCase();
-
-        if (
-            code &&
-            exchange === "NASDAQ"
-        ) {
-
-            symbols.add(
-                String(code)
-                    .toUpperCase()
-            );
-        }
-    }
-
-    cache.nasdaqSymbols =
-        symbols;
-
-    cache.nasdaqSymbolsUpdated =
-        Date.now();
+        await getExchangeSymbols("TADAWUL");
 
     console.log(
-        `🇺🇸 NASDAQ: ${symbols.size} سهم`
+        `🇸🇦 عدد رموز تاسي: ${symbols.length}`
+    );
+
+    return scanUniverse(
+        symbols,
+        "TASI"
     );
 }
 
-
 // ============================================================
-// 🇺🇸 BULK LIVE US
-// ============================================================
-
-async function loadUSLive() {
-
-    const data =
-        await eodhd(
-            "/real-time/AAPL.US",
-            {
-                ex: "US"
-            }
-        );
-
-    if (
-        !Array.isArray(data)
-    ) {
-
-        throw new Error(
-            "Bulk US لم يرجع قائمة"
-        );
-    }
-
-    cache.usQuotes =
-        data;
-
-    cache.usQuotesUpdated =
-        Date.now();
-
-    return data;
-}
-
-
-// ============================================================
-// 🇸🇦 BULK TASI
-// ============================================================
-
-async function loadTASI() {
-
-    if (
-        cache.tasiRows.length &&
-        Date.now() -
-            cache.tasiUpdated <
-            TASI_REFRESH
-    ) {
-
-        return cache.tasiRows;
-    }
-
-    console.log(
-        "🇸🇦 تحديث بيانات تاسي..."
-    );
-
-    const data =
-        await eodhd(
-            "/eod-bulk-last-day/SA.TADAWUL",
-            {
-                filter:
-                    "extended"
-            }
-        );
-
-    if (
-        !Array.isArray(data)
-    ) {
-
-        throw new Error(
-            "بيانات تاسي غير صحيحة"
-        );
-    }
-
-    cache.tasiRows =
-        data;
-
-    cache.tasiUpdated =
-        Date.now();
-
-    console.log(
-        `🇸🇦 تاسي: ${data.length} سهم`
-    );
-
-    return data;
-}
-
-
-// ============================================================
-// 🪙 BULK CRYPTO
-// ============================================================
-
-async function loadCrypto() {
-
-    if (
-        cache.cryptoRows.length &&
-        Date.now() -
-            cache.cryptoUpdated <
-            CRYPTO_REFRESH
-    ) {
-
-        return cache.cryptoRows;
-    }
-
-    console.log(
-        "🪙 تحديث بيانات العملات..."
-    );
-
-    const data =
-        await eodhd(
-            "/eod-bulk-last-day/CC"
-        );
-
-    if (
-        !Array.isArray(data)
-    ) {
-
-        throw new Error(
-            "بيانات العملات غير صحيحة"
-        );
-    }
-
-    cache.cryptoRows =
-        data;
-
-    cache.cryptoUpdated =
-        Date.now();
-
-    console.log(
-        `🪙 العملات: ${data.length}`
-    );
-
-    return data;
-}
-
-
-// ============================================================
-// 🇺🇸 فحص NASDAQ
+// 🇺🇸 الأمريكي
 // ============================================================
 
 async function scanUS() {
 
     console.log(
-        "🇺🇸 بدء فحص NASDAQ..."
+        "🇺🇸 بدء فحص الأمريكي / NASDAQ..."
     );
 
-    lastScan.us =
-        Date.now();
-
-    await loadNASDAQSymbols();
-
-    const quotes =
-        await loadUSLive();
-
-    const candidates = [];
-
-    for (
-        const q of quotes
-    ) {
-
-        const rawCode =
-            q.code ||
-            q.Code ||
-            "";
-
-        const code =
-            String(rawCode)
-                .replace(
-                    /\.US$/i,
-                    ""
-                )
-                .toUpperCase();
-
-        if (
-            !cache.nasdaqSymbols.has(code)
-        ) {
-
-            continue;
-        }
-
-        const price =
-            Number(q.close);
-
-        if (
-            !Number.isFinite(price) ||
-            price < MIN_US_PRICE
-        ) {
-
-            continue;
-        }
-
-        const change =
-            Number(
-                q.change_p
-            );
-
-        candidates.push({
-
-            symbol:
-                `${code}.US`,
-
-            price,
-
-            change:
-
-                Number.isFinite(change)
-                    ? change
-                    : 0,
-
-            volume:
-                Number(q.volume) || 0
-        });
-    }
-
-
-    // ========================================================
-    // ترتيب أولي
-    // ========================================================
-
-    candidates.sort(
-        (a, b) =>
-            (
-                Math.abs(b.change) +
-                Math.log10(
-                    Math.max(
-                        b.volume,
-                        1
-                    )
-                ) / 10
-            ) -
-            (
-                Math.abs(a.change) +
-                Math.log10(
-                    Math.max(
-                        a.volume,
-                        1
-                    )
-                ) / 10
-            )
-    );
-
-
-    // أفضل 10 فقط للتحليل التاريخي
-    const selected =
-        candidates.slice(
-            0,
-            10
-        );
-
-    const results = [];
-
-    for (
-        const item of selected
-    ) {
-
-        try {
-
-            const candles =
-                await getHistory(
-                    item.symbol
-                );
-
-            const analysis =
-                analyze(
-                    item.symbol,
-                    candles,
-                    "NASDAQ",
-                    item.price,
-                    item.change
-                );
-
-            if (
-                analysis &&
-                (
-                    analysis.signal ===
-                        "شراء قوي" ||
-                    analysis.signal ===
-                        "شراء"
-                )
-            ) {
-
-                results.push(
-                    analysis
-                );
-            }
-
-        } catch (error) {
-
-            console.log(
-                `⚠️ NASDAQ ${item.symbol}: ${error.message}`
-            );
-        }
-    }
+    const symbols =
+        await getExchangeSymbols("US");
 
     console.log(
-        `🇺🇸 NASDAQ: ${results.length} إشارة`
+        `🇺🇸 عدد الرموز الأمريكية: ${symbols.length}`
     );
 
-    return results;
+    // جميع الرموز — لا يوجد MAX_SYMBOLS
+    return scanUniverse(
+        symbols,
+        "US"
+    );
 }
 
-
 // ============================================================
-// 🇸🇦 فحص تاسي
-// ============================================================
-
-async function scanTASI() {
-
-    console.log(
-        "🇸🇦 بدء فحص تاسي..."
-    );
-
-    lastScan.tasi =
-        Date.now();
-
-    const rows =
-        await loadTASI();
-
-    const candidates =
-        rows
-            .map(
-                row => {
-
-                    const code =
-                        row.code ||
-                        row.Code ||
-                        "";
-
-                    const close =
-                        Number(
-                            row.close
-                        );
-
-                    const change =
-                        Number(
-                            row.change_p
-                        );
-
-                    const volume =
-                        Number(
-                            row.volume
-                        ) || 0;
-
-                    return {
-
-                        symbol:
-                            String(code)
-                                .includes(".")
-                                ? String(code)
-                                : `${code}.SR`,
-
-                        price:
-                            close,
-
-                        change:
-                            Number.isFinite(change)
-                                ? change
-                                : 0,
-
-                        volume
-                    };
-                }
-            )
-            .filter(
-                x =>
-                    Number.isFinite(
-                        x.price
-                    ) &&
-                    x.price > 0
-            )
-            .sort(
-                (a, b) =>
-                    Math.abs(b.change) -
-                    Math.abs(a.change)
-            )
-            .slice(
-                0,
-                10
-            );
-
-    const results = [];
-
-    for (
-        const item of candidates
-    ) {
-
-        try {
-
-            const candles =
-                await getHistory(
-                    item.symbol
-                );
-
-            const analysis =
-                analyze(
-                    item.symbol,
-                    candles,
-                    "TASI",
-                    item.price,
-                    item.change
-                );
-
-            if (
-                analysis &&
-                (
-                    analysis.signal ===
-                        "شراء قوي" ||
-                    analysis.signal ===
-                        "شراء"
-                )
-            ) {
-
-                results.push(
-                    analysis
-                );
-            }
-
-        } catch (error) {
-
-            console.log(
-                `⚠️ TASI ${item.symbol}: ${error.message}`
-            );
-        }
-    }
-
-    console.log(
-        `🇸🇦 تاسي: ${results.length} إشارة`
-    );
-
-    return results;
-}
-
-
-// ============================================================
-// 🪙 فحص العملات
+// 🪙 العملات الرقمية
 // ============================================================
 
 async function scanCrypto() {
@@ -1404,565 +804,407 @@ async function scanCrypto() {
         "🪙 بدء فحص العملات الرقمية..."
     );
 
-    lastScan.crypto =
-        Date.now();
+    const symbols =
+        await getExchangeSymbols("CC");
 
-    const rows =
-        await loadCrypto();
+    console.log(
+        `🪙 عدد العملات: ${symbols.length}`
+    );
 
-    const candidates =
-        rows
-            .map(
-                row => {
+    return scanUniverse(
+        symbols,
+        "CRYPTO"
+    );
+}
 
-                    const code =
-                        row.code ||
-                        row.Code ||
-                        "";
+// ============================================================
+// 🔎 فحص قائمة كاملة
+// ============================================================
 
-                    const close =
-                        Number(
-                            row.close
-                        );
-
-                    const change =
-                        Number(
-                            row.change_p
-                        );
-
-                    const volume =
-                        Number(
-                            row.volume
-                        ) || 0;
-
-                    return {
-
-                        symbol:
-                            String(code)
-                                .includes(".")
-                                ? String(code)
-                                : `${code}.CC`,
-
-                        price:
-                            close,
-
-                        change:
-                            Number.isFinite(change)
-                                ? change
-                                : 0,
-
-                        volume
-                    };
-                }
-            )
-            .filter(
-                x =>
-                    Number.isFinite(
-                        x.price
-                    ) &&
-                    x.price > 0
-            )
-            .sort(
-                (a, b) =>
-                    Math.abs(b.change) -
-                    Math.abs(a.change)
-            )
-            .slice(
-                0,
-                10
-            );
+async function scanUniverse(symbols, exchange) {
 
     const results = [];
 
-    for (
-        const item of candidates
-    ) {
+    /*
+    لا يوجد حد MAX_SYMBOLS.
+    لكن نعمل بالتتابع حتى لا نضرب EODHD
+    بعشرات الطلبات في نفس اللحظة.
+    */
+
+    for (const item of symbols) {
+
+        const symbol =
+            typeof item === "string"
+                ? item
+                : item.Code || item.code;
+
+        if (!symbol) {
+            continue;
+        }
 
         try {
 
-            const candles =
-                await getHistory(
-                    item.symbol
+            const result =
+                await analyzeSymbol(
+                    symbol,
+                    exchange
                 );
 
-            const analysis =
-                analyze(
-                    item.symbol,
-                    candles,
-                    "CRYPTO",
-                    item.price,
-                    item.change
-                );
+            if (result) {
 
-            if (
-                analysis &&
-                (
-                    analysis.signal ===
-                        "شراء قوي" ||
-                    analysis.signal ===
-                        "شراء"
-                )
-            ) {
+                results.push(result);
 
-                results.push(
-                    analysis
-                );
+                // نرسل الإشارة فور العثور عليها
+                if (
+                    result.signal !== "⚪ محايد"
+                ) {
+                    await notifySignal(result);
+                }
             }
 
-        } catch (error) {
+        } catch (err) {
 
             console.log(
-                `⚠️ CRYPTO ${item.symbol}: ${error.message}`
+                `⚠️ ${exchange} ${symbol}: ${err.message}`
             );
         }
-    }
 
-    console.log(
-        `🪙 العملات: ${results.length} إشارة`
-    );
+        // تهدئة بسيطة للطلبات
+        await sleep(150);
+    }
 
     return results;
 }
 
-
 // ============================================================
-// 📩 رسالة الإشارة
+// ⏳ تأخير
 // ============================================================
 
-function formatSignal(
-    x
-) {
-
-    let text = "";
-
-    text +=
-        "🤖 AI PRO MAX 💀🚀\n";
-
-    text +=
-        "━━━━━━━━━━━━━━━━━━\n";
-
-    text +=
-        `📊 السوق: ${x.market}\n`;
-
-    text +=
-        `🔹 الرمز: ${x.symbol}\n`;
-
-    text +=
-        `💰 السعر: ${Number(x.price).toFixed(4)}\n`;
-
-    text +=
-        `🚦 الإشارة: ${x.signal}\n`;
-
-    if (
-        Number.isFinite(
-            x.changePercent
-        )
-    ) {
-
-        text +=
-            `📊 التغير: ${x.changePercent.toFixed(2)}%\n`;
-    }
-
-    if (
-        Number.isFinite(
-            x.emaFast
-        )
-    ) {
-
-        text +=
-            `📈 EMA10: ${x.emaFast.toFixed(4)}\n`;
-    }
-
-    if (
-        Number.isFinite(
-            x.ema50
-        )
-    ) {
-
-        text +=
-            `📈 EMA50: ${x.ema50.toFixed(4)}\n`;
-    }
-
-    if (
-        Number.isFinite(
-            x.ema200
-        )
-    ) {
-
-        text +=
-            `📈 EMA200: ${x.ema200.toFixed(4)}\n`;
-    }
-
-    if (
-        Number.isFinite(
-            x.atr
-        )
-    ) {
-
-        text +=
-            `📏 ATR14: ${x.atr.toFixed(4)}\n`;
-    }
-
-    if (
-        Number.isFinite(
-            x.support
-        )
-    ) {
-
-        text +=
-            `🟢 الدعم: ${x.support.toFixed(4)}\n`;
-    }
-
-    if (
-        Number.isFinite(
-            x.resistance
-        )
-    ) {
-
-        text +=
-            `🔴 المقاومة: ${x.resistance.toFixed(4)}\n`;
-    }
-
-    if (
-        Number.isFinite(
-            x.liquidity
-        )
-    ) {
-
-        text +=
-            `💧 قوة السيولة: ${x.liquidity.toFixed(2)}x\n`;
-    }
-
-    if (
-        x.targets &&
-        x.targets.length
-    ) {
-
-        text +=
-            "\n🎯 أهداف ATR:\n";
-
-        for (
-            const target
-            of x.targets
-        ) {
-
-            text +=
-                `${target.name}: ${target.price.toFixed(4)}\n`;
-        }
-    }
-
-    text +=
-        "\n━━━━━━━━━━━━━━━━━━\n";
-
-    text +=
-        "⚡ فحص تلقائي كل دقيقتين";
-
-    return text;
+function sleep(ms) {
+    return new Promise(resolve =>
+        setTimeout(resolve, ms)
+    );
 }
 
+// ============================================================
+// 🧠 منع تكرار الإشارات
+// ============================================================
+
+const sentSignals = new Map();
+
+function signalKey(result) {
+
+    return [
+        result.exchange,
+        result.symbol,
+        result.signal
+    ].join(":");
+}
 
 // ============================================================
-// 📤 إرسال Telegram
+// 📤 إرسال الإشارة
 // ============================================================
 
-async function sendResults(
-    results
-) {
+async function notifySignal(result) {
 
-    if (!bot) {
+    if (!CHAT_IDS.size) {
+        console.log(
+            "ℹ️ لا توجد محادثة Telegram مسجلة حتى الآن"
+        );
         return;
     }
 
-    const ids =
-        new Set(
-            subscribers
-        );
+    const key = signalKey(result);
+
+    const old = sentSignals.get(key);
+
+    const now = Date.now();
 
     if (
-        TELEGRAM_CHAT_ID
+        old &&
+        now - old < SIGNAL_MEMORY_TIME
     ) {
-
-        ids.add(
-            String(
-                TELEGRAM_CHAT_ID
-            )
-        );
-    }
-
-    if (!ids.size) {
-
-        console.log(
-            "ℹ️ لا يوجد Telegram Chat مسجل"
-        );
-
         return;
     }
 
-    const selected =
-        results
-            .sort(
-                (a, b) =>
-                    b.liquidity -
-                    a.liquidity
-            )
-            .slice(
-                0,
-                20
-            );
+    sentSignals.set(key, now);
 
-    for (
-        const item
-        of selected
-    ) {
+    const country =
+        result.exchange === "TASI"
+            ? "🇸🇦 تاسي"
+            : result.exchange === "US"
+                ? "🇺🇸 الأمريكي"
+                : "🪙 العملات الرقمية";
 
-        const message =
-            formatSignal(
-                item
-            );
+    let text =
 
-        for (
-            const chatId
-            of ids
-        ) {
+`🤖 AI PRO MAX 💀🚀
 
-            try {
+${country}
 
-                await bot.sendMessage(
-                    chatId,
-                    message
-                );
+📊 الرمز: ${result.symbol}
+💰 السعر: ${money(result.price)}
 
-            } catch (error) {
+${result.signal}
 
-                console.error(
-                    "❌ Telegram:",
-                    error.message
-                );
+🧠 الاتجاه:
+${result.trend.direction}
+
+💪 قوة الاتجاه:
+${result.trend.strength}%
+
+📏 ATR(14):
+${money(result.atr)}
+
+💧 السيولة:
+${result.liquidity.strength}%
+
+📊 حجم التداول:
+${bigNumber(result.liquidity.volume)}
+
+📍 الدعم:
+${money(result.support)}
+
+📍 المقاومة:
+${money(result.resistance)}
+`;
+
+    if (result.targets.length) {
+
+        text +=
+`
+🎯 أهداف ATR الديناميكية:
+
+`;
+
+        for (const target of result.targets) {
+
+            if (result.trend.bullish) {
+
+                text +=
+`🟢 الهدف ${target.number}: ${money(target.price)}
+`;
+
+            } else if (result.trend.bearish) {
+
+                text +=
+`🔴✓ الهدف ${target.number}: ${money(target.price)}
+`;
             }
         }
     }
+
+    text +=
+`
+⏱ الفحص: تلقائي
+🤖 AI PRO MAX
+`;
+
+    for (const chatId of CHAT_IDS) {
+
+        try {
+
+            await bot.sendMessage(
+                chatId,
+                text
+            );
+
+        } catch (err) {
+
+            console.error(
+                `❌ Telegram ${chatId}:`,
+                err.message
+            );
+        }
+    }
 }
 
+// ============================================================
+// 📰 الأخبار عند الحاجة
+// ============================================================
+
+async function sendNews(symbol, exchange) {
+
+    if (!CHAT_IDS.size) {
+        return;
+    }
+
+    const news =
+        await getNews(
+            symbol,
+            exchange
+        );
+
+    if (!news.length) {
+        return;
+    }
+
+    let text =
+`📰 أخبار ${symbol}
+
+`;
+
+    for (const item of news) {
+
+        text +=
+`• ${item.title}
+المصدر: ${item.source}
+
+`;
+    }
+
+    for (const chatId of CHAT_IDS) {
+
+        try {
+
+            await bot.sendMessage(
+                chatId,
+                text
+            );
+
+        } catch (err) {
+
+            console.error(
+                "❌ إرسال الأخبار:",
+                err.message
+            );
+        }
+    }
+}
 
 // ============================================================
-// 🚀 دورة الفحص
+// 🔄 دورة الفحص
 // ============================================================
 
-async function fullScan() {
+let scanning = false;
 
-    if (running) {
+async function scanCycle() {
+
+    if (scanning) {
 
         console.log(
-            "⏳ يوجد فحص سابق يعمل..."
+            "⏳ توجد دورة فحص قيد التشغيل"
         );
 
         return;
     }
 
-    running = true;
+    scanning = true;
 
+    console.log("");
     console.log(
-        "\n🚀 AI PRO MAX — بدء دورة فحص جديدة"
+        "🚀 AI PRO MAX — بدء دورة فحص جديدة"
     );
+    console.log(
+        new Date().toLocaleString("ar-SA")
+    );
+
+    let totalSignals = 0;
 
     try {
 
-        const allResults = [];
-
-
-        // 🇸🇦 TASI
-
+        // 🇸🇦
         try {
 
             const tasi =
                 await scanTASI();
 
-            allResults.push(
-                ...tasi
-            );
+            totalSignals += tasi.length;
 
-        } catch (error) {
+        } catch (err) {
 
             console.error(
                 "❌ خطأ تاسي:",
-                error.message
+                err.message
             );
         }
 
-
-        // 🇺🇸 NASDAQ
-
+        // 🇺🇸
         try {
 
             const us =
                 await scanUS();
 
-            allResults.push(
-                ...us
-            );
+            totalSignals += us.length;
 
-        } catch (error) {
+        } catch (err) {
 
             console.error(
                 "❌ خطأ الأمريكي:",
-                error.message
+                err.message
             );
         }
 
-
-        // 🪙 CRYPTO
-
+        // 🪙
         try {
 
             const crypto =
                 await scanCrypto();
 
-            allResults.push(
-                ...crypto
-            );
+            totalSignals += crypto.length;
 
-        } catch (error) {
+        } catch (err) {
 
             console.error(
                 "❌ خطأ العملات:",
-                error.message
+                err.message
             );
         }
 
-
-        console.log(
-            `✅ نهاية الدورة — ${allResults.length} إشارة`
-        );
-
-        await sendResults(
-            allResults
-        );
-
-    } catch (error) {
-
-        console.error(
-            "❌ خطأ دورة الفحص:",
-            error.message
-        );
-
     } finally {
 
-        running =
-            false;
+        console.log(
+            `✅ نهاية الدورة — ${totalSignals} نتيجة`
+        );
+
+        scanning = false;
     }
 }
 
+// ============================================================
+// ▶️ التشغيل
+// ============================================================
+
+setTimeout(() => {
+
+    scanCycle();
+
+}, 3000);
 
 // ============================================================
-// 🌐 RAILWAY SERVER
+// 🔄 الفحص التلقائي
 // ============================================================
 
-const app =
-    express();
+setInterval(() => {
 
+    scanCycle();
 
-app.get(
-    "/",
-    (req, res) => {
+}, SCAN_INTERVAL);
 
-        res.json({
+// ============================================================
+// 🛡️ أخطاء عامة
+// ============================================================
 
-            bot:
-                "AI PRO MAX 💀🚀",
+process.on("unhandledRejection", err => {
 
-            status:
-                "online",
+    console.error(
+        "❌ unhandledRejection:",
+        err
+    );
+});
 
-            telegram:
-                !!bot,
+process.on("uncaughtException", err => {
 
-            eodhd:
-                !!EODHD_TOKEN,
+    console.error(
+        "❌ uncaughtException:",
+        err
+    );
+});
 
-            automatic:
-                true,
-
-            scanEveryMinutes:
-                2,
-
-            markets: {
-
-                tasi:
-                    !!TASI_CONFIG ||
-                    !!EODHD_TOKEN,
-
-                nasdaq:
-                    !!US_CONFIG ||
-                    !!EODHD_TOKEN,
-
-                crypto:
-                    !!CRYPTO_CONFIG ||
-                    !!EODHD_TOKEN
-            },
-
-            cache: {
-
-                nasdaq:
-                    cache.nasdaqSymbols.size,
-
-                tasi:
-                    cache.tasiRows.length,
-
-                crypto:
-                    cache.cryptoRows.length
-            },
-
-            lastScan
-        });
-    }
+console.log(
+    "⚡ التشغيل التلقائي: ON"
 );
 
-
-app.get(
-    "/health",
-    (req, res) => {
-
-        res
-            .status(200)
-            .send(
-                "AI PRO MAX ONLINE"
-            );
-    }
-);
-
-
-app.listen(
-    PORT,
-    () => {
-
-        console.log(
-            `🌐 الخادم يعمل على المنفذ ${PORT}`
-        );
-
-        console.log(
-            "🇸🇦 TASI: جاهز"
-        );
-
-        console.log(
-            "🇺🇸 NASDAQ: جاهز"
-        );
-
-        console.log(
-            "🪙 CRYPTO: جاهز"
-        );
-
-        console.log(
-            "⏱️ الفحص التلقائي: كل دقيقتين"
-        );
-
-        setTimeout(
-            fullScan,
-            10000
-        );
-
-        setInterval(
-            fullScan,
-            SCAN_INTERVAL
-        );
-    }
+console.log(
+    "⏱ دورة الفحص: كل 5 دقائق"
 );
