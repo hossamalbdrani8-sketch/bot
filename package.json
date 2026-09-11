@@ -1,7 +1,7 @@
 
 {
   "name": "ai-pro-max",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -9,12 +9,6 @@
   },
   "engines": {
     "node": ">=18"
-  },
-  "config": {
-    "tasi": "TASI_CONFIG",
-    "us": "US_CONFIG",
-    "crypto": "CRYPTO_CONFIG",
-    "eodhd": "EODHD_API_KEY"
   },
   "dependencies": {
     "express": "^5.1.0",
