@@ -10,6 +10,12 @@
   "engines": {
     "node": ">=18"
   },
+  "config": {
+    "tasi": "TASI_CONFIG",
+    "us": "US_CONFIG",
+    "crypto": "CRYPTO_CONFIG",
+    "eodhd": "EODHD_API_KEY"
+  },
   "dependencies": {
     "express": "^5.1.0",
     "node-telegram-bot-api": "^0.66.0"
