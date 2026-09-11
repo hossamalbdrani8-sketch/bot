@@ -1,7 +1,7 @@
-
 {
-  "name": "ai-pro-max-test",
+  "name": "ai-pro-max-telegram-scanner",
   "version": "1.0.0",
+  "description": "AI PRO MAX - TASI + US/NASDAQ + Crypto Autonomous Telegram Scanner",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
