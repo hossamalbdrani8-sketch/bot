@@ -1,308 +1,352 @@
 
-// ============================================================
-// 📊 CLEAN PURE STOCK SCANNER BOT (TASI & US)
-// ============================================================
-// ✅ هذه النسخة جديدة ونظيفة تماماً - لا يوجد شرط قناة
-// ============================================================
+# ============================================================
+# 📊 CLEAN PURE STOCK SCANNER BOT (TASI & US) - Python Version
+# ============================================================
+# ✅ هذه النسخة جديدة ونظيفة تماماً - لا يوجد شرط قناة
+# ============================================================
 
-"use strict";
+import os
+import time
+import math
+import requests
+import telebot
+from flask import Flask
+from datetime import datetime
+from threading import Thread
 
-const express = require("express");
-const TelegramBot = require("node-telegram-bot-api");
+# ----------------------------------------------
+# ⚙️ الإعدادات والمتغيرات البيئية
+# ----------------------------------------------
+TASI_TOKEN = os.environ.get("TASI_TOKEN")
+US_TOKEN = os.environ.get("US_TOKEN")
+EODHD_API_KEY = os.environ.get("EODHD_API_KEY")
+PORT = int(os.environ.get("PORT", 3000))
+REQUEST_DELAY_SEC = 0.3
+UPDATE_INTERVAL_MIN = 3
 
-const TASI_TOKEN = process.env.TASI_TOKEN;
-const US_TOKEN = process.env.US_TOKEN;
-const EODHD_API_KEY = process.env.EODHD_API_KEY;
+app = Flask(__name__)
 
-const PORT = Number(process.env.PORT || 3000);
-const REQUEST_DELAY_MS = 300;
-const UPDATE_INTERVAL_MIN = 3;
+# إعداد البوتات
+tasi_bot = telebot.TeleBot(TASI_TOKEN, threaded=False)
+us_bot = telebot.TeleBot(US_TOKEN, threaded=False)
 
-const app = express();
-app.use(express.json());
+tasi_subscribers = set()
+us_subscribers = set()
 
-const tasiBot = new TelegramBot(TASI_TOKEN, { polling: false });
-const usBot = new TelegramBot(US_TOKEN, { polling: false });
+tasi_scan_running = False
+us_scan_running = False
 
-const tasiSubscribers = new Set();
-const usSubscribers = new Set();
+print("🚀 THIS IS THE NEW CLEAN PYTHON VERSION WITHOUT CHANNEL CHECK")
+print("✅ TASI_TOKEN exists:", bool(TASI_TOKEN))
+print("✅ US_TOKEN exists:", bool(US_TOKEN))
+print("✅ EODHD_API_KEY exists:", bool(EODHD_API_KEY))
 
-let tasiScanRunning = false;
-let usScanRunning = false;
+# ----------------------------------------------
+# 🛠️ الدوال المساعدة
+# ----------------------------------------------
+def sleep_ms(ms):
+    time.sleep(ms / 1000.0)
 
-// ----------------------------------------------
-// 🟢 رسالة تمييز تظهر في سجلات Railway
-// ----------------------------------------------
-console.log("🚀 THIS IS THE NEW CLEAN VERSION WITHOUT CHANNEL CHECK");
-console.log("✅ TASI_TOKEN exists:", !!TASI_TOKEN);
-console.log("✅ US_TOKEN exists:", !!US_TOKEN);
-console.log("✅ EODHD_API_KEY exists:", !!EODHD_API_KEY);
+def fetch_eodhd(url):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    response = requests.get(url, headers=headers, timeout=15)
+    if response.status_code != 200:
+        raise Exception(f"EODHD HTTP {response.status_code}")
+    return response.json()
 
-app.get("/", (req, res) => {
-  res.status(200).send("🚀 Clean Stock Scanner Bot is Online");
-});
+def get_exchange_symbols(exchange):
+    url = f"https://eodhd.com/api/exchange-symbol-list/{exchange}?api_token={EODHD_API_KEY}&fmt=json"
+    data = fetch_eodhd(url)
+    if not isinstance(data, list):
+        raise Exception("Invalid symbols list")
+    
+    symbols = []
+    for item in data:
+        type_str = str(item.get("Type", "")).lower()
+        if "stock" in type_str or "common" in type_str:
+            code = str(item.get("Code", "")).strip()
+            if code:
+                symbols.append(code)
+    return symbols
 
-app.listen(PORT, async () => {
-  console.log(`🌐 Server running on port ${PORT}`);
-  try {
-    // إلغاء أي Webhook عالق بالقوة
-    await tasiBot.deleteWebHook({ drop_pending_updates: true });
-    await usBot.deleteWebHook({ drop_pending_updates: true });
-    console.log("✅ Webhooks deleted successfully.");
+def calculate_atr(highs, lows, closes, period=14):
+    if len(highs) < period + 1:
+        return 0.0
+    tr_list = []
+    for i in range(1, len(highs)):
+        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+        tr_list.append(tr)
+    recent_tr = tr_list[-period:]
+    return sum(recent_tr) / len(recent_tr)
 
-    await tasiBot.startPolling();
-    await usBot.startPolling();
-    console.log("✅ Telegram Bots started polling cleanly.");
-  } catch (e) {
-    console.log("⚠️ Polling notice:", e.message);
-  }
-});
+def analyze_liquidity(closes, volumes):
+    length = min(len(closes), len(volumes))
+    start = max(1, length - 10)
+    buy_vol, sell_vol, neut_vol = 0, 0, 0
+    
+    for i in range(start, length):
+        prev = closes[i-1]
+        curr = closes[i]
+        vol = volumes[i] if i < len(volumes) else 0
+        if curr > prev: buy_vol += vol
+        elif curr < prev: sell_vol += vol
+        else: neut_vol += vol
+        
+    total = buy_vol + sell_vol + neut_vol
+    if total <= 0:
+        return {"buy_ratio": 50, "label": "⚪ سيولة متوازنة"}
+        
+    buy_ratio = (buy_vol / total) * 100
+    sell_ratio = (sell_vol / total) * 100
+    
+    label = "⚪ سيولة متوازنة"
+    if buy_ratio >= 65: label = "🟢 دخول سيولة قوية"
+    elif sell_ratio >= 65: label = "🔴 خروج سيولة قوية"
+    elif buy_ratio >= 53: label = "🟢 دخول سيولة"
+    elif sell_ratio >= 53: label = "🔴 خروج سيولة"
+    
+    return {"buy_ratio": buy_ratio, "label": label}
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+def ai_pro_max_trend(closes, highs, lows):
+    if not closes:
+        return {"direction": "NEUTRAL", "label": "⚖️ اتجاه عرضي متوازن"}
+        
+    current_price = closes[-1]
+    short_len = min(len(closes), 14)
+    momentum_score = 0
+    
+    for i in range(len(closes) - short_len, len(closes)):
+        if closes[i] > closes[i-1]: momentum_score += 1
+        elif closes[i] < closes[i-1]: momentum_score -= 1
+        
+    recent_high = max(highs[-10:]) if len(highs) >= 10 else current_price
+    recent_low = min(lows[-10:]) if len(lows) >= 10 else current_price
+    
+    if momentum_score >= 3 and current_price >= recent_low * 1.02:
+        return {"direction": "UP", "label": "🚀 اتجاه صاعد"}
+    elif momentum_score <= -3 or current_price <= recent_high * 0.98:
+        return {"direction": "DOWN", "label": "⚠️ اتجاه هابط"}
+        
+    return {"direction": "NEUTRAL", "label": "⚖️ اتجاه عرضي متوازن"}
 
-async function fetchEodhd(url) {
-  const response = await fetch(url, {
-    headers: { "User-Agent": "Mozilla/5.0" }
-  });
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`EODHD HTTP ${response.status}`);
-  }
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error("Invalid JSON");
-  }
-}
+def calculate_support_resistance(highs, lows, price):
+    pivot_highs, pivot_lows = [], []
+    for i in range(2, len(highs) - 2):
+        if highs[i] > highs[i-1] and highs[i] > highs[i+1]:
+            pivot_highs.append(highs[i])
+        if lows[i] < lows[i-1] and lows[i] < lows[i+1]:
+            pivot_lows.append(lows[i])
+            
+    supports = sorted([l for l in pivot_lows if l < price], reverse=True)[:2]
+    resistances = sorted([h for h in pivot_highs if h > price])[:2]
+    
+    if not supports: supports = [price * 0.95]
+    if not resistances: resistances = [price * 1.05]
+    
+    return {"supports": supports, "resistances": resistances}
 
-async function getExchangeSymbols(exchange) {
-  const url = `https://eodhd.com/api/exchange-symbol-list/${exchange}?api_token=${EODHD_API_KEY}&fmt=json`;
-  const data = await fetchEodhd(url);
-  if (!Array.isArray(data)) throw new Error("Invalid symbols list");
-  return data
-    .filter(item => {
-      const type = String(item.Type || "").toLowerCase();
-      return type.includes("stock") || type.includes("common");
-    })
-    .map(item => String(item.Code || "").trim())
-    .filter(Boolean);
-}
-
-async function calculateATR(highs, lows, closes, period = 14) {
-  if (highs.length < period + 1) return 0;
-  let trList = [];
-  for (let i = 1; i < highs.length; i++) {
-    const tr = Math.max(highs[i] - lows[i], Math.abs(highs[i] - closes[i - 1]), Math.abs(lows[i] - closes[i - 1]));
-    trList.push(tr);
-  }
-  const recentTr = trList.slice(-period);
-  return recentTr.reduce((a, b) => a + b, 0) / recentTr.length;
-}
-
-function analyzeLiquidity(closes, volumes) {
-  const len = Math.min(closes.length, volumes.length);
-  const start = Math.max(1, len - 10);
-  let buyVol = 0, sellVol = 0, neutVol = 0;
-  for (let i = start; i < len; i++) {
-    const prev = closes[i - 1];
-    const curr = closes[i];
-    const vol = volumes[i] || 0;
-    if (curr > prev) buyVol += vol;
-    else if (curr < prev) sellVol += vol;
-    else neutVol += vol;
-  }
-  const total = buyVol + sellVol + neutVol;
-  if (total <= 0) return { buyRatio: 50, sellRatio: 50, label: "⚪ سيولة متوازنة" };
-  const buyRatio = (buyVol / total) * 100;
-  const sellRatio = (sellVol / total) * 100;
-  let label = "⚪ سيولة متوازنة";
-  if (buyRatio >= 65) label = "🟢 دخول سيولة قوية";
-  else if (sellRatio >= 65) label = "🔴 خروج سيولة قوية";
-  else if (buyRatio >= 53) label = "🟢 دخول سيولة";
-  else if (sellRatio >= 53) label = "🔴 خروج سيولة";
-  return { buyRatio, sellRatio, label };
-}
-
-function aiProMaxTrend(closes, highs, lows) {
-  const currentPrice = closes[closes.length - 1];
-  const shortLen = Math.min(closes.length, 14);
-  let momentumScore = 0;
-  
-  for (let i = closes.length - shortLen; i < closes.length; i++) {
-    if (closes[i] > closes[i - 1]) momentumScore++;
-    else if (closes[i] < closes[i - 1]) momentumScore--;
-  }
-
-  const recentHigh = Math.max(...highs.slice(-10));
-  const recentLow = Math.min(...lows.slice(-10));
-  
-  if (momentumScore >= 3 && currentPrice >= recentLow * 1.02) {
-    return { direction: "UP", label: "🚀 اتجاه صاعد" };
-  } else if (momentumScore <= -3 || currentPrice <= recentHigh * 0.98) {
-    return { direction: "DOWN", label: "⚠️ اتجاه هابط" };
-  }
-  return { direction: "NEUTRAL", label: "⚖️ اتجاه عرضي متوازن" };
-}
-
-function calculateSupportResistance(highs, lows, price) {
-  const pivotHighs = [];
-  const pivotLows = [];
-  for (let i = 2; i < highs.length - 2; i++) {
-    if (highs[i] > highs[i - 1] && highs[i] > highs[i + 1]) pivotHighs.push(highs[i]);
-    if (lows[i] < lows[i - 1] && lows[i] < lows[i + 1]) pivotLows.push(lows[i]);
-  }
-  const supports = pivotLows.filter(l => l < price).sort((a, b) => b - a).slice(0, 2);
-  const resistances = pivotHighs.filter(h => h > price).sort((a, b) => a - b).slice(0, 2);
-  return {
-    supports: supports.length ? supports : [price * 0.95],
-    resistances: resistances.length ? resistances : [price * 1.05]
-  };
-}
-
-async function getStockData(symbol, exchangeSuffix, minPrice) {
-  const formattedSymbol = `${symbol.replace(/\./g, "-")}.${exchangeSuffix}`;
-  const url = `https://eodhistoricaldata.com/api/eod/${formattedSymbol}?api_token=${EODHD_API_KEY}&fmt=json&period=d&limit=60`;
-  
-  const data = await fetchEodhd(url);
-  if (!Array.isArray(data) || data.length < 20) throw new Error("بيانات غير كافية");
-
-  const closes = data.map(i => Number(i.close)).filter(Number.isFinite);
-  const highs = data.map(i => Number(i.high)).filter(Number.isFinite);
-  const lows = data.map(i => Number(i.low)).filter(Number.isFinite);
-  const volumes = data.map(i => Number(i.volume)).filter(Number.isFinite);
-
-  const price = closes[closes.length - 1];
-  if (!Number.isFinite(price) || price < minPrice) throw new Error("السعر أقل");
-
-  const prevClose = closes[closes.length - 2] || price;
-  const changePercent = ((price - prevClose) / prevClose) * 100;
-
-  const trendObj = aiProMaxTrend(closes, highs, lows);
-  const atr = await calculateATR(highs, lows, closes, 14);
-  const liquidity = analyzeLiquidity(closes, volumes);
-  const levels = calculateSupportResistance(highs, lows, price);
-
-  let targets = [];
-  const icon = trendObj.direction === "UP" ? "✅" : "🔴";
-  
-  for (let i = 1; i <= 4; i++) {
-    let targetPrice = trendObj.direction === "UP" ? price + (atr * i * 0.6) : price - (atr * i * 0.6);
-    let reached = trendObj.direction === "UP" ? price >= targetPrice : price <= targetPrice;
-    targets.push({
-      level: i,
-      price: targetPrice,
-      status: reached ? `${icon} (تحقق)` : `⏳ (قيد الانتظار)`
-    });
-  }
-
-  return {
-    symbol,
-    price,
-    changePercent,
-    trend: trendObj.label,
-    liquidity: liquidity.label,
-    buyRatio: liquidity.buyRatio,
-    supports: levels.supports,
-    resistances: levels.resistances,
-    targets,
-    updated: new Date()
-  };
-}
-
-function buildAlertMessage(stock, marketName) {
-  let msg = `📊 *${marketName}*\n\n`;
-  msg += `📌 الرمز: *${stock.symbol}*\n`;
-  msg += `💰 السعر: *${stock.price.toFixed(2)}*\n`;
-  msg += `📈 التغير: *${stock.changePercent.toFixed(2)}%*\n\n`;
-  msg += `🤖 *${stock.trend}*\n`;
-  msg += `💧 السيولة: *${stock.liquidity}* (${stock.buyRatio.toFixed(1)}%)\n\n`;
-  
-  msg += `🎯 *الأهداف الذكية (ATR):*\n`;
-  stock.targets.forEach(t => {
-    msg += `• الهدف ${t.level}: *${t.price.toFixed(2)}* ${t.status}\n`;
-  });
-
-  msg += `\n📉 *الدعوم:* ${stock.supports.map(s => s.toFixed(2)).join(" | ")}\n`;
-  msg += `📈 *المقاومات:* ${stock.resistances.map(r => r.toFixed(2)).join(" | ")}\n\n`;
-  msg += `🕒 ${stock.updated.toLocaleTimeString("ar-SA")}`;
-  return msg;
-}
-
-async function runTasiScan() {
-  if (tasiScanRunning || tasiSubscribers.size === 0) return;
-  tasiScanRunning = true;
-  try {
-    const symbols = await getExchangeSymbols("SR");
-    for (const sym of symbols.slice(0, 10)) {
-      try {
-        const stock = await getStockData(sym, "SR", 0.01);
-        for (const chatId of tasiSubscribers) {
-          await tasiBot.sendMessage(chatId, buildAlertMessage(stock, "🇸🇦 السوق السعودي (تاسي)"), { parse_mode: "Markdown" });
-          await sleep(200);
-        }
-      } catch (e) {}
-      await sleep(REQUEST_DELAY_MS);
+def get_stock_data(symbol, exchange_suffix, min_price):
+    formatted_symbol = f"{symbol.replace('.', '-')}.{exchange_suffix}"
+    url = f"https://eodhistoricaldata.com/api/eod/{formatted_symbol}?api_token={EODHD_API_KEY}&fmt=json&period=d&limit=60"
+    
+    data = fetch_eodhd(url)
+    if not isinstance(data, list) or len(data) < 20:
+        raise Exception("بيانات غير كافية")
+        
+    closes = [float(i["close"]) for i in data if "close" in i and i["close"] is not None]
+    highs = [float(i["high"]) for i in data if "high" in i and i["high"] is not None]
+    lows = [float(i["low"]) for i in data if "low" in i and i["low"] is not None]
+    volumes = [float(i["volume"]) for i in data if "volume" in i and i["volume"] is not None]
+    
+    if not closes:
+        raise Exception("لا توجد أسعار")
+        
+    price = closes[-1]
+    if price < min_price:
+        raise Exception("السعر أقل من الحد الأدنى")
+        
+    prev_close = closes[-2] if len(closes) > 1 else price
+    change_percent = ((price - prev_close) / prev_close) * 100
+    
+    trend_obj = ai_pro_max_trend(closes, highs, lows)
+    atr = calculate_atr(highs, lows, closes, 14)
+    liquidity = analyze_liquidity(closes, volumes)
+    levels = calculate_support_resistance(highs, lows, price)
+    
+    targets = []
+    icon = "✅" if trend_obj["direction"] == "UP" else "🔴"
+    
+    for i in range(1, 5):
+        target_price = price + (atr * i * 0.6) if trend_obj["direction"] == "UP" else price - (atr * i * 0.6)
+        reached = price >= target_price if trend_obj["direction"] == "UP" else price <= target_price
+        targets.append({
+            "level": i,
+            "price": target_price,
+            "status": f"{icon} (تحقق)" if reached else "⏳ (قيد الانتظار)"
+        })
+        
+    return {
+        "symbol": symbol,
+        "price": price,
+        "change_percent": change_percent,
+        "trend": trend_obj["label"],
+        "liquidity": liquidity["label"],
+        "buy_ratio": liquidity["buy_ratio"],
+        "supports": levels["supports"],
+        "resistances": levels["resistances"],
+        "targets": targets,
+        "updated": datetime.now()
     }
-  } finally {
-    tasiScanRunning = false;
-  }
-}
 
-async function runUsScan() {
-  if (usScanRunning || usSubscribers.size === 0) return;
-  usScanRunning = true;
-  try {
-    const symbols = await getExchangeSymbols("US");
-    for (const sym of symbols.slice(0, 10)) {
-      try {
-        const stock = await getStockData(sym, "US", 0.20);
-        for (const chatId of usSubscribers) {
-          await usBot.sendMessage(chatId, buildAlertMessage(stock, "🇺🇸 السوق الأمريكي"), { parse_mode: "Markdown" });
-          await sleep(200);
-        }
-      } catch (e) {}
-      await sleep(REQUEST_DELAY_MS);
-    }
-  } finally {
-    usScanRunning = false;
-  }
-}
+def build_alert_message(stock, market_name):
+    msg = f"📊 *{market_name}*\n\n"
+    msg += f"📌 الرمز: *{stock['symbol']}*\n"
+    msg += f"💰 السعر: *{stock['price']:.2f}*\n"
+    msg += f"📈 التغير: *{stock['change_percent']:.2f}%*\n\n"
+    msg += f"🤖 *{stock['trend']}*\n"
+    msg += f"💧 السيولة: *{stock['liquidity']}* ({stock['buy_ratio']:.1f}%)\n\n"
+    msg += "🎯 *الأهداف الذكية (ATR):*\n"
+    
+    for t in stock["targets"]:
+        msg += f"• الهدف {t['level']}: *{t['price']:.2f}* {t['status']}\n"
+        
+    supports_str = " | ".join([f"{s:.2f}" for s in stock['supports']])
+    resistances_str = " | ".join([f"{r:.2f}" for r in stock['resistances']])
+    
+    msg += f"\n📉 *الدعوم:* {supports_str}\n"
+    msg += f"📈 *المقاومات:* {resistances_str}\n\n"
+    msg += f"🕒 {stock['updated'].strftime('%I:%M:%S %p')}"
+    return msg
 
-// ----------------------------------------------
-// 🟢 أوامر البوت مع رسائل ترحيب مميزة
-// ----------------------------------------------
-tasiBot.onText(/\/start|\/scan/, async msg => {
-  const chatId = msg.chat.id;
-  console.log(`📩 TASI command received from ${chatId}: ${msg.text}`); // تأكد من وصول الأمر
+# ----------------------------------------------
+# 🔄 دوال المسح
+# ----------------------------------------------
+def run_tasi_scan():
+    global tasi_scan_running
+    if tasi_scan_running or not tasi_subscribers:
+        return
+    tasi_scan_running = True
+    
+    try:
+        symbols = get_exchange_symbols("SR")
+        for sym in symbols[:10]:  # فحص أول 10 أسهم لتجنب استهلاك API
+            try:
+                stock = get_stock_data(sym, "SR", 0.01)
+                for chat_id in list(tasi_subscribers):
+                    try:
+                        tasi_bot.send_message(chat_id, build_alert_message(stock, "🇸🇦 السوق السعودي (تاسي)"), parse_mode="Markdown")
+                        sleep_ms(200)
+                    except Exception as e:
+                        print(f"TASI Send Error to {chat_id}: {e}")
+            except Exception:
+                pass
+            sleep_ms(300)
+    except Exception as e:
+        print(f"TASI Scan Error: {e}")
+    finally:
+        tasi_scan_running = False
 
-  tasiSubscribers.add(chatId);
-  // رسالة جديدة تماماً مختلفة عن القديمة
-  await tasiBot.sendMessage(
-    chatId,
-    "🟢 مرحباً! هذا البوت الجديد للسوق السعودي (بدون شرط قناة).\nجاري جلب التحليلات الفورية...",
-    { parse_mode: "Markdown" }
-  );
-  runTasiScan();
-});
+def run_us_scan():
+    global us_scan_running
+    if us_scan_running or not us_subscribers:
+        return
+    us_scan_running = True
+    
+    try:
+        symbols = get_exchange_symbols("US")
+        for sym in symbols[:10]:
+            try:
+                stock = get_stock_data(sym, "US", 0.20)
+                for chat_id in list(us_subscribers):
+                    try:
+                        us_bot.send_message(chat_id, build_alert_message(stock, "🇺🇸 السوق الأمريكي"), parse_mode="Markdown")
+                        sleep_ms(200)
+                    except Exception as e:
+                        print(f"US Send Error to {chat_id}: {e}")
+            except Exception:
+                pass
+            sleep_ms(300)
+    except Exception as e:
+        print(f"US Scan Error: {e}")
+    finally:
+        us_scan_running = False
 
-usBot.onText(/\/start|\/scan/, async msg => {
-  const chatId = msg.chat.id;
-  console.log(`📩 US command received from ${chatId}: ${msg.text}`); // تأكد من وصول الأمر
+# ----------------------------------------------
+# 🤖 معالجة أوامر البوت
+# ----------------------------------------------
+@tasi_bot.message_handler(commands=['start', 'scan'])
+def tasi_start(message):
+    chat_id = message.chat.id
+    print(f"📩 TASI command received from {chat_id}: {message.text}")
+    tasi_subscribers.add(chat_id)
+    
+    # رسالة جديدة تماماً مختلفة عن القديمة
+    tasi_bot.send_message(
+        chat_id, 
+        "🟢 مرحباً! هذا البوت الجديد للسوق السعودي (بدون شرط قناة).\nجاري جلب التحليلات الفورية...", 
+        parse_mode="Markdown"
+    )
+    run_tasi_scan()
 
-  usSubscribers.add(chatId);
-  // رسالة جديدة تماماً مختلفة عن القديمة
-  await usBot.sendMessage(
-    chatId,
-    "🟢 مرحباً! هذا البوت الجديد للسوق الأمريكي (بدون شرط قناة).\nجاري جلب التحليلات الفورية...",
-    { parse_mode: "Markdown" }
-  );
-  runUsScan();
-});
+@us_bot.message_handler(commands=['start', 'scan'])
+def us_start(message):
+    chat_id = message.chat.id
+    print(f"📩 US command received from {chat_id}: {message.text}")
+    us_subscribers.add(chat_id)
+    
+    # رسالة جديدة تماماً مختلفة عن القديمة
+    us_bot.send_message(
+        chat_id, 
+        "🟢 مرحباً! هذا البوت الجديد للسوق الأمريكي (بدون شرط قناة).\nجاري جلب التحليلات الفورية...", 
+        parse_mode="Markdown"
+    )
+    run_us_scan()
 
-// جداول التحديث التلقائي
-setInterval(runTasiScan, UPDATE_INTERVAL_MIN * 60 * 1000);
-setInterval(runUsScan, UPDATE_INTERVAL_MIN * 60 * 1000);
+# ----------------------------------------------
+# 🌐 خادم الويب (لـ Railway Health Check)
+# ----------------------------------------------
+@app.route("/")
+def home():
+    return "🚀 Clean Stock Scanner Bot is Online (Python Version)"
 
-console.log("💎 Bot Engine Running Cleanly (New Version).");
+def run_flask():
+    app.run(host="0.0.0.0", port=PORT)
+
+# ----------------------------------------------
+# ⏱️ المجدول التلقائي (كل 3 دقائق)
+# ----------------------------------------------
+def scheduler():
+    while True:
+        time.sleep(UPDATE_INTERVAL_MIN * 60)
+        print("⏰ Running scheduled scans...")
+        run_tasi_scan()
+        run_us_scan()
+
+# ----------------------------------------------
+# 🚀 نقطة البداية
+# ----------------------------------------------
+if __name__ == "__main__":
+    # 1. تشغيل خادم الويب في خيط منفصل
+    flask_thread = Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
+    # 2. تشغيل المجدول التلقائي في خيط منفصل
+    scheduler_thread = Thread(target=scheduler)
+    scheduler_thread.daemon = True
+    scheduler_thread.start()
+    
+    # 3. تشغيل البوتات
+    print("✅ Telegram Bots started polling cleanly.")
+    
+    tasi_thread = Thread(target=tasi_bot.polling, kwargs={"none_stop": True})
+    tasi_thread.daemon = True
+    tasi_thread.start()
+    
+    us_thread = Thread(target=us_bot.polling, kwargs={"none_stop": True})
+    us_thread.daemon = True
+    us_thread.start()
+    
+    # 4. إبقاء البرنامج يعمل
+    while True:
+        time.sleep(1)
