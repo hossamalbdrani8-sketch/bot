@@ -35,16 +35,17 @@ from datetime import datetime, timezone
 import aiohttp
 from aiohttp import web
 
-
 # ============================================================
-# ⚙️ CONFIG
+# ⚙️ CONFIG - التكوين الموجود في Railway
 # ============================================================
 
-EODHD_API_KEY = os.getenv("EODHD_API_KEY", "").strip()
+EODHD_API_KEY = os.getenv("API", "").strip()
 
-TASI_TOKEN = os.getenv("TASI_CONFIG", "").strip()
-US_TOKEN = os.getenv("US_CONFIG", "").strip()
-CRYPTO_TOKEN = os.getenv("CRYPTO_CONFIG", "").strip()
+TASI_TOKEN = os.getenv("TASI_TOKEN", "").strip()
+
+US_TOKEN = os.getenv("US_TOKEN", "").strip()
+
+CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN", "").strip()
 
 PORT = int(os.getenv("PORT", "8080"))
 
