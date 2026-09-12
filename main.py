@@ -1,223 +1,308 @@
 
-import os
-import time
-import requests
-import pandas as pd
-import pandas_ta as ta
-from datetime import datetime
+// ============================================================
+// 📊 CLEAN PURE STOCK SCANNER BOT (TASI & US)
+// ============================================================
+// ✅ هذه النسخة جديدة ونظيفة تماماً - لا يوجد شرط قناة
+// ============================================================
 
-# ==========================================
-# 1. الإعدادات وقراءة المتغيرات
-# ==========================================
-EODHD_API_KEY = os.environ.get("EODHD_API_KEY")
+"use strict";
 
-# دالة مساعدة لتحليل المتغيرات المجمعة (مثال: "TOKEN,CHAT_ID")
-def parse_config(config_string):
-    if not config_string:
-        return None, None
-    parts = config_string.split(',')
-    if len(parts) == 2:
-        return parts[0].strip(), parts[1].strip()
-    return None, None
+const express = require("express");
+const TelegramBot = require("node-telegram-bot-api");
 
-# قراءة الإعدادات من المتغيرات الموجودة في Railway
-tasi_token, tasi_chat_id = parse_config(os.environ.get("TASI_CONFIG"))
-us_token, us_chat_id = parse_config(os.environ.get("US_CONFIG"))
-crypto_token, crypto_chat_id = parse_config(os.environ.get("CRYPTO_CONFIG"))
+const TASI_TOKEN = process.env.TASI_TOKEN;
+const US_TOKEN = process.env.US_TOKEN;
+const EODHD_API_KEY = process.env.EODHD_API_KEY;
 
-BOTS_CONFIG = {
-    "TASI": {
-        "token": tasi_token,
-        "chat_id": tasi_chat_id,
-        "ticker": "2222.SAU", # تم تصحيح الرمز
-        "market_name": "السوق السعودي (TASI)"
-    },
-    "US": {
-        "token": us_token,
-        "chat_id": us_chat_id,
-        "ticker": "TSLA.US",
-        "market_name": "السوق الأمريكي (US)"
-    },
-    "CRYPTO": {
-        "token": crypto_token,
-        "chat_id": crypto_chat_id,
-        "ticker": "BTC-USD.CC",
-        "market_name": "العملات الرقمية (CRYPTO)"
-    }
+const PORT = Number(process.env.PORT || 3000);
+const REQUEST_DELAY_MS = 300;
+const UPDATE_INTERVAL_MIN = 3;
+
+const app = express();
+app.use(express.json());
+
+const tasiBot = new TelegramBot(TASI_TOKEN, { polling: false });
+const usBot = new TelegramBot(US_TOKEN, { polling: false });
+
+const tasiSubscribers = new Set();
+const usSubscribers = new Set();
+
+let tasiScanRunning = false;
+let usScanRunning = false;
+
+// ----------------------------------------------
+// 🟢 رسالة تمييز تظهر في سجلات Railway
+// ----------------------------------------------
+console.log("🚀 THIS IS THE NEW CLEAN VERSION WITHOUT CHANNEL CHECK");
+console.log("✅ TASI_TOKEN exists:", !!TASI_TOKEN);
+console.log("✅ US_TOKEN exists:", !!US_TOKEN);
+console.log("✅ EODHD_API_KEY exists:", !!EODHD_API_KEY);
+
+app.get("/", (req, res) => {
+  res.status(200).send("🚀 Clean Stock Scanner Bot is Online");
+});
+
+app.listen(PORT, async () => {
+  console.log(`🌐 Server running on port ${PORT}`);
+  try {
+    // إلغاء أي Webhook عالق بالقوة
+    await tasiBot.deleteWebHook({ drop_pending_updates: true });
+    await usBot.deleteWebHook({ drop_pending_updates: true });
+    console.log("✅ Webhooks deleted successfully.");
+
+    await tasiBot.startPolling();
+    await usBot.startPolling();
+    console.log("✅ Telegram Bots started polling cleanly.");
+  } catch (e) {
+    console.log("⚠️ Polling notice:", e.message);
+  }
+});
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-# ==========================================
-# 2. دالة جلب البيانات من EODHD
-# ==========================================
-def fetch_eod_data(ticker):
-    url = f"https://eodhd.com/api/eod/{ticker}?api_token={EODHD_API_KEY}&fmt=json&period=d&order=a"
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        if not data or len(data) == 0:
-            print(f"تحذير: لا توجد بيانات لـ {ticker}")
-            return None
-        df = pd.DataFrame(data)
-        return df
-    except Exception as e:
-        print(f"خطأ في جلب بيانات {ticker}: {e}")
-        return None
+async function fetchEodhd(url) {
+  const response = await fetch(url, {
+    headers: { "User-Agent": "Mozilla/5.0" }
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`EODHD HTTP ${response.status}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error("Invalid JSON");
+  }
+}
 
-# ==========================================
-# 3. دالة حساب المؤشرات والإشارات
-# ==========================================
-def calculate_indicators(df):
-    df['date'] = pd.to_datetime(df['date'])
-    df = df.sort_values('date')
-    
-    df['EMA_8'] = ta.ema(df['close'], length=8)
-    df['EMA_21'] = ta.ema(df['close'], length=21)
-    df['EMA_50'] = ta.ema(df['close'], length=50)
-    df['RSI_14'] = ta.rsi(df['close'], length=14)
-    df['ATR_14'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-    
-    df['Resistance'] = df['high'].rolling(window=20).max()
-    df['Support'] = df['low'].rolling(window=20).min()
-    df['Vol_Avg'] = df['volume'].rolling(window=20).mean()
-    df['Vol_Ratio'] = df['volume'] / df['Vol_Avg']
-    
-    return df
+async function getExchangeSymbols(exchange) {
+  const url = `https://eodhd.com/api/exchange-symbol-list/${exchange}?api_token=${EODHD_API_KEY}&fmt=json`;
+  const data = await fetchEodhd(url);
+  if (!Array.isArray(data)) throw new Error("Invalid symbols list");
+  return data
+    .filter(item => {
+      const type = String(item.Type || "").toLowerCase();
+      return type.includes("stock") || type.includes("common");
+    })
+    .map(item => String(item.Code || "").trim())
+    .filter(Boolean);
+}
 
-def generate_signal(df, ticker, market_name):
-    latest = df.iloc[-1]
-    prev_close = df.iloc[-2]['close']
-    current_price = latest['close']
-    change_pct = ((current_price - prev_close) / prev_close) * 100
-    
-    ema8 = latest['EMA_8']
-    ema21 = latest['EMA_21']
-    ema50 = latest['EMA_50']
-    rsi = latest['RSI_14']
-    atr = latest['ATR_14']
-    resistance = latest['Resistance']
-    support = latest['Support']
-    vol_ratio = latest['Vol_Ratio']
-    
-    # تحديد الاتجاه بناءً على المتوسطات و RSI
-    is_buy = ema8 > ema21 and ema21 > ema50 and rsi > 50
-    is_sell = ema8 < ema21 and ema21 < ema50 and rsi < 50
-    
-    signal_type = "شراء قوي" if is_buy else ("بيع قوي" if is_sell else "حياد / انتظار")
-    signal_emoji = "🟢" if is_buy else ("🔴" if is_sell else "⚪")
-    
-    # تحديد الملصق (Sticker) حسب الاتجاه
-    # تم استخدام ملفات GIF متحركة (ملصقات) لتمثيل السهم الصاعد والهابط
-    if is_buy:
-        sticker_id = "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExbnd5NnF4eWZ5eWZ5eWZ5eWZ5eWZ5eWZ5eWZ5eWZ5eWZ5eWZ5JmVwPXYxX2ludGVybmFsX2dpZl9ieV9pZCZjdD1n/3o7TKVUn7iM8FMEU24/giphy.gif" # سهم أخضر صاعد
-    elif is_sell:
-        sticker_id = "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExbnd5NnF4eWZ5eWZ5eWZ5eWZ5eWZ5eWZ5eWZ5eWZ5eWZ5eWZ5JmVwPXYxX2ludGVybmFsX2dpZl9ieV9pZCZjdD1n/3o7TKVUn7iM8FMEU24/giphy.gif" # سهم أحمر هابط (سيتم استبداله)
-    else:
-        sticker_id = None
-        
-    trend_text = "صاعد قوي" if is_buy else ("هابط قوي" if is_sell else "عرضي")
-    
-    signal_strength = min(100, max(0, int(abs(ema8 - ema50) / current_price * 1000 + (rsi if is_buy else 100 - rsi))))
-    
-    buy_power = int((ema8 / ema50) * 50 + (rsi / 2))
-    buy_power = min(100, max(0, buy_power))
-    sell_power = 100 - buy_power
-    
-    targets = []
-    for i in range(1, 9):
-        if is_buy:
-            tp = current_price + (atr * i)
-            tp_pct = ((tp - current_price) / current_price) * 100
-        else:
-            tp = current_price - (atr * i)
-            tp_pct = ((tp - current_price) / current_price) * 100
-        targets.append(f"TP{i}: {tp:.2f} ({tp_pct:+.1f}%)")
-    
-    tp_row1 = " | ".join(targets[:4])
-    tp_row2 = " | ".join(targets[4:])
-    
-    message = f"""
-🦅 <b>AI PRO MAX SIGNAL</b>
-🏢 {market_name}
-<b>{ticker}</b>
+async function calculateATR(highs, lows, closes, period = 14) {
+  if (highs.length < period + 1) return 0;
+  let trList = [];
+  for (let i = 1; i < highs.length; i++) {
+    const tr = Math.max(highs[i] - lows[i], Math.abs(highs[i] - closes[i - 1]), Math.abs(lows[i] - closes[i - 1]));
+    trList.push(tr);
+  }
+  const recentTr = trList.slice(-period);
+  return recentTr.reduce((a, b) => a + b, 0) / recentTr.length;
+}
 
-{signal_emoji} <b>{signal_type}</b>
+function analyzeLiquidity(closes, volumes) {
+  const len = Math.min(closes.length, volumes.length);
+  const start = Math.max(1, len - 10);
+  let buyVol = 0, sellVol = 0, neutVol = 0;
+  for (let i = start; i < len; i++) {
+    const prev = closes[i - 1];
+    const curr = closes[i];
+    const vol = volumes[i] || 0;
+    if (curr > prev) buyVol += vol;
+    else if (curr < prev) sellVol += vol;
+    else neutVol += vol;
+  }
+  const total = buyVol + sellVol + neutVol;
+  if (total <= 0) return { buyRatio: 50, sellRatio: 50, label: "⚪ سيولة متوازنة" };
+  const buyRatio = (buyVol / total) * 100;
+  const sellRatio = (sellVol / total) * 100;
+  let label = "⚪ سيولة متوازنة";
+  if (buyRatio >= 65) label = "🟢 دخول سيولة قوية";
+  else if (sellRatio >= 65) label = "🔴 خروج سيولة قوية";
+  else if (buyRatio >= 53) label = "🟢 دخول سيولة";
+  else if (sellRatio >= 53) label = "🔴 خروج سيولة";
+  return { buyRatio, sellRatio, label };
+}
 
-السعر: <code>{current_price:.2f}</code>
-التغير: <code>{change_pct:+.2f}%</code>
-قوة الإشارة: <code>{signal_strength}/100</code>
-قوة الشراء: <code>{buy_power}%</code>
-قوة البيع: <code>{sell_power}%</code>
-الحجم: <code>{vol_ratio:.1f}x</code>
+function aiProMaxTrend(closes, highs, lows) {
+  const currentPrice = closes[closes.length - 1];
+  const shortLen = Math.min(closes.length, 14);
+  let momentumScore = 0;
+  
+  for (let i = closes.length - shortLen; i < closes.length; i++) {
+    if (closes[i] > closes[i - 1]) momentumScore++;
+    else if (closes[i] < closes[i - 1]) momentumScore--;
+  }
 
-EMA 8:  <code>{ema8:.2f}</code>
-EMA 21: <code>{ema21:.2f}</code>
-EMA 50: <code>{ema50:.2f}</code>
-RSI 14: <code>{rsi:.1f}</code>
-ATR 14: <code>{atr:.2f}</code>
+  const recentHigh = Math.max(...highs.slice(-10));
+  const recentLow = Math.min(...lows.slice(-10));
+  
+  if (momentumScore >= 3 && currentPrice >= recentLow * 1.02) {
+    return { direction: "UP", label: "🚀 اتجاه صاعد" };
+  } else if (momentumScore <= -3 || currentPrice <= recentHigh * 0.98) {
+    return { direction: "DOWN", label: "⚠️ اتجاه هابط" };
+  }
+  return { direction: "NEUTRAL", label: "⚖️ اتجاه عرضي متوازن" };
+}
 
-الدعم: <code>{support:.2f}</code>
-المقاومة: <code>{resistance:.2f}</code>
-الاتجاه: {trend_text}
+function calculateSupportResistance(highs, lows, price) {
+  const pivotHighs = [];
+  const pivotLows = [];
+  for (let i = 2; i < highs.length - 2; i++) {
+    if (highs[i] > highs[i - 1] && highs[i] > highs[i + 1]) pivotHighs.push(highs[i]);
+    if (lows[i] < lows[i - 1] && lows[i] < lows[i + 1]) pivotLows.push(lows[i]);
+  }
+  const supports = pivotLows.filter(l => l < price).sort((a, b) => b - a).slice(0, 2);
+  const resistances = pivotHighs.filter(h => h > price).sort((a, b) => a - b).slice(0, 2);
+  return {
+    supports: supports.length ? supports : [price * 0.95],
+    resistances: resistances.length ? resistances : [price * 1.05]
+  };
+}
 
-🎯 <b>أهداف ATR الثمانية:</b>
-<code>{tp_row1}</code>
-<code>{tp_row2}</code>
-"""
-    return message, sticker_id
+async function getStockData(symbol, exchangeSuffix, minPrice) {
+  const formattedSymbol = `${symbol.replace(/\./g, "-")}.${exchangeSuffix}`;
+  const url = `https://eodhistoricaldata.com/api/eod/${formattedSymbol}?api_token=${EODHD_API_KEY}&fmt=json&period=d&limit=60`;
+  
+  const data = await fetchEodhd(url);
+  if (!Array.isArray(data) || data.length < 20) throw new Error("بيانات غير كافية");
 
-# ==========================================
-# 4. دالة إرسال الرسالة والملصق إلى تيليجرام
-# ==========================================
-def send_telegram_message(bot_token, chat_id, message, sticker_url=None):
-    if not bot_token or not chat_id:
-        print("خطأ: توكن البوت أو معرف المحادثة غير موجود.")
-        return
-        
-    # إرسال الرسالة النصية
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
-    try:
-        requests.post(url, json=payload)
-        print(f"تم إرسال الرسالة النصية إلى {chat_id}")
-    except Exception as e:
-        print(f"فشل إرسال الرسالة: {e}")
-        return
+  const closes = data.map(i => Number(i.close)).filter(Number.isFinite);
+  const highs = data.map(i => Number(i.high)).filter(Number.isFinite);
+  const lows = data.map(i => Number(i.low)).filter(Number.isFinite);
+  const volumes = data.map(i => Number(i.volume)).filter(Number.isFinite);
 
-    # إرسال الملصق المتحرك إذا وجد
-    if sticker_url:
-        sticker_url_api = f"https://api.telegram.org/bot{bot_token}/sendAnimation"
-        sticker_payload = {"chat_id": chat_id, "animation": sticker_url}
-        try:
-            requests.post(sticker_url_api, json=sticker_payload)
-            print(f"تم إرسال الملصق المتحرك إلى {chat_id}")
-        except Exception as e:
-            print(f"فشل إرسال الملصق: {e}")
+  const price = closes[closes.length - 1];
+  if (!Number.isFinite(price) || price < minPrice) throw new Error("السعر أقل");
 
-# ==========================================
-# 5. الحلقة الرئيسية (Main Loop)
-# ==========================================
-def main():
-    print("بدء تشغيل بوت AI PRO MAX...")
-    
-    while True:
-        for bot_name, config in BOTS_CONFIG.items():
-            print(f"جاري فحص {config['ticker']}...")
-            
-            df = fetch_eod_data(config['ticker'])
-            if df is None or df.empty:
-                continue
-                
-            df = calculate_indicators(df)
-            message, sticker_url = generate_signal(df, config['ticker'], config['market_name'])
-            
-            # إرسال الرسالة والملصق
-            send_telegram_message(config['token'], config['chat_id'], message, sticker_url)
-            
-            time.sleep(2)
-            
-        print("اكتمل الفحص. الانتظار لمدة 30 دقيقة...")
-        time.sleep(1800) # تم زيادة الوقت لتجنب حظر مفتاح EODHD
+  const prevClose = closes[closes.length - 2] || price;
+  const changePercent = ((price - prevClose) / prevClose) * 100;
 
-if __name__ == "__main__":
-    main()
+  const trendObj = aiProMaxTrend(closes, highs, lows);
+  const atr = await calculateATR(highs, lows, closes, 14);
+  const liquidity = analyzeLiquidity(closes, volumes);
+  const levels = calculateSupportResistance(highs, lows, price);
+
+  let targets = [];
+  const icon = trendObj.direction === "UP" ? "✅" : "🔴";
+  
+  for (let i = 1; i <= 4; i++) {
+    let targetPrice = trendObj.direction === "UP" ? price + (atr * i * 0.6) : price - (atr * i * 0.6);
+    let reached = trendObj.direction === "UP" ? price >= targetPrice : price <= targetPrice;
+    targets.push({
+      level: i,
+      price: targetPrice,
+      status: reached ? `${icon} (تحقق)` : `⏳ (قيد الانتظار)`
+    });
+  }
+
+  return {
+    symbol,
+    price,
+    changePercent,
+    trend: trendObj.label,
+    liquidity: liquidity.label,
+    buyRatio: liquidity.buyRatio,
+    supports: levels.supports,
+    resistances: levels.resistances,
+    targets,
+    updated: new Date()
+  };
+}
+
+function buildAlertMessage(stock, marketName) {
+  let msg = `📊 *${marketName}*\n\n`;
+  msg += `📌 الرمز: *${stock.symbol}*\n`;
+  msg += `💰 السعر: *${stock.price.toFixed(2)}*\n`;
+  msg += `📈 التغير: *${stock.changePercent.toFixed(2)}%*\n\n`;
+  msg += `🤖 *${stock.trend}*\n`;
+  msg += `💧 السيولة: *${stock.liquidity}* (${stock.buyRatio.toFixed(1)}%)\n\n`;
+  
+  msg += `🎯 *الأهداف الذكية (ATR):*\n`;
+  stock.targets.forEach(t => {
+    msg += `• الهدف ${t.level}: *${t.price.toFixed(2)}* ${t.status}\n`;
+  });
+
+  msg += `\n📉 *الدعوم:* ${stock.supports.map(s => s.toFixed(2)).join(" | ")}\n`;
+  msg += `📈 *المقاومات:* ${stock.resistances.map(r => r.toFixed(2)).join(" | ")}\n\n`;
+  msg += `🕒 ${stock.updated.toLocaleTimeString("ar-SA")}`;
+  return msg;
+}
+
+async function runTasiScan() {
+  if (tasiScanRunning || tasiSubscribers.size === 0) return;
+  tasiScanRunning = true;
+  try {
+    const symbols = await getExchangeSymbols("SR");
+    for (const sym of symbols.slice(0, 10)) {
+      try {
+        const stock = await getStockData(sym, "SR", 0.01);
+        for (const chatId of tasiSubscribers) {
+          await tasiBot.sendMessage(chatId, buildAlertMessage(stock, "🇸🇦 السوق السعودي (تاسي)"), { parse_mode: "Markdown" });
+          await sleep(200);
+        }
+      } catch (e) {}
+      await sleep(REQUEST_DELAY_MS);
+    }
+  } finally {
+    tasiScanRunning = false;
+  }
+}
+
+async function runUsScan() {
+  if (usScanRunning || usSubscribers.size === 0) return;
+  usScanRunning = true;
+  try {
+    const symbols = await getExchangeSymbols("US");
+    for (const sym of symbols.slice(0, 10)) {
+      try {
+        const stock = await getStockData(sym, "US", 0.20);
+        for (const chatId of usSubscribers) {
+          await usBot.sendMessage(chatId, buildAlertMessage(stock, "🇺🇸 السوق الأمريكي"), { parse_mode: "Markdown" });
+          await sleep(200);
+        }
+      } catch (e) {}
+      await sleep(REQUEST_DELAY_MS);
+    }
+  } finally {
+    usScanRunning = false;
+  }
+}
+
+// ----------------------------------------------
+// 🟢 أوامر البوت مع رسائل ترحيب مميزة
+// ----------------------------------------------
+tasiBot.onText(/\/start|\/scan/, async msg => {
+  const chatId = msg.chat.id;
+  console.log(`📩 TASI command received from ${chatId}: ${msg.text}`); // تأكد من وصول الأمر
+
+  tasiSubscribers.add(chatId);
+  // رسالة جديدة تماماً مختلفة عن القديمة
+  await tasiBot.sendMessage(
+    chatId,
+    "🟢 مرحباً! هذا البوت الجديد للسوق السعودي (بدون شرط قناة).\nجاري جلب التحليلات الفورية...",
+    { parse_mode: "Markdown" }
+  );
+  runTasiScan();
+});
+
+usBot.onText(/\/start|\/scan/, async msg => {
+  const chatId = msg.chat.id;
+  console.log(`📩 US command received from ${chatId}: ${msg.text}`); // تأكد من وصول الأمر
+
+  usSubscribers.add(chatId);
+  // رسالة جديدة تماماً مختلفة عن القديمة
+  await usBot.sendMessage(
+    chatId,
+    "🟢 مرحباً! هذا البوت الجديد للسوق الأمريكي (بدون شرط قناة).\nجاري جلب التحليلات الفورية...",
+    { parse_mode: "Markdown" }
+  );
+  runUsScan();
+});
+
+// جداول التحديث التلقائي
+setInterval(runTasiScan, UPDATE_INTERVAL_MIN * 60 * 1000);
+setInterval(runUsScan, UPDATE_INTERVAL_MIN * 60 * 1000);
+
+console.log("💎 Bot Engine Running Cleanly (New Version).");
