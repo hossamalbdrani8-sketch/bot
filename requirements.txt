@@ -1,4 +1,2 @@
  
-pyTelegramBotAPI
-flask
-requests 
+aiohttp==3.12.15
