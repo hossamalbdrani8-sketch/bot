@@ -1,10 +1,7 @@
 
 # ============================================================
-# 📊 CLEAN PURE STOCK SCANNER BOT (TASI & US) - Python Version
+# 📊 AI PRO MAX SIGNAL BOT (TASI, US, CRYPTO) - Python Version
 # ============================================================
-# ✅ هذه النسخة جديدة ونظيفة تماماً - لا يوجد شرط قناة
-# ============================================================
-
 import os
 import time
 import math
@@ -19,334 +16,261 @@ from threading import Thread
 # ----------------------------------------------
 TASI_TOKEN = os.environ.get("TASI_TOKEN")
 US_TOKEN = os.environ.get("US_TOKEN")
+CRYPTO_TOKEN = os.environ.get("CRYPTO_TOKEN") # لا تنسَ إضافة توكن البوت الثالث
 EODHD_API_KEY = os.environ.get("EODHD_API_KEY")
 PORT = int(os.environ.get("PORT", 3000))
-REQUEST_DELAY_SEC = 0.3
 UPDATE_INTERVAL_MIN = 3
 
 app = Flask(__name__)
 
-# إعداد البوتات
+# إعداد البوتات الثلاثة
 tasi_bot = telebot.TeleBot(TASI_TOKEN, threaded=False)
 us_bot = telebot.TeleBot(US_TOKEN, threaded=False)
+crypto_bot = telebot.TeleBot(CRYPTO_TOKEN, threaded=False)
 
 tasi_subscribers = set()
 us_subscribers = set()
+crypto_subscribers = set()
 
-tasi_scan_running = False
-us_scan_running = False
-
-print("🚀 THIS IS THE NEW CLEAN PYTHON VERSION WITHOUT CHANNEL CHECK")
+print("🚀 STARTING AI PRO MAX SIGNAL BOT (PYTHON VERSION)")
 print("✅ TASI_TOKEN exists:", bool(TASI_TOKEN))
 print("✅ US_TOKEN exists:", bool(US_TOKEN))
+print("✅ CRYPTO_TOKEN exists:", bool(CRYPTO_TOKEN))
 print("✅ EODHD_API_KEY exists:", bool(EODHD_API_KEY))
 
 # ----------------------------------------------
-# 🛠️ الدوال المساعدة
+# 🛠️ دوال المؤشرات الفنية (Pure Python)
 # ----------------------------------------------
-def sleep_ms(ms):
-    time.sleep(ms / 1000.0)
+def calculate_ema(prices, period):
+    if len(prices) < period: return prices[-1]
+    multiplier = 2 / (period + 1)
+    ema = prices[0]
+    for price in prices[1:]:
+        ema = (price * multiplier) + (ema * (1 - multiplier))
+    return ema
 
-def fetch_eodhd(url):
-    headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(url, headers=headers, timeout=15)
-    if response.status_code != 200:
-        raise Exception(f"EODHD HTTP {response.status_code}")
-    return response.json()
-
-def get_exchange_symbols(exchange):
-    url = f"https://eodhd.com/api/exchange-symbol-list/{exchange}?api_token={EODHD_API_KEY}&fmt=json"
-    data = fetch_eodhd(url)
-    if not isinstance(data, list):
-        raise Exception("Invalid symbols list")
-    
-    symbols = []
-    for item in data:
-        type_str = str(item.get("Type", "")).lower()
-        if "stock" in type_str or "common" in type_str:
-            code = str(item.get("Code", "")).strip()
-            if code:
-                symbols.append(code)
-    return symbols
+def calculate_rsi(prices, period=14):
+    if len(prices) < period + 1: return 50.0
+    gains, losses = 0, 0
+    for i in range(1, len(prices)):
+        diff = prices[i] - prices[i-1]
+        if diff > 0: gains += diff
+        else: losses -= diff
+    avg_gain = gains / period
+    avg_loss = losses / period
+    if avg_loss == 0: return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
 
 def calculate_atr(highs, lows, closes, period=14):
-    if len(highs) < period + 1:
-        return 0.0
+    if len(highs) < period + 1: return 0.0
     tr_list = []
     for i in range(1, len(highs)):
         tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
         tr_list.append(tr)
-    recent_tr = tr_list[-period:]
-    return sum(recent_tr) / len(recent_tr)
+    return sum(tr_list[-period:]) / period
 
-def analyze_liquidity(closes, volumes):
-    length = min(len(closes), len(volumes))
-    start = max(1, length - 10)
-    buy_vol, sell_vol, neut_vol = 0, 0, 0
-    
-    for i in range(start, length):
-        prev = closes[i-1]
-        curr = closes[i]
-        vol = volumes[i] if i < len(volumes) else 0
-        if curr > prev: buy_vol += vol
-        elif curr < prev: sell_vol += vol
-        else: neut_vol += vol
-        
-    total = buy_vol + sell_vol + neut_vol
-    if total <= 0:
-        return {"buy_ratio": 50, "label": "⚪ سيولة متوازنة"}
-        
-    buy_ratio = (buy_vol / total) * 100
-    sell_ratio = (sell_vol / total) * 100
-    
-    label = "⚪ سيولة متوازنة"
-    if buy_ratio >= 65: label = "🟢 دخول سيولة قوية"
-    elif sell_ratio >= 65: label = "🔴 خروج سيولة قوية"
-    elif buy_ratio >= 53: label = "🟢 دخول سيولة"
-    elif sell_ratio >= 53: label = "🔴 خروج سيولة"
-    
-    return {"buy_ratio": buy_ratio, "label": label}
-
-def ai_pro_max_trend(closes, highs, lows):
-    if not closes:
-        return {"direction": "NEUTRAL", "label": "⚖️ اتجاه عرضي متوازن"}
-        
-    current_price = closes[-1]
-    short_len = min(len(closes), 14)
-    momentum_score = 0
-    
-    for i in range(len(closes) - short_len, len(closes)):
-        if closes[i] > closes[i-1]: momentum_score += 1
-        elif closes[i] < closes[i-1]: momentum_score -= 1
-        
-    recent_high = max(highs[-10:]) if len(highs) >= 10 else current_price
-    recent_low = min(lows[-10:]) if len(lows) >= 10 else current_price
-    
-    if momentum_score >= 3 and current_price >= recent_low * 1.02:
-        return {"direction": "UP", "label": "🚀 اتجاه صاعد"}
-    elif momentum_score <= -3 or current_price <= recent_high * 0.98:
-        return {"direction": "DOWN", "label": "⚠️ اتجاه هابط"}
-        
-    return {"direction": "NEUTRAL", "label": "⚖️ اتجاه عرضي متوازن"}
-
-def calculate_support_resistance(highs, lows, price):
-    pivot_highs, pivot_lows = [], []
-    for i in range(2, len(highs) - 2):
-        if highs[i] > highs[i-1] and highs[i] > highs[i+1]:
-            pivot_highs.append(highs[i])
-        if lows[i] < lows[i-1] and lows[i] < lows[i+1]:
-            pivot_lows.append(lows[i])
-            
-    supports = sorted([l for l in pivot_lows if l < price], reverse=True)[:2]
-    resistances = sorted([h for h in pivot_highs if h > price])[:2]
-    
-    if not supports: supports = [price * 0.95]
-    if not resistances: resistances = [price * 1.05]
-    
-    return {"supports": supports, "resistances": resistances}
-
-def get_stock_data(symbol, exchange_suffix, min_price):
+# ----------------------------------------------
+# 📡 جلب البيانات من EODHD
+# ----------------------------------------------
+def fetch_eodhd_data(symbol, exchange_suffix):
     formatted_symbol = f"{symbol.replace('.', '-')}.{exchange_suffix}"
     url = f"https://eodhistoricaldata.com/api/eod/{formatted_symbol}?api_token={EODHD_API_KEY}&fmt=json&period=d&limit=60"
-    
-    data = fetch_eodhd(url)
-    if not isinstance(data, list) or len(data) < 20:
-        raise Exception("بيانات غير كافية")
-        
-    closes = [float(i["close"]) for i in data if "close" in i and i["close"] is not None]
-    highs = [float(i["high"]) for i in data if "high" in i and i["high"] is not None]
-    lows = [float(i["low"]) for i in data if "low" in i and i["low"] is not None]
-    volumes = [float(i["volume"]) for i in data if "volume" in i and i["volume"] is not None]
-    
-    if not closes:
-        raise Exception("لا توجد أسعار")
-        
-    price = closes[-1]
-    if price < min_price:
-        raise Exception("السعر أقل من الحد الأدنى")
-        
-    prev_close = closes[-2] if len(closes) > 1 else price
-    change_percent = ((price - prev_close) / prev_close) * 100
-    
-    trend_obj = ai_pro_max_trend(closes, highs, lows)
-    atr = calculate_atr(highs, lows, closes, 14)
-    liquidity = analyze_liquidity(closes, volumes)
-    levels = calculate_support_resistance(highs, lows, price)
-    
-    targets = []
-    icon = "✅" if trend_obj["direction"] == "UP" else "🔴"
-    
-    for i in range(1, 5):
-        target_price = price + (atr * i * 0.6) if trend_obj["direction"] == "UP" else price - (atr * i * 0.6)
-        reached = price >= target_price if trend_obj["direction"] == "UP" else price <= target_price
-        targets.append({
-            "level": i,
-            "price": target_price,
-            "status": f"{icon} (تحقق)" if reached else "⏳ (قيد الانتظار)"
-        })
-        
-    return {
-        "symbol": symbol,
-        "price": price,
-        "change_percent": change_percent,
-        "trend": trend_obj["label"],
-        "liquidity": liquidity["label"],
-        "buy_ratio": liquidity["buy_ratio"],
-        "supports": levels["supports"],
-        "resistances": levels["resistances"],
-        "targets": targets,
-        "updated": datetime.now()
-    }
+    try:
+        response = requests.get(url, timeout=15)
+        if response.status_code != 200: return None
+        data = response.json()
+        if not isinstance(data, list) or len(data) < 20: return None
+        return data
+    except Exception as e:
+        print(f"Error fetching {formatted_symbol}: {e}")
+        return None
 
-def build_alert_message(stock, market_name):
-    msg = f"📊 *{market_name}*\n\n"
-    msg += f"📌 الرمز: *{stock['symbol']}*\n"
-    msg += f"💰 السعر: *{stock['price']:.2f}*\n"
-    msg += f"📈 التغير: *{stock['change_percent']:.2f}%*\n\n"
-    msg += f"🤖 *{stock['trend']}*\n"
-    msg += f"💧 السيولة: *{stock['liquidity']}* ({stock['buy_ratio']:.1f}%)\n\n"
-    msg += "🎯 *الأهداف الذكية (ATR):*\n"
+# ----------------------------------------------
+# 🧠 تحليل السهم وإنشاء الإشارة
+# ----------------------------------------------
+def analyze_stock(symbol, name, exchange_suffix, market_name):
+    data = fetch_eodhd_data(symbol, exchange_suffix)
+    if not data: return None
+
+    closes = [float(d['close']) for d in data]
+    highs = [float(d['high']) for d in data]
+    lows = [float(d['low']) for d in data]
+    volumes = [float(d['volume']) for d in data]
+
+    price = closes[-1]
+    prev_close = closes[-2] if len(closes) > 1 else price
+    change_pct = ((price - prev_close) / prev_close) * 100
+
+    ema8 = calculate_ema(closes, 8)
+    ema21 = calculate_ema(closes, 21)
+    ema50 = calculate_ema(closes, 50)
+    rsi = calculate_rsi(closes, 14)
+    atr = calculate_atr(highs, lows, closes, 14)
+
+    # حساب قوة الإشارة (0-100)
+    buy_power = 50
+    if price > ema8: buy_power += 10
+    if price > ema21: buy_power += 10
+    if ema8 > ema21: buy_power += 10
+    if rsi > 50: buy_power += 10
+    if rsi > 70: buy_power -= 10 # تشبع شراء
+    if rsi < 30: buy_power += 15 # تشبع بيع
     
-    for t in stock["targets"]:
-        msg += f"• الهدف {t['level']}: *{t['price']:.2f}* {t['status']}\n"
-        
-    supports_str = " | ".join([f"{s:.2f}" for s in stock['supports']])
-    resistances_str = " | ".join([f"{r:.2f}" for r in stock['resistances']])
+    buy_power = max(0, min(100, buy_power))
+    sell_power = 100 - buy_power
+    signal_strength = buy_power
+
+    if buy_power >= 70: signal_text = "🟢 شراء قوي"
+    elif buy_power <= 30: signal_text = "🔴 بيع قوي"
+    elif buy_power > 50: signal_text = "🟢 شراء"
+    else: signal_text = "🔴 بيع"
+
+    # الدعم والمقاومة
+    support = min(lows[-20:])
+    resistance = max(highs[-20:])
+
+    # أهداف ATR الثمانية
+    targets = []
+    for i in range(1, 9):
+        if buy_power > 50:
+            tp = price + (atr * i * 0.5)
+            tp_pct = ((tp - price) / price) * 100
+        else:
+            tp = price - (atr * i * 0.5)
+            tp_pct = ((tp - price) / price) * 100
+        targets.append({"tp": i, "price": tp, "pct": tp_pct})
+
+    # تنسيق الرسالة
+    msg = f"💀🚀 <b>AI PRO MAX SIGNAL</b>\n\n"
+    msg += f"📊 <b>{market_name}</b>\n"
+    msg += f"<b>{symbol}.{exchange_suffix}</b>\n"
+    msg += f"{name}\n\n"
+    msg += f"<b>{signal_text}</b>\n\n"
     
-    msg += f"\n📉 *الدعوم:* {supports_str}\n"
-    msg += f"📈 *المقاومات:* {resistances_str}\n\n"
-    msg += f"🕒 {stock['updated'].strftime('%I:%M:%S %p')}"
+    msg += f"السعر: {price:.2f}\n"
+    msg += f"التغير: {change_pct:+.2f}%\n"
+    msg += f"قوة الإشارة: {signal_strength:.0f}/100\n"
+    msg += f"قوة الشراء: {buy_power:.0f}%\n"
+    msg += f"قوة البيع: {sell_power:.0f}%\n"
+    msg += f"الحجم: {volumes[-1]/ (sum(volumes[-20:])/20):.1f}x\n\n"
+
+    msg += f"EMA 8: {ema8:.2f}\n"
+    msg += f"EMA 21: {ema21:.2f}\n"
+    msg += f"EMA 50: {ema50:.2f}\n"
+    msg += f"RSI 14: {rsi:.1f}\n"
+    msg += f"ATR 14: {atr:.2f}\n\n"
+
+    msg += f"الدعم: {support:.2f}\n"
+    msg += f"المقاومة: {resistance:.2f}\n"
+    if buy_power > 50:
+        msg += f"صاعد قوي 📈\n\n"
+    else:
+        msg += f"هابط قوي 📉\n\n"
+
+    msg += f"🎯 <b>أهداف ATR الثمانية:</b>\n"
+    for t in targets:
+        msg += f"TP{t['tp']}: {t['price']:.2f} ({t['pct']:+.1f}%)\n"
+
     return msg
 
 # ----------------------------------------------
-# 🔄 دوال المسح
+# 🔄 دوال الفحص لكل سوق
 # ----------------------------------------------
-def run_tasi_scan():
-    global tasi_scan_running
-    if tasi_scan_running or not tasi_subscribers:
-        return
-    tasi_scan_running = True
-    
-    try:
-        symbols = get_exchange_symbols("SR")
-        for sym in symbols[:10]:  # فحص أول 10 أسهم لتجنب استهلاك API
-            try:
-                stock = get_stock_data(sym, "SR", 0.01)
-                for chat_id in list(tasi_subscribers):
+# قائمة الرموز (يمكنك زيادتها لكن احذر استهلاك API)
+TASI_SYMBOLS = [("2222", "أرامكو السعودية"), ("1120", "الراجحي"), ("2010", "سابك"), ("1180", "الأهلي"), ("2350", "كيان")]
+US_SYMBOLS = [("AAPL", "Apple Inc"), ("TSLA", "Tesla Inc"), ("MSFT", "Microsoft"), ("NVDA", "NVIDIA"), ("AMZN", "Amazon")]
+CRYPTO_SYMBOLS = [("BTC", "Bitcoin"), ("ETH", "Ethereum"), ("SOL", "Solana"), ("BNB", "Binance Coin"), ("XRP", "Ripple")]
+
+def scan_market(market_type):
+    if market_type == "TASI":
+        subscribers = tasi_subscribers
+        symbols = TASI_SYMBOLS
+        suffix = "SR"
+        market_name = "🇸🇦 السوق السعودي (TASI)"
+        bot = tasi_bot
+    elif market_type == "US":
+        subscribers = us_subscribers
+        symbols = US_SYMBOLS
+        suffix = "US"
+        market_name = "🇺🇸 السوق الأمريكي (US)"
+        bot = us_bot
+    else:
+        subscribers = crypto_subscribers
+        symbols = CRYPTO_SYMBOLS
+        suffix = "CC"
+        market_name = "🪙 العملات الرقمية (CRYPTO)"
+        bot = crypto_bot
+
+    if not subscribers: return
+
+    for sym, name in symbols:
+        try:
+            msg = analyze_stock(sym, name, suffix, market_name)
+            if msg:
+                for chat_id in list(subscribers):
                     try:
-                        tasi_bot.send_message(chat_id, build_alert_message(stock, "🇸🇦 السوق السعودي (تاسي)"), parse_mode="Markdown")
-                        sleep_ms(200)
+                        bot.send_message(chat_id, msg, parse_mode="HTML")
+                        time.sleep(0.2)
                     except Exception as e:
-                        print(f"TASI Send Error to {chat_id}: {e}")
-            except Exception:
-                pass
-            sleep_ms(300)
-    except Exception as e:
-        print(f"TASI Scan Error: {e}")
-    finally:
-        tasi_scan_running = False
+                        print(f"Send Error {market_type}: {e}")
+        except Exception as e:
+            print(f"Scan Error {market_type} {sym}: {e}")
+        time.sleep(1) # تأخير لتجنب حظر API
 
-def run_us_scan():
-    global us_scan_running
-    if us_scan_running or not us_subscribers:
-        return
-    us_scan_running = True
-    
-    try:
-        symbols = get_exchange_symbols("US")
-        for sym in symbols[:10]:
-            try:
-                stock = get_stock_data(sym, "US", 0.20)
-                for chat_id in list(us_subscribers):
-                    try:
-                        us_bot.send_message(chat_id, build_alert_message(stock, "🇺🇸 السوق الأمريكي"), parse_mode="Markdown")
-                        sleep_ms(200)
-                    except Exception as e:
-                        print(f"US Send Error to {chat_id}: {e}")
-            except Exception:
-                pass
-            sleep_ms(300)
-    except Exception as e:
-        print(f"US Scan Error: {e}")
-    finally:
-        us_scan_running = False
+def run_scheduled_scans():
+    while True:
+        time.sleep(UPDATE_INTERVAL_MIN * 60)
+        print("⏰ Running scheduled scans...")
+        scan_market("TASI")
+        scan_market("US")
+        scan_market("CRYPTO")
 
 # ----------------------------------------------
-# 🤖 معالجة أوامر البوت
+# 🤖 معالجة أوامر البوتات
 # ----------------------------------------------
-@tasi_bot.message_handler(commands=['start', 'scan'])
-def tasi_start(message):
-    chat_id = message.chat.id
-    print(f"📩 TASI command received from {chat_id}: {message.text}")
-    tasi_subscribers.add(chat_id)
-    
-    # رسالة جديدة تماماً مختلفة عن القديمة
-    tasi_bot.send_message(
-        chat_id, 
-        "🟢 مرحباً! هذا البوت الجديد للسوق السعودي (بدون شرط قناة).\nجاري جلب التحليلات الفورية...", 
-        parse_mode="Markdown"
-    )
-    run_tasi_scan()
+def setup_handlers(bot, subscribers, market_type, welcome_msg):
+    @bot.message_handler(commands=['start', 'scan'])
+    def start_handler(message):
+        chat_id = message.chat.id
+        print(f"📩 {market_type} command from {chat_id}")
+        subscribers.add(chat_id)
+        bot.send_message(chat_id, welcome_msg, parse_mode="HTML")
+        scan_market(market_type)
 
-@us_bot.message_handler(commands=['start', 'scan'])
-def us_start(message):
-    chat_id = message.chat.id
-    print(f"📩 US command received from {chat_id}: {message.text}")
-    us_subscribers.add(chat_id)
-    
-    # رسالة جديدة تماماً مختلفة عن القديمة
-    us_bot.send_message(
-        chat_id, 
-        "🟢 مرحباً! هذا البوت الجديد للسوق الأمريكي (بدون شرط قناة).\nجاري جلب التحليلات الفورية...", 
-        parse_mode="Markdown"
-    )
-    run_us_scan()
+setup_handlers(tasi_bot, tasi_subscribers, "TASI", "🟢 مرحباً! بوت السوق السعودي (AI PRO MAX) يعمل الآن.\nجاري الفحص...")
+setup_handlers(us_bot, us_subscribers, "US", "🟢 مرحباً! بوت السوق الأمريكي (AI PRO MAX) يعمل الآن.\nجاري الفحص...")
+setup_handlers(crypto_bot, crypto_subscribers, "CRYPTO", "🟢 مرحباً! بوت العملات الرقمية (AI PRO MAX) يعمل الآن.\nجاري الفحص...")
 
 # ----------------------------------------------
-# 🌐 خادم الويب (لـ Railway Health Check)
+# 🌐 خادم الويب (لـ Railway)
 # ----------------------------------------------
 @app.route("/")
 def home():
-    return "🚀 Clean Stock Scanner Bot is Online (Python Version)"
+    return "🚀 AI PRO MAX SIGNAL BOT is Online"
 
 def run_flask():
     app.run(host="0.0.0.0", port=PORT)
 
 # ----------------------------------------------
-# ⏱️ المجدول التلقائي (كل 3 دقائق)
-# ----------------------------------------------
-def scheduler():
-    while True:
-        time.sleep(UPDATE_INTERVAL_MIN * 60)
-        print("⏰ Running scheduled scans...")
-        run_tasi_scan()
-        run_us_scan()
-
-# ----------------------------------------------
 # 🚀 نقطة البداية
 # ----------------------------------------------
 if __name__ == "__main__":
-    # 1. تشغيل خادم الويب في خيط منفصل
+    # 1. خادم الويب
     flask_thread = Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
     
-    # 2. تشغيل المجدول التلقائي في خيط منفصل
-    scheduler_thread = Thread(target=scheduler)
+    # 2. المجدول التلقائي
+    scheduler_thread = Thread(target=run_scheduled_scans)
     scheduler_thread.daemon = True
     scheduler_thread.start()
     
     # 3. تشغيل البوتات
-    print("✅ Telegram Bots started polling cleanly.")
+    print("✅ All Bots started polling cleanly.")
+    t1 = Thread(target=tasi_bot.polling, kwargs={"none_stop": True}); t1.start()
+    t2 = Thread(target=us_bot.polling, kwargs={"none_stop": True}); t2.start()
+    t3 = Thread(target=crypto_bot.polling, kwargs={"none_stop": True}); t3.start()
     
-    tasi_thread = Thread(target=tasi_bot.polling, kwargs={"none_stop": True})
-    tasi_thread.daemon = True
-    tasi_thread.start()
-    
-    us_thread = Thread(target=us_bot.polling, kwargs={"none_stop": True})
-    us_thread.daemon = True
-    us_thread.start()
-    
-    # 4. إبقاء البرنامج يعمل
     while True:
         time.sleep(1)
