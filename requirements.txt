@@ -1,6 +1,3 @@
-
-
-python-telegram-bot==20.3
-pandas
-pandas_ta
+pyTelegramBotAPI
+flask
 requests
