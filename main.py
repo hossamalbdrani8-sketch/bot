@@ -1,5 +1,4 @@
 
-
 import os
 import time
 import requests
@@ -8,28 +7,40 @@ import pandas_ta as ta
 from datetime import datetime
 
 # ==========================================
-# 1. الإعدادات (Settings from Environment Variables)
+# 1. الإعدادات وقراءة المتغيرات
 # ==========================================
-# يجب وضع هذه المتغيرات في Railway كما هو موضح في صورتك الثالثة
 EODHD_API_KEY = os.environ.get("EODHD_API_KEY")
 
-# إعدادات البوتات (التوكن ومعرف المحادثة)
+# دالة مساعدة لتحليل المتغيرات المجمعة (مثال: "TOKEN,CHAT_ID")
+def parse_config(config_string):
+    if not config_string:
+        return None, None
+    parts = config_string.split(',')
+    if len(parts) == 2:
+        return parts[0].strip(), parts[1].strip()
+    return None, None
+
+# قراءة الإعدادات من المتغيرات الموجودة في Railway
+tasi_token, tasi_chat_id = parse_config(os.environ.get("TASI_CONFIG"))
+us_token, us_chat_id = parse_config(os.environ.get("US_CONFIG"))
+crypto_token, crypto_chat_id = parse_config(os.environ.get("CRYPTO_CONFIG"))
+
 BOTS_CONFIG = {
     "TASI": {
-        "token": os.environ.get("TASI_BOT_TOKEN"),
-        "chat_id": os.environ.get("TASI_CHAT_ID"),
-        "ticker": "ARAMCO.SR", # يمكنك تغييره لأي سهم سعودي آخر
+        "token": tasi_token,
+        "chat_id": tasi_chat_id,
+        "ticker": "2222.SAU", # تم تصحيح الرمز
         "market_name": "السوق السعودي (TASI)"
     },
     "US": {
-        "token": os.environ.get("US_BOT_TOKEN"),
-        "chat_id": os.environ.get("US_CHAT_ID"),
+        "token": us_token,
+        "chat_id": us_chat_id,
         "ticker": "TSLA.US",
         "market_name": "السوق الأمريكي (US)"
     },
     "CRYPTO": {
-        "token": os.environ.get("CRYPTO_BOT_TOKEN"),
-        "chat_id": os.environ.get("CRYPTO_CHAT_ID"),
+        "token": crypto_token,
+        "chat_id": crypto_chat_id,
         "ticker": "BTC-USD.CC",
         "market_name": "العملات الرقمية (CRYPTO)"
     }
@@ -39,12 +50,14 @@ BOTS_CONFIG = {
 # 2. دالة جلب البيانات من EODHD
 # ==========================================
 def fetch_eod_data(ticker):
-    """جلب البيانات التاريخية اليومية من EODHD"""
     url = f"https://eodhd.com/api/eod/{ticker}?api_token={EODHD_API_KEY}&fmt=json&period=d&order=a"
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
+        if not data or len(data) == 0:
+            print(f"تحذير: لا توجد بيانات لـ {ticker}")
+            return None
         df = pd.DataFrame(data)
         return df
     except Exception as e:
@@ -55,36 +68,26 @@ def fetch_eod_data(ticker):
 # 3. دالة حساب المؤشرات والإشارات
 # ==========================================
 def calculate_indicators(df):
-    """حساب المؤشرات الفنية المطلوبة"""
-    # التأكد من أن البيانات مرتبة تصاعدياً حسب التاريخ
     df['date'] = pd.to_datetime(df['date'])
     df = df.sort_values('date')
     
-    # حساب المتوسطات المتحركة
     df['EMA_8'] = ta.ema(df['close'], length=8)
     df['EMA_21'] = ta.ema(df['close'], length=21)
     df['EMA_50'] = ta.ema(df['close'], length=50)
-    
-    # حساب مؤشر القوة النسبية RSI ومدى التقلب ATR
     df['RSI_14'] = ta.rsi(df['close'], length=14)
     df['ATR_14'] = ta.atr(df['high'], df['low'], df['close'], length=14)
     
-    # حساب الدعم والمقاومة (أعلى وأدنى سعر لآخر 20 شمعة)
     df['Resistance'] = df['high'].rolling(window=20).max()
     df['Support'] = df['low'].rolling(window=20).min()
-    
-    # حساب الحجم النسبي (مقارنة بآخر 20 يوم)
     df['Vol_Avg'] = df['volume'].rolling(window=20).mean()
     df['Vol_Ratio'] = df['volume'] / df['Vol_Avg']
     
     return df
 
 def generate_signal(df, ticker, market_name):
-    """توليد الإشارة والأهداف بناءً على البيانات"""
     latest = df.iloc[-1]
-    
-    current_price = latest['close']
     prev_close = df.iloc[-2]['close']
+    current_price = latest['close']
     change_pct = ((current_price - prev_close) / prev_close) * 100
     
     ema8 = latest['EMA_8']
@@ -96,25 +99,30 @@ def generate_signal(df, ticker, market_name):
     support = latest['Support']
     vol_ratio = latest['Vol_Ratio']
     
-    # تحديد الاتجاه والإشارة
+    # تحديد الاتجاه بناءً على المتوسطات و RSI
     is_buy = ema8 > ema21 and ema21 > ema50 and rsi > 50
     is_sell = ema8 < ema21 and ema21 < ema50 and rsi < 50
     
     signal_type = "شراء قوي" if is_buy else ("بيع قوي" if is_sell else "حياد / انتظار")
     signal_emoji = "🟢" if is_buy else ("🔴" if is_sell else "⚪")
-    arrow = "📈" if is_buy else ("📉" if is_sell else "➡️")
     
+    # تحديد الملصق (Sticker) حسب الاتجاه
+    # تم استخدام ملفات GIF متحركة (ملصقات) لتمثيل السهم الصاعد والهابط
+    if is_buy:
+        sticker_id = "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExbnd5NnF4eWZ5eWZ5eWZ5eWZ5eWZ5eWZ5eWZ5eWZ5eWZ5eWZ5JmVwPXYxX2ludGVybmFsX2dpZl9ieV9pZCZjdD1n/3o7TKVUn7iM8FMEU24/giphy.gif" # سهم أخضر صاعد
+    elif is_sell:
+        sticker_id = "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExbnd5NnF4eWZ5eWZ5eWZ5eWZ5eWZ5eWZ5eWZ5eWZ5eWZ5eWZ5JmVwPXYxX2ludGVybmFsX2dpZl9ieV9pZCZjdD1n/3o7TKVUn7iM8FMEU24/giphy.gif" # سهم أحمر هابط (سيتم استبداله)
+    else:
+        sticker_id = None
+        
     trend_text = "صاعد قوي" if is_buy else ("هابط قوي" if is_sell else "عرضي")
     
-    # حساب قوة الإشارة (تقديرية)
     signal_strength = min(100, max(0, int(abs(ema8 - ema50) / current_price * 1000 + (rsi if is_buy else 100 - rsi))))
     
-    # حساب قوة الشراء والبيع
     buy_power = int((ema8 / ema50) * 50 + (rsi / 2))
     buy_power = min(100, max(0, buy_power))
     sell_power = 100 - buy_power
     
-    # حساب أهداف ATR الثمانية
     targets = []
     for i in range(1, 9):
         if is_buy:
@@ -125,11 +133,9 @@ def generate_signal(df, ticker, market_name):
             tp_pct = ((tp - current_price) / current_price) * 100
         targets.append(f"TP{i}: {tp:.2f} ({tp_pct:+.1f}%)")
     
-    # تنسيق الأهداف في صفين
     tp_row1 = " | ".join(targets[:4])
     tp_row2 = " | ".join(targets[4:])
     
-    # بناء الرسالة
     message = f"""
 🦅 <b>AI PRO MAX SIGNAL</b>
 🏢 {market_name}
@@ -152,35 +158,41 @@ ATR 14: <code>{atr:.2f}</code>
 
 الدعم: <code>{support:.2f}</code>
 المقاومة: <code>{resistance:.2f}</code>
-الاتجاه: {trend_text} {arrow}
+الاتجاه: {trend_text}
 
 🎯 <b>أهداف ATR الثمانية:</b>
 <code>{tp_row1}</code>
 <code>{tp_row2}</code>
 """
-    return message, signal_type
+    return message, sticker_id
 
 # ==========================================
-# 4. دالة إرسال الرسالة إلى تيليجرام
+# 4. دالة إرسال الرسالة والملصق إلى تيليجرام
 # ==========================================
-def send_telegram_message(bot_token, chat_id, message):
-    """إرسال الرسالة عبر Telegram Bot API"""
+def send_telegram_message(bot_token, chat_id, message, sticker_url=None):
     if not bot_token or not chat_id:
         print("خطأ: توكن البوت أو معرف المحادثة غير موجود.")
         return
         
+    # إرسال الرسالة النصية
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": "HTML"
-    }
+    payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
     try:
-        response = requests.post(url, json=payload)
-        response.raise_for_status()
-        print(f"تم الإرسال بنجاح إلى {chat_id}")
+        requests.post(url, json=payload)
+        print(f"تم إرسال الرسالة النصية إلى {chat_id}")
     except Exception as e:
-        print(f"فشل الإرسال: {e}")
+        print(f"فشل إرسال الرسالة: {e}")
+        return
+
+    # إرسال الملصق المتحرك إذا وجد
+    if sticker_url:
+        sticker_url_api = f"https://api.telegram.org/bot{bot_token}/sendAnimation"
+        sticker_payload = {"chat_id": chat_id, "animation": sticker_url}
+        try:
+            requests.post(sticker_url_api, json=sticker_payload)
+            print(f"تم إرسال الملصق المتحرك إلى {chat_id}")
+        except Exception as e:
+            print(f"فشل إرسال الملصق: {e}")
 
 # ==========================================
 # 5. الحلقة الرئيسية (Main Loop)
@@ -192,25 +204,20 @@ def main():
         for bot_name, config in BOTS_CONFIG.items():
             print(f"جاري فحص {config['ticker']}...")
             
-            # 1. جلب البيانات
             df = fetch_eod_data(config['ticker'])
             if df is None or df.empty:
                 continue
                 
-            # 2. حساب المؤشرات
             df = calculate_indicators(df)
+            message, sticker_url = generate_signal(df, config['ticker'], config['market_name'])
             
-            # 3. توليد الإشارة والرسالة
-            message, signal_type = generate_signal(df, config['ticker'], config['market_name'])
+            # إرسال الرسالة والملصق
+            send_telegram_message(config['token'], config['chat_id'], message, sticker_url)
             
-            # 4. إرسال الرسالة (يمكنك إضافة شرط لإرسال الإشارات القوية فقط)
-            # هنا نقوم بالإرسال دائماً، ولكن يمكنك وضع شرط if signal_type != "حياد / انتظار":
-            send_telegram_message(config['token'], config['chat_id'], message)
+            time.sleep(2)
             
-            time.sleep(2) # فاصل بسيط بين البوتات
-            
-        print("اكتمل الفحص. الانتظار لمدة دقيقتين...")
-        time.sleep(120) # الفحص كل دقيقتين كما هو مذكور في صورتك
+        print("اكتمل الفحص. الانتظار لمدة 30 دقيقة...")
+        time.sleep(1800) # تم زيادة الوقت لتجنب حظر مفتاح EODHD
 
 if __name__ == "__main__":
     main()
