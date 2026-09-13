@@ -1,13 +1,13 @@
 
 # ============================================================
 # 💀🚀 AI PRO MAX
-# PYTHON - BUILD FROM ZERO
+# TWELVE DATA EDITION
+# PYTHON - CLEAN BUILD
 # ============================================================
 
 import os
 import asyncio
 import time
-import json
 from datetime import datetime, timezone
 
 import aiohttp
@@ -18,27 +18,61 @@ from aiohttp import web
 # ⚙️ RAILWAY VARIABLES
 # ============================================================
 
-EODHD_API_KEY = os.getenv("API", "").strip()
+TWELVE_DATA_API_KEY = os.getenv(
+    "TWELVE_DATA_API_KEY",
+    ""
+).strip()
 
-TASI_TOKEN = os.getenv("TASI_TOKEN", "").strip()
-US_TOKEN = os.getenv("US_TOKEN", "").strip()
-CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN", "").strip()
+TASI_TOKEN = os.getenv(
+    "TASI_TOKEN",
+    ""
+).strip()
 
-PORT = int(os.getenv("PORT", "8080"))
+US_TOKEN = os.getenv(
+    "US_TOKEN",
+    ""
+).strip()
 
+CRYPTO_TOKEN = os.getenv(
+    "CRYPTO_TOKEN",
+    ""
+).strip()
+
+PORT = int(
+    os.getenv("PORT", "8080")
+)
+
+# الفحص الأساسي
 SCAN_SECONDS = 120
 
+# أقل سعر للسوق الأمريكي
 MIN_US_PRICE = 0.20
 
 REQUEST_TIMEOUT = 30
 
-MAX_CONNECTIONS = 50
+MAX_CONNECTIONS = 20
 
-SYMBOL_CACHE_SECONDS = 3600
-
-HISTORY_CACHE_SECONDS = 21600
-
+# منع تكرار الإشارة
 SIGNAL_COOLDOWN = 1800
+
+
+# ============================================================
+# ⚠️ حدود الخطة المجانية
+# ============================================================
+
+# حساب Basic:
+# 8 credits بالدقيقة
+# 800 credits يومياً
+#
+# لا نرسل آلاف الرموز دفعة واحدة.
+# عدّل الرقم لاحقاً إذا غيرت الخطة.
+
+MAX_SYMBOLS_PER_MARKET = int(
+    os.getenv(
+        "MAX_SYMBOLS_PER_MARKET",
+        "100"
+    )
+)
 
 
 # ============================================================
@@ -46,9 +80,9 @@ SIGNAL_COOLDOWN = 1800
 # ============================================================
 
 symbols_cache = {
-    "TASI": {"symbols": [], "updated": 0},
-    "US": {"symbols": [], "updated": 0},
-    "CRYPTO": {"symbols": [], "updated": 0},
+    "TASI": [],
+    "US": [],
+    "CRYPTO": []
 }
 
 history_cache = {}
@@ -58,7 +92,7 @@ last_signal = {}
 telegram_chats = {
     "TASI": set(),
     "US": set(),
-    "CRYPTO": set(),
+    "CRYPTO": set()
 }
 
 scan_number = 0
@@ -72,7 +106,9 @@ session = None
 
 def log(message):
 
-    now = datetime.now(timezone.utc).strftime(
+    now = datetime.now(
+        timezone.utc
+    ).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
 
@@ -90,7 +126,10 @@ async def get_session():
 
     global session
 
-    if session is None or session.closed:
+    if (
+        session is None
+        or session.closed
+    ):
 
         timeout = aiohttp.ClientTimeout(
             total=REQUEST_TIMEOUT
@@ -110,7 +149,7 @@ async def get_session():
 
 
 # ============================================================
-# 🔐 TOKEN
+# 🔐 TELEGRAM TOKEN
 # ============================================================
 
 def token_for_market(market):
@@ -128,27 +167,33 @@ def token_for_market(market):
 
 
 # ============================================================
-# 🌐 EODHD
+# 🌐 TWELVE DATA
 # ============================================================
 
-async def eodhd(path, params=None):
+async def twelve(
+    endpoint,
+    params=None
+):
 
-    if not EODHD_API_KEY:
+    if not TWELVE_DATA_API_KEY:
 
         raise RuntimeError(
-            "متغير API غير موجود في Railway"
+            "متغير TWELVE_DATA_API_KEY غير موجود"
         )
 
     s = await get_session()
 
-    query = dict(params or {})
+    query = dict(
+        params or {}
+    )
 
-    query["api_token"] = EODHD_API_KEY
-    query["fmt"] = "json"
+    query["apikey"] = (
+        TWELVE_DATA_API_KEY
+    )
 
     url = (
-        "https://eodhd.com/api/"
-        + path.lstrip("/")
+        "https://api.twelvedata.com/"
+        + endpoint.lstrip("/")
     )
 
     async with s.get(
@@ -161,205 +206,112 @@ async def eodhd(path, params=None):
         if response.status != 200:
 
             raise RuntimeError(
-                f"EODHD HTTP {response.status}: "
+                f"Twelve Data HTTP "
+                f"{response.status}: "
                 f"{body[:500]}"
             )
 
         try:
 
-            return json.loads(body)
+            data = await response.json(
+                content_type=None
+            )
 
         except Exception:
 
             raise RuntimeError(
-                "EODHD أرسل استجابة غير صالحة"
+                "Twelve Data أرسل استجابة غير صالحة"
             )
 
-
-# ============================================================
-# 📋 EXCHANGE SYMBOLS
-# ============================================================
-
-async def get_exchange_symbols(exchange):
-
-    now = time.time()
-
-    cache = symbols_cache.get(exchange)
-
-    if cache:
-
-        if (
-            cache["symbols"]
-            and
-            now - cache["updated"]
-            < SYMBOL_CACHE_SECONDS
+        if isinstance(
+            data,
+            dict
         ):
 
-            return cache["symbols"]
+            if data.get("status") == "error":
+
+                raise RuntimeError(
+                    str(
+                        data.get(
+                            "message",
+                            "خطأ غير معروف"
+                        )
+                    )
+                )
+
+        return data
+
+
+# ============================================================
+# 📋 STOCKS
+# ============================================================
+
+async def get_stock_symbols(
+    market
+):
 
     log(
-        f"📋 تحميل قائمة الرموز: {exchange}"
+        f"📋 تحميل قائمة الرموز: "
+        f"{market}"
     )
 
-    try:
+    if market == "US":
 
-        data = await eodhd(
-            f"exchange-symbol-list/{exchange}"
+        data = await twelve(
+            "stocks",
+            {
+                "country":
+                    "United States"
+            }
         )
 
-    except Exception as exc:
+    elif market == "TASI":
 
-        log(
-            f"ℹ️ EODHD {exchange}: {exc}"
+        data = await twelve(
+            "stocks",
+            {
+                "exchange":
+                    "Saudi Exchange"
+            }
         )
 
-        raise
+    else:
+
+        return []
+
+    if not isinstance(
+        data,
+        list
+    ):
+
+        return []
 
     symbols = []
 
-    if isinstance(data, list):
+    for item in data:
 
-        for item in data:
-
-            if not isinstance(item, dict):
-                continue
-
-            code = str(
-                item.get("Code", "")
-            ).strip()
-
-            if not code:
-                continue
-
-            symbols.append(code)
-
-    symbols = list(
-        dict.fromkeys(symbols)
-    )
-
-    symbols_cache[exchange] = {
-        "symbols": symbols,
-        "updated": now
-    }
-
-    log(
-        f"✅ {exchange}: "
-        f"{len(symbols)} رمز"
-    )
-
-    return symbols
-
-
-# ============================================================
-# 🇸🇦 TASI
-# ============================================================
-
-async def get_tasi_symbols():
-
-    candidates = [
-        "SR"
-    ]
-
-    try:
-
-        exchanges = await eodhd(
-            "exchanges-list"
-        )
-
-        if isinstance(
-            exchanges,
-            list
+        if not isinstance(
+            item,
+            dict
         ):
+            continue
 
-            for item in exchanges:
+        symbol = str(
+            item.get(
+                "symbol",
+                ""
+            )
+        ).strip()
 
-                if not isinstance(
-                    item,
-                    dict
-                ):
-                    continue
+        if not symbol:
+            continue
 
-                code = str(
-                    item.get(
-                        "Code",
-                        ""
-                    )
-                ).upper()
-
-                name = str(
-                    item.get(
-                        "Name",
-                        ""
-                    )
-                ).lower()
-
-                country = str(
-                    item.get(
-                        "Country",
-                        ""
-                    )
-                ).lower()
-
-                if (
-                    code == "SR"
-                    or
-                    "saudi" in name
-                    or
-                    "saudi" in country
-                    or
-                    "arabia" in country
-                ):
-
-                    if code:
-                        candidates.append(
-                            code
-                        )
-
-    except Exception as exc:
-
-        log(
-            f"ℹ️ تعذر اكتشاف سوق السعودية: {exc}"
+        symbols.append(
+            symbol
         )
 
-    candidates = list(
-        dict.fromkeys(candidates)
-    )
-
-    last_error = None
-
-    for exchange in candidates:
-
-        try:
-
-            symbols = (
-                await get_exchange_symbols(
-                    exchange
-                )
-            )
-
-            if symbols:
-
-                return symbols
-
-        except Exception as exc:
-
-            last_error = exc
-
-    if last_error:
-
-        raise last_error
-
-    return []
-
-
-# ============================================================
-# 🇺🇸 US
-# ============================================================
-
-async def get_us_symbols():
-
-    return await get_exchange_symbols(
-        "US"
+    return list(
+        dict.fromkeys(symbols)
     )
 
 
@@ -369,225 +321,251 @@ async def get_us_symbols():
 
 async def get_crypto_symbols():
 
-    return await get_exchange_symbols(
-        "CC"
+    log(
+        "📋 تحميل قائمة الرموز: CRYPTO"
+    )
+
+    data = await twelve(
+        "cryptocurrencies"
+    )
+
+    if not isinstance(
+        data,
+        list
+    ):
+
+        return []
+
+    symbols = []
+
+    for item in data:
+
+        if not isinstance(
+            item,
+            dict
+        ):
+            continue
+
+        symbol = str(
+            item.get(
+                "symbol",
+                ""
+            )
+        ).strip()
+
+        if symbol:
+            symbols.append(
+                symbol
+            )
+
+    return list(
+        dict.fromkeys(symbols)
     )
 
 
 # ============================================================
-# 📦 LOAD ALL SYMBOLS
+# 📦 LOAD SYMBOLS
 # ============================================================
 
-async def load_all_symbols():
+async def load_symbols():
 
-    results = await asyncio.gather(
+    global symbols_cache
 
-        get_tasi_symbols(),
-
-        get_us_symbols(),
-
-        get_crypto_symbols(),
-
-        return_exceptions=True
-    )
-
-    names = [
+    for market in [
         "TASI",
         "US",
         "CRYPTO"
-    ]
-
-    for market, result in zip(
-        names,
-        results
-    ):
-
-        if isinstance(
-            result,
-            Exception
-        ):
-
-            log(
-                f"ℹ️ {market}: "
-                f"{result}"
-            )
-
-            continue
-
-        symbols_cache[market] = {
-            "symbols": result,
-            "updated": time.time()
-        }
-
-        log(
-            f"✅ {market}: "
-            f"{len(result)} رمز جاهز"
-        )
-
-
-# ============================================================
-# 📦 BATCH
-# ============================================================
-
-def batches(items, size):
-
-    for index in range(
-        0,
-        len(items),
-        size
-    ):
-
-        yield items[
-            index:index + size
-        ]
-
-
-# ============================================================
-# 💰 LIVE QUOTES
-# ============================================================
-
-async def get_quotes(
-    market,
-    symbols
-):
-
-    if not symbols:
-        return []
-
-    suffix = {
-        "TASI": ".SR",
-        "US": ".US",
-        "CRYPTO": ".CC"
-    }[market]
-
-    normalized = []
-
-    for symbol in symbols:
-
-        symbol = str(
-            symbol
-        ).strip()
-
-        if not symbol:
-            continue
-
-        if "." not in symbol:
-
-            symbol += suffix
-
-        normalized.append(
-            symbol
-        )
-
-    quotes = []
-
-    # 100 رمز في كل طلب
-    for batch in batches(
-        normalized,
-        100
-    ):
-
-        if not batch:
-            continue
-
-        first = batch[0]
-
-        params = {}
-
-        if len(batch) > 1:
-
-            params["s"] = ",".join(
-                batch[1:]
-            )
+    ]:
 
         try:
 
-            data = await eodhd(
-                f"real-time/{first}",
-                params
+            if market == "CRYPTO":
+
+                symbols = (
+                    await get_crypto_symbols()
+                )
+
+            else:
+
+                symbols = (
+                    await get_stock_symbols(
+                        market
+                    )
+                )
+
+            # إزالة الأسهم الرخيصة جداً
+            # سيتم التأكد من السعر لاحقاً
+
+            symbols_cache[
+                market
+            ] = symbols[
+                :MAX_SYMBOLS_PER_MARKET
+            ]
+
+            log(
+                f"✅ {market}: "
+                f"{len(symbols_cache[market])} "
+                "رمز جاهز"
             )
-
-            if isinstance(
-                data,
-                list
-            ):
-
-                quotes.extend(data)
-
-            elif isinstance(
-                data,
-                dict
-            ):
-
-                quotes.append(data)
 
         except Exception as exc:
 
             log(
                 f"ℹ️ {market}: "
-                f"دفعة الأسعار: {exc}"
+                f"{exc}"
             )
 
-    return quotes
+
+# ============================================================
+# 💰 QUOTE
+# ============================================================
+
+async def get_quote(
+    symbol,
+    market
+):
+
+    params = {
+        "symbol": symbol
+    }
+
+    # Twelve Data يمكنه تحديد السوق
+    # من الرمز أو exchange
+
+    if market == "US":
+
+        params["exchange"] = "NASDAQ"
+
+    elif market == "TASI":
+
+        params["exchange"] = (
+            "Saudi Exchange"
+        )
+
+    try:
+
+        data = await twelve(
+            "quote",
+            params
+        )
+
+        if not isinstance(
+            data,
+            dict
+        ):
+
+            return None
+
+        return data
+
+    except Exception as exc:
+
+        log(
+            f"ℹ️ Quote {market} "
+            f"{symbol}: {exc}"
+        )
+
+        return None
 
 
 # ============================================================
 # 📈 HISTORY
 # ============================================================
 
-async def get_history(symbol):
+async def get_history(
+    symbol,
+    market
+):
+
+    key = (
+        market,
+        symbol
+    )
 
     now = time.time()
 
     cached = history_cache.get(
-        symbol
+        key
     )
 
     if cached:
 
         if (
             now - cached["time"]
-            < HISTORY_CACHE_SECONDS
+            < 21600
         ):
 
             return cached["data"]
 
+    params = {
+        "symbol": symbol,
+        "interval": "1day",
+        "outputsize": 100
+    }
+
+    if market == "US":
+
+        params["exchange"] = "NASDAQ"
+
+    elif market == "TASI":
+
+        params["exchange"] = (
+            "Saudi Exchange"
+        )
+
     try:
 
-        data = await eodhd(
-            f"eod/{symbol}",
-            {
-                "period": "d",
-                "from": "2025-01-01"
-            }
+        data = await twelve(
+            "time_series",
+            params
         )
+
+        values = []
 
         if isinstance(
             data,
-            list
+            dict
         ):
 
-            history_cache[symbol] = {
-                "data": data,
-                "time": now
-            }
+            values = data.get(
+                "values",
+                []
+            )
 
-            return data
+        if not values:
+
+            return []
+
+        # Twelve Data يعيد الأحدث أولاً
+        values = list(
+            reversed(values)
+        )
+
+        history_cache[key] = {
+            "data": values,
+            "time": now
+        }
+
+        return values
 
     except Exception as exc:
 
         log(
-            f"ℹ️ تاريخ {symbol}: {exc}"
+            f"ℹ️ تاريخ {market} "
+            f"{symbol}: {exc}"
         )
 
-    return []
+        return []
 
 
 # ============================================================
 # 📊 EMA
 # ============================================================
 
-def ema(values, period):
+def ema(
+    values,
+    period
+):
 
     if len(values) < period:
         return None
@@ -598,7 +576,8 @@ def ema(values, period):
     )
 
     multiplier = (
-        2 / (period + 1)
+        2
+        / (period + 1)
     )
 
     for value in values[period:]:
@@ -716,24 +695,15 @@ def atr(
         try:
 
             high = float(
-                row.get(
-                    "high",
-                    0
-                )
+                row["high"]
             )
 
             low = float(
-                row.get(
-                    "low",
-                    0
-                )
+                row["low"]
             )
 
             close = float(
-                row.get(
-                    "close",
-                    0
-                )
+                row["close"]
             )
 
         except Exception:
@@ -749,7 +719,9 @@ def atr(
 
         if previous_close is None:
 
-            tr = high - low
+            tr = (
+                high - low
+            )
 
         else:
 
@@ -794,7 +766,9 @@ def atr(
 # 🛡️ SUPPORT / RESISTANCE
 # ============================================================
 
-def support_resistance(data):
+def support_resistance(
+    data
+):
 
     if not data:
         return None, None
@@ -808,25 +782,17 @@ def support_resistance(data):
 
         try:
 
-            high = float(
-                row.get(
-                    "high",
-                    0
+            highs.append(
+                float(
+                    row["high"]
                 )
             )
 
-            low = float(
-                row.get(
-                    "low",
-                    0
+            lows.append(
+                float(
+                    row["low"]
                 )
             )
-
-            if high > 0:
-                highs.append(high)
-
-            if low > 0:
-                lows.append(low)
 
         except Exception:
 
@@ -846,7 +812,9 @@ def support_resistance(data):
 # 📊 VOLUME
 # ============================================================
 
-def volume_strength(data):
+def volume_strength(
+    data
+):
 
     if len(data) < 21:
         return 1.0
@@ -857,19 +825,19 @@ def volume_strength(data):
 
         try:
 
-            volume = float(
+            value = float(
                 row.get(
                     "volume",
                     0
                 )
             )
 
-            if volume > 0:
-                values.append(volume)
+            if value > 0:
+                values.append(value)
 
         except Exception:
 
-            continue
+            pass
 
     if not values:
         return 1.0
@@ -915,7 +883,7 @@ def analyze(
 
         symbol = str(
             quote.get(
-                "code",
+                "symbol",
                 ""
             )
         ).strip()
@@ -923,20 +891,14 @@ def analyze(
         price = float(
             quote.get(
                 "close",
-                quote.get(
-                    "price",
-                    0
-                )
+                0
             )
         )
 
         change = float(
             quote.get(
-                "change_p",
-                quote.get(
-                    "change",
-                    0
-                )
+                "percent_change",
+                0
             )
         )
 
@@ -952,9 +914,12 @@ def analyze(
 
     if (
         market == "US"
-        and
-        price < MIN_US_PRICE
+        and price < MIN_US_PRICE
     ):
+
+        return None
+
+    if len(history) < 60:
 
         return None
 
@@ -967,10 +932,15 @@ def analyze(
         try:
 
             close = float(
-                row.get(
-                    "close",
-                    0
-                )
+                row["close"]
+            )
+
+            high = float(
+                row["high"]
+            )
+
+            low = float(
+                row["low"]
             )
 
             if close <= 0:
@@ -986,6 +956,7 @@ def analyze(
     if len(closes) < 60:
         return None
 
+    # السعر الحالي
     closes.append(price)
 
     ema8 = ema(
@@ -1008,20 +979,8 @@ def analyze(
         14
     )
 
-    atr_data = clean + [
-        {
-            "high": price,
-            "low": price,
-            "close": price,
-            "volume": quote.get(
-                "volume",
-                0
-            )
-        }
-    ]
-
     atr14 = atr(
-        atr_data,
+        clean,
         14
     )
 
@@ -1037,18 +996,21 @@ def analyze(
         )
     )
 
-    if (
-        ema8 is None
-        or ema21 is None
-        or ema50 is None
-        or rsi14 is None
-        or atr14 is None
+    if any(
+        x is None
+        for x in [
+            ema8,
+            ema21,
+            ema50,
+            rsi14,
+            atr14
+        ]
     ):
 
         return None
 
     # ========================================================
-    # 🧠 SIGNAL SCORE
+    # 🧠 POWER ENGINE
     # ========================================================
 
     buy = 0
@@ -1098,22 +1060,32 @@ def analyze(
     )
 
     buy_power = round(
-        buy / total * 100
+        buy
+        / total
+        * 100
     )
 
     sell_power = round(
-        sell / total * 100
+        sell
+        / total
+        * 100
     )
 
     if buy_power >= 75:
 
         signal = "BUY"
+
         strength = buy_power
+
+        trend = "صاعد قوي"
 
     elif sell_power >= 75:
 
         signal = "SELL"
+
         strength = sell_power
+
+        trend = "هابط قوي"
 
     else:
 
@@ -1142,14 +1114,16 @@ def analyze(
 
             target = (
                 price
-                + atr14 * multiplier
+                + atr14
+                * multiplier
             )
 
         else:
 
             target = (
                 price
-                - atr14 * multiplier
+                - atr14
+                * multiplier
             )
 
         targets.append(
@@ -1159,6 +1133,10 @@ def analyze(
     return {
         "market": market,
         "symbol": symbol,
+        "name": quote.get(
+            "name",
+            symbol
+        ),
         "price": price,
         "change": change,
         "signal": signal,
@@ -1173,6 +1151,7 @@ def analyze(
         "atr": atr14,
         "support": support,
         "resistance": resistance,
+        "trend": trend,
         "targets": targets
     }
 
@@ -1186,6 +1165,8 @@ def number(value):
     if value is None:
         return "—"
 
+    value = float(value)
+
     if abs(value) >= 1000:
 
         return f"{value:,.2f}"
@@ -1198,7 +1179,7 @@ def number(value):
 
 
 # ============================================================
-# 📩 TELEGRAM SEND
+# 📩 TELEGRAM
 # ============================================================
 
 async def telegram_send(
@@ -1230,7 +1211,9 @@ async def telegram_send(
             json=payload
         ) as response:
 
-            return response.status == 200
+            return (
+                response.status == 200
+            )
 
     except Exception as exc:
 
@@ -1242,10 +1225,12 @@ async def telegram_send(
 
 
 # ============================================================
-# 📣 SIGNAL MESSAGE
+# 📣 SIGNAL
 # ============================================================
 
-async def send_signal(signal):
+async def send_signal(
+    signal
+):
 
     market = signal["market"]
 
@@ -1259,16 +1244,17 @@ async def send_signal(signal):
     if signal["signal"] == "BUY":
 
         arrow = "🟢⬆️"
+
         title = "شراء قوي"
-        trend = "صاعد قوي"
 
     else:
 
         arrow = "🔴⬇️"
+
         title = "بيع قوي"
-        trend = "هابط قوي"
 
     market_name = {
+
         "TASI":
             "🇸🇦 السوق السعودي (TASI)",
 
@@ -1277,6 +1263,7 @@ async def send_signal(signal):
 
         "CRYPTO":
             "🪙 العملات الرقمية (CRYPTO)"
+
     }[market]
 
     target_lines = []
@@ -1315,11 +1302,14 @@ async def send_signal(signal):
         )
 
     text = (
+
         "💀🚀 AI PRO MAX SIGNAL\n\n"
 
         f"{market_name}\n\n"
 
-        f"{signal['symbol']}\n\n"
+        f"{signal['symbol']}\n"
+
+        f"{signal['name']}\n\n"
 
         f"{arrow} {title}\n\n"
 
@@ -1363,7 +1353,7 @@ async def send_signal(signal):
         f"{number(signal['resistance'])}\n"
 
         f"📊 الاتجاه: "
-        f"{trend}\n\n"
+        f"{signal['trend']}\n\n"
 
         "🎯 أهداف ATR الثمانية:\n"
 
@@ -1381,16 +1371,18 @@ async def send_signal(signal):
     if not chats:
         return
 
-    # إرسال بالتوازي
     await asyncio.gather(
+
         *[
             telegram_send(
                 token,
                 chat_id,
                 text
             )
+
             for chat_id in chats
         ],
+
         return_exceptions=True
     )
 
@@ -1399,7 +1391,9 @@ async def send_signal(signal):
 # 🚫 DUPLICATE
 # ============================================================
 
-def can_send(signal):
+def can_send(
+    signal
+):
 
     key = (
         signal["market"],
@@ -1427,26 +1421,48 @@ def can_send(signal):
 
 
 # ============================================================
-# 🔍 PROCESS QUOTE
+# 🔍 PROCESS
 # ============================================================
 
-async def process_quote(
+async def process_symbol(
     market,
-    quote
+    symbol
 ):
 
-    symbol = str(
-        quote.get(
-            "code",
-            ""
-        )
-    ).strip()
+    quote = await get_quote(
+        symbol,
+        market
+    )
 
-    if not symbol:
+    if not quote:
+        return
+
+    try:
+
+        price = float(
+            quote.get(
+                "close",
+                0
+            )
+        )
+
+    except Exception:
+
+        return
+
+    if price <= 0:
+        return
+
+    if (
+        market == "US"
+        and price < MIN_US_PRICE
+    ):
+
         return
 
     history = await get_history(
-        symbol
+        symbol,
+        market
     )
 
     if not history:
@@ -1464,6 +1480,7 @@ async def process_quote(
     if not can_send(
         signal
     ):
+
         return
 
     await send_signal(
@@ -1472,17 +1489,16 @@ async def process_quote(
 
 
 # ============================================================
-# 🔎 SCAN MARKET
+# 🔎 MARKET SCAN
 # ============================================================
 
 async def scan_market(
     market
 ):
 
-    symbols = (
-        symbols_cache
-        .get(market, {})
-        .get("symbols", [])
+    symbols = symbols_cache.get(
+        market,
+        []
     )
 
     if not symbols:
@@ -1499,47 +1515,35 @@ async def scan_market(
         f"فحص {len(symbols)} رمز"
     )
 
-    quotes = await get_quotes(
-        market,
-        symbols
-    )
+    # لا نتجاوز حد الاتصالات
+    semaphore = asyncio.Semaphore(4)
 
-    if not quotes:
-
-        log(
-            f"ℹ️ {market}: "
-            "لم تصل أسعار"
-        )
-
-        return
-
-    semaphore = asyncio.Semaphore(
-        30
-    )
-
-    async def worker(quote):
+    async def worker(symbol):
 
         async with semaphore:
 
             try:
 
-                await process_quote(
+                await process_symbol(
                     market,
-                    quote
+                    symbol
                 )
 
             except Exception as exc:
 
                 log(
-                    f"ℹ️ {market}: "
-                    f"تحليل رمز: {exc}"
+                    f"ℹ️ {market} "
+                    f"{symbol}: "
+                    f"{exc}"
                 )
 
     await asyncio.gather(
+
         *[
-            worker(quote)
-            for quote in quotes
+            worker(symbol)
+            for symbol in symbols
         ],
+
         return_exceptions=True
     )
 
@@ -1562,29 +1566,30 @@ async def full_scan():
     started = time.monotonic()
 
     log(
-        ""
+        "============================================================"
+    )
+
+    log(
+        f"💀🚀 AI PRO MAX SCAN "
+        f"#{scan_number}"
     )
 
     log(
         "============================================================"
     )
 
-    log(
-        f"💀🚀 AI PRO MAX SCAN #{scan_number}"
-    )
+    # تحديث القوائم
+    await load_symbols()
 
-    log(
-        "============================================================"
-    )
-
-    # تحميل القوائم بالتوازي
-    await load_all_symbols()
-
-    # فحص الأسواق الثلاثة بالتوازي
+    # الأسواق الثلاثة
     await asyncio.gather(
+
         scan_market("TASI"),
+
         scan_market("US"),
+
         scan_market("CRYPTO"),
+
         return_exceptions=True
     )
 
@@ -1603,30 +1608,38 @@ async def full_scan():
 # 🤖 START MESSAGE
 # ============================================================
 
-def startup_message(market):
+def startup_message(
+    market
+):
 
     market_name = {
+
         "TASI":
-            "🇸🇦 السوق السعودي TASI",
+            "🇸🇦 السوق السعودي",
 
         "US":
             "🇺🇸 السوق الأمريكي",
 
         "CRYPTO":
             "🪙 العملات الرقمية"
+
     }[market]
 
     return (
+
         "💀🚀 AI PRO MAX\n\n"
 
         "✅ البوت يعمل الآن\n"
+
         "🔄 الفحص تلقائي وكامل\n"
+
         "⏱️ الفحص كل دقيقتين\n\n"
 
-        f"📊 السوق:\n"
+        f"📊 السوق: "
         f"{market_name}\n\n"
 
         "🧠 المحرك الذكي:\n"
+
         "• EMA 8\n"
         "• EMA 21\n"
         "• EMA 50\n"
@@ -1646,7 +1659,7 @@ def startup_message(market):
         "🤖 لا تحتاج إلى تشغيل الفحص يدويًا.\n\n"
 
         "📡 مصدر البيانات:\n"
-        "EODHD فقط"
+        "Twelve Data فقط"
     )
 
 
@@ -1658,7 +1671,6 @@ async def telegram_webhook(
     request
 ):
 
-    # لا نستخدم match_info نهائيًا
     path = request.path.lower()
 
     if path.endswith(
@@ -1743,8 +1755,11 @@ async def telegram_webhook(
     ):
 
         await telegram_send(
+
             token,
+
             chat_id,
+
             startup_message(
                 market
             )
@@ -1759,17 +1774,29 @@ async def telegram_webhook(
 # ❤️ HEALTH
 # ============================================================
 
-async def health(request):
+async def health(
+    request
+):
 
     return web.json_response({
+
         "status": "ok",
-        "system": "AI PRO MAX",
+
+        "system":
+            "AI PRO MAX",
+
+        "data":
+            "Twelve Data",
+
         "markets": [
             "TASI",
             "US",
             "CRYPTO"
         ],
-        "scan_seconds": SCAN_SECONDS
+
+        "scan_seconds":
+            SCAN_SECONDS
+
     })
 
 
@@ -1787,7 +1814,7 @@ async def set_webhook(
         return
 
     url = (
-        f"https://api.telegram.org/"
+        "https://api.telegram.org/"
         f"bot{token}/setWebhook"
     )
 
@@ -1804,11 +1831,10 @@ async def set_webhook(
             url,
             json={
                 "url": webhook_url,
-                "drop_pending_updates": True
+                "drop_pending_updates":
+                    True
             }
         ) as response:
-
-            body = await response.text()
 
             if response.status == 200:
 
@@ -1819,11 +1845,13 @@ async def set_webhook(
 
             else:
 
+                body = await response.text()
+
                 log(
                     f"ℹ️ Telegram Webhook "
                     f"{market.lower()}: "
                     f"HTTP {response.status} "
-                    f"{body[:300]}"
+                    f"{body[:200]}"
                 )
 
     except Exception as exc:
@@ -1835,7 +1863,7 @@ async def set_webhook(
 
 
 # ============================================================
-# 🌐 WEB SERVER
+# 🌐 SERVER
 # ============================================================
 
 async def start_server():
@@ -1882,7 +1910,8 @@ async def start_server():
     await site.start()
 
     log(
-        f"🚀 AI PRO MAX يعمل على PORT {PORT}"
+        f"🚀 AI PRO MAX يعمل "
+        f"على PORT {PORT}"
     )
 
     return runner
@@ -1986,31 +2015,38 @@ async def main():
     )
 
     log(
-        "📡 مصدر البيانات: EODHD فقط"
+        "📡 مصدر البيانات: "
+        "Twelve Data"
+    )
+
+    log(
+        f"📊 الحد لكل سوق: "
+        f"{MAX_SYMBOLS_PER_MARKET} رمز"
     )
 
     log(
         "============================================================"
     )
 
+    if not TWELVE_DATA_API_KEY:
+
+        log(
+            "ℹ️ مفتاح Twelve Data غير موجود"
+        )
+
     runner = await start_server()
 
-    # Railway public domain
-    domain = (
-        os.getenv(
-            "RAILWAY_PUBLIC_DOMAIN",
-            ""
-        ).strip()
-    )
+    domain = os.getenv(
+        "RAILWAY_PUBLIC_DOMAIN",
+        ""
+    ).strip()
 
     if not domain:
 
-        domain = (
-            os.getenv(
-                "RAILWAY_STATIC_URL",
-                ""
-            ).strip()
-        )
+        domain = os.getenv(
+            "RAILWAY_STATIC_URL",
+            ""
+        ).strip()
 
     if domain:
 
@@ -2047,7 +2083,7 @@ async def main():
     else:
 
         log(
-            "ℹ️ لم يتم العثور على Railway Public Domain"
+            "ℹ️ لا يوجد Railway Public Domain"
         )
 
     try:
@@ -2058,7 +2094,10 @@ async def main():
 
         await runner.cleanup()
 
-        if session and not session.closed:
+        if (
+            session
+            and not session.closed
+        ):
 
             await session.close()
 
