@@ -1,31 +1,19 @@
 # ============================================================
-# 💀🚀 AI PRO MAX — TASI + US + CRYPTO
-# ============================================================
-# ملف واحد
-# 3 بوتات Telegram
-# TASI 375
-# US Market
-# Crypto Market
-# 8 أهداف ATR
-# VWAP + ATR + RSI + EMA
-# Support / Resistance
-# ARS Market Direction
-# استمرار اتجاه صاعد 🟢 / هابط 🔴
-# News Sentiment
-# فحص تلقائي
-# منع تكرار الإشارات
+# AI PRO MAX — TASI + US + CRYPTO
+# Stable / Low-Connection Edition
 # ============================================================
 
 import os
 import time
-import math
-import requests
 import threading
-from datetime import datetime, timezone
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock, local
+
+import requests
 
 # ============================================================
-# 🔐 VARIABLES
+# VARIABLES — Railway
 # ============================================================
 
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "").strip()
@@ -36,21 +24,28 @@ US_TOKEN = os.getenv("US_TOKEN", "").strip()
 CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN", "").strip()
 
 # ============================================================
-# ⚙️ SETTINGS
+# SETTINGS
 # ============================================================
 
+BASE_URL = "https://api.twelvedata.com"
+
+# لا نفتح آلاف الاتصالات معًا
+MAX_WORKERS = 4
+
+# الحد الأدنى بين طلبات TwelveData
+REQUEST_GAP = 0.25
+
+# إعادة المحاولة عند 429 / أخطاء مؤقتة
+MAX_RETRIES = 3
+
+# بعد انتهاء دفعة الفحص، يبدأ التالي
 SCAN_INTERVAL = 120
 
-TIMEFRAMES = [
-    "5min",
-    "15min",
-    "30min",
-    "1h",
-    "4h",
-    "1day"
-]
+# تحديث قوائم الرموز كل 6 ساعات بدل طلبها كل دورتين
+SYMBOL_REFRESH_SECONDS = 21600
 
 PRIMARY_TIMEFRAME = "15min"
+OUTPUTSIZE = 220
 
 EMA_FAST = 8
 EMA_MID = 21
@@ -59,71 +54,169 @@ EMA_LONG = 200
 
 RSI_LENGTH = 14
 ATR_LENGTH = 14
-
-RSI_BUY = 30
-RSI_SELL = 70
-
 VOLUME_LENGTH = 20
-
-ATR_TARGET_1 = 1.0
-ATR_TARGET_2 = 1.5
-ATR_TARGET_3 = 2.0
-ATR_TARGET_4 = 2.5
-ATR_TARGET_5 = 3.0
-ATR_TARGET_6 = 3.5
-ATR_TARGET_7 = 4.0
-ATR_TARGET_8 = 5.0
-
-MAX_WORKERS = 8
 
 MIN_SIGNAL_SCORE = 70
 
+ATR_TARGETS = [
+    1.0, 1.5, 2.0, 2.5,
+    3.0, 3.5, 4.0, 5.0
+]
+
+# الأخبار لا تُطلب لكل الأسهم.
+# تطلب فقط عندما تكون إشارة فنية قوية.
+NEWS_ON_STRONG_SIGNAL_ONLY = True
+
+POSITIVE_WORDS = [
+    "beat", "beats", "growth", "profit", "profits",
+    "upgrade", "upgraded", "buy", "strong", "positive",
+    "partnership", "contract", "approval", "revenue",
+    "surge", "record", "raises guidance", "guidance"
+]
+
+NEGATIVE_WORDS = [
+    "loss", "losses", "downgrade", "downgraded", "sell",
+    "weak", "negative", "lawsuit", "decline", "drop",
+    "warning", "debt", "offering", "investigation",
+    "risk", "cuts guidance", "guidance cut"
+]
+
 # ============================================================
-# 🧠 STATE
+# GLOBAL STATE
 # ============================================================
 
+_thread_local = local()
+
+request_lock = Lock()
+last_request_time = 0.0
+
+state_lock = Lock()
 LAST_SIGNAL = {}
 TREND_STATE = {}
 
-LOCK = threading.Lock()
+symbol_cache_lock = Lock()
+SYMBOL_CACHE = {
+    "TASI": {"symbols": [], "updated": 0},
+    "US": {"symbols": [], "updated": 0},
+    "CRYPTO": {"symbols": [], "updated": 0},
+}
 
 # ============================================================
-# 📡 TWELVE DATA
+# HTTP SESSION
 # ============================================================
 
-BASE_URL = "https://api.twelvedata.com"
+def get_session():
+    """
+    Session مستقل لكل worker thread.
+    هذا يعيد استخدام TCP connections بدل إنشاء اتصال جديد لكل طلب.
+    """
+    session = getattr(_thread_local, "session", None)
+
+    if session is None:
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": "AI-PRO-MAX/Stable"
+        })
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=MAX_WORKERS + 2,
+            pool_maxsize=MAX_WORKERS + 2,
+            max_retries=0,
+        )
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        _thread_local.session = session
+
+    return session
+
+
+def rate_wait():
+    global last_request_time
+
+    with request_lock:
+        now = time.monotonic()
+        wait = REQUEST_GAP - (now - last_request_time)
+
+        if wait > 0:
+            time.sleep(wait)
+
+        last_request_time = time.monotonic()
 
 
 def td_request(endpoint, params=None):
+    """
+    طلب آمن:
+    - Session reuse
+    - Rate limit
+    - Retry
+    - معالجة 429
+    - لا يفتح آلاف الاتصالات
+    """
     if not TWELVEDATA_API_KEY:
         return None
 
-    params = params or {}
+    params = dict(params or {})
     params["apikey"] = TWELVEDATA_API_KEY
 
-    try:
-        response = requests.get(
-            BASE_URL + endpoint,
-            params=params,
-            timeout=20
-        )
+    session = get_session()
 
-        if response.status_code != 200:
+    for attempt in range(MAX_RETRIES):
+        try:
+            rate_wait()
+
+            response = session.get(
+                BASE_URL + endpoint,
+                params=params,
+                timeout=(10, 30),
+            )
+
+            if response.status_code == 429:
+                retry_after = response.headers.get("Retry-After")
+                try:
+                    delay = float(retry_after)
+                except Exception:
+                    delay = min(10, 2 ** attempt)
+
+                time.sleep(delay)
+                continue
+
+            if response.status_code in (500, 502, 503, 504):
+                time.sleep(min(10, 2 ** attempt))
+                continue
+
+            if response.status_code != 200:
+                return None
+
+            try:
+                data = response.json()
+            except ValueError:
+                return None
+
+            if isinstance(data, dict):
+                status = str(data.get("status", "")).lower()
+
+                if status == "error":
+                    return None
+
+                if data.get("code") in (429, "429"):
+                    time.sleep(min(10, 2 ** attempt))
+                    continue
+
+            return data
+
+        except (requests.Timeout, requests.ConnectionError):
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(min(10, 2 ** attempt))
+            else:
+                return None
+
+        except Exception:
             return None
 
-        data = response.json()
-
-        if isinstance(data, dict) and data.get("status") == "error":
-            return None
-
-        return data
-
-    except Exception:
-        return None
+    return None
 
 
 # ============================================================
-# 📊 INDICATORS
+# INDICATORS
 # ============================================================
 
 def ema(values, length):
@@ -131,13 +224,19 @@ def ema(values, length):
         return None
 
     multiplier = 2 / (length + 1)
-
     result = sum(values[:length]) / length
 
     for value in values[length:]:
         result = ((value - result) * multiplier) + result
 
     return result
+
+
+def sma(values, length):
+    if len(values) < length:
+        return None
+
+    return sum(values[-length:]) / length
 
 
 def rsi(values, length=14):
@@ -152,9 +251,9 @@ def rsi(values, length=14):
 
         if change > 0:
             gains.append(change)
-            losses.append(0)
+            losses.append(0.0)
         else:
-            gains.append(0)
+            gains.append(0.0)
             losses.append(abs(change))
 
     avg_gain = sum(gains[:length]) / length
@@ -165,11 +264,10 @@ def rsi(values, length=14):
         avg_loss = ((avg_loss * (length - 1)) + losses[i]) / length
 
     if avg_loss == 0:
-        return 100
+        return 100.0
 
     rs = avg_gain / avg_loss
-
-    return 100 - (100 / (1 + rs))
+    return 100.0 - (100.0 / (1.0 + rs))
 
 
 def atr(highs, lows, closes, length=14):
@@ -182,9 +280,8 @@ def atr(highs, lows, closes, length=14):
         tr = max(
             highs[i] - lows[i],
             abs(highs[i] - closes[i - 1]),
-            abs(lows[i] - closes[i - 1])
+            abs(lows[i] - closes[i - 1]),
         )
-
         trs.append(tr)
 
     if len(trs) < length:
@@ -199,52 +296,38 @@ def atr(highs, lows, closes, length=14):
 
 
 def vwap(highs, lows, closes, volumes):
-
-    cumulative_price_volume = 0
-    cumulative_volume = 0
+    cumulative_pv = 0.0
+    cumulative_volume = 0.0
 
     for high, low, close, volume in zip(
-        highs,
-        lows,
-        closes,
-        volumes
+        highs, lows, closes, volumes
     ):
-        typical = (high + low + close) / 3
-
-        cumulative_price_volume += typical * volume
+        typical = (high + low + close) / 3.0
+        cumulative_pv += typical * volume
         cumulative_volume += volume
 
-    if cumulative_volume == 0:
+    if cumulative_volume <= 0:
         return None
 
-    return cumulative_price_volume / cumulative_volume
-
-
-def sma(values, length):
-
-    if len(values) < length:
-        return None
-
-    return sum(values[-length:]) / length
+    return cumulative_pv / cumulative_volume
 
 
 # ============================================================
-# 📥 PRICE DATA
+# PRICE DATA
 # ============================================================
 
-def get_series(symbol, interval, outputsize=220):
-
+def get_series(symbol, interval=PRIMARY_TIMEFRAME):
     data = td_request(
         "/time_series",
         {
             "symbol": symbol,
             "interval": interval,
-            "outputsize": outputsize,
-            "format": "JSON"
-        }
+            "outputsize": OUTPUTSIZE,
+            "format": "JSON",
+        },
     )
 
-    if not data:
+    if not isinstance(data, dict):
         return None
 
     values = data.get("values")
@@ -252,94 +335,78 @@ def get_series(symbol, interval, outputsize=220):
     if not values:
         return None
 
-    values = list(reversed(values))
-
     candles = []
 
-    for item in values:
-
+    for item in reversed(values):
         try:
-
             candles.append({
                 "datetime": item.get("datetime"),
                 "open": float(item["open"]),
                 "high": float(item["high"]),
                 "low": float(item["low"]),
                 "close": float(item["close"]),
-                "volume": float(item.get("volume", 0))
+                "volume": float(item.get("volume", 0) or 0),
             })
-
-        except Exception:
+        except (TypeError, ValueError, KeyError):
             continue
 
-    return candles
+    return candles if len(candles) >= 100 else None
 
 
 # ============================================================
-# 🧱 SUPPORT / RESISTANCE
+# SUPPORT / RESISTANCE
 # ============================================================
 
 def support_resistance(candles):
-
     if len(candles) < 30:
         return None, None
 
     recent = candles[-50:]
+    highs = [c["high"] for c in recent]
+    lows = [c["low"] for c in recent]
 
-    highs = [x["high"] for x in recent]
-    lows = [x["low"] for x in recent]
-
-    resistance = max(highs)
-    support = min(lows)
-
-    return support, resistance
+    return min(lows), max(highs)
 
 
 # ============================================================
-# 📈 MARKET TREND
+# TREND
 # ============================================================
 
 def calculate_trend(candles):
-
-    closes = [x["close"] for x in candles]
+    closes = [c["close"] for c in candles]
 
     e8 = ema(closes, EMA_FAST)
     e21 = ema(closes, EMA_MID)
     e50 = ema(closes, EMA_SLOW)
     e200 = ema(closes, EMA_LONG)
 
+    if None in (e8, e21, e50, e200):
+        return "NEUTRAL"
+
     current = closes[-1]
 
     bullish = 0
     bearish = 0
 
-    if e8 and e21:
+    if e8 > e21:
+        bullish += 1
+    else:
+        bearish += 1
 
-        if e8 > e21:
-            bullish += 1
-        else:
-            bearish += 1
+    if e21 > e50:
+        bullish += 1
+    else:
+        bearish += 1
 
-    if e21 and e50:
+    if e50 > e200:
+        bullish += 1
+    else:
+        bearish += 1
 
-        if e21 > e50:
-            bullish += 1
-        else:
-            bearish += 1
-
-    if e50 and e200:
-
-        if e50 > e200:
-            bullish += 1
-        else:
-            bearish += 1
-
-    if e200:
-
-        if current > e200:
-            bullish += 1
-        else:
-            bearish += 1
+    if current > e200:
+        bullish += 1
+    else:
+        bearish += 1
 
     if bullish >= 3:
         return "UP"
@@ -350,23 +417,34 @@ def calculate_trend(candles):
     return "NEUTRAL"
 
 
+def persistent_trend(market, symbol, current_trend):
+    key = f"{market}:{symbol}"
+
+    with state_lock:
+        previous = TREND_STATE.get(key)
+
+        if current_trend == "NEUTRAL":
+            return previous or "NEUTRAL"
+
+        TREND_STATE[key] = current_trend
+        return current_trend
+
+
 # ============================================================
-# 🧠 ARS — AUTOMATIC MARKET DIRECTION SCORE
+# ARS
 # ============================================================
 
 def calculate_ars(candles):
-
-    closes = [x["close"] for x in candles]
+    closes = [c["close"] for c in candles]
 
     if len(closes) < 50:
         return 50
-
-    score = 50
 
     e8 = ema(closes, 8)
     e21 = ema(closes, 21)
     e50 = ema(closes, 50)
 
+    score = 50
     current = closes[-1]
 
     if e8 > e21:
@@ -388,26 +466,22 @@ def calculate_ars(candles):
 
 
 # ============================================================
-# 🐋 BUY / SELL POWER
+# BUY / SELL POWER
 # ============================================================
 
 def calculate_power(candles):
-
     recent = candles[-20:]
 
-    buy_volume = 0
-    sell_volume = 0
+    buy_volume = 0.0
+    sell_volume = 0.0
 
     for candle in recent:
-
         volume = candle["volume"]
 
         if candle["close"] > candle["open"]:
             buy_volume += volume
-
         elif candle["close"] < candle["open"]:
             sell_volume += volume
-
         else:
             buy_volume += volume * 0.5
             sell_volume += volume * 0.5
@@ -415,21 +489,16 @@ def calculate_power(candles):
     total = buy_volume + sell_volume
 
     if total <= 0:
-        return 50, 50
+        return 50.0, 50.0
 
-    buy = (buy_volume / total) * 100
-    sell = (sell_volume / total) * 100
+    return (
+        buy_volume / total * 100,
+        sell_volume / total * 100,
+    )
 
-    return buy, sell
-
-
-# ============================================================
-# 📊 VOLUME STRENGTH
-# ============================================================
 
 def volume_strength(candles):
-
-    volumes = [x["volume"] for x in candles]
+    volumes = [c["volume"] for c in candles]
 
     if len(volumes) < VOLUME_LENGTH + 1:
         return 1.0
@@ -443,108 +512,35 @@ def volume_strength(candles):
 
 
 # ============================================================
-# 🎯 8 ATR TARGETS
+# TARGETS
 # ============================================================
 
-def targets(price, atr_value, direction):
-
-    multipliers = [
-        ATR_TARGET_1,
-        ATR_TARGET_2,
-        ATR_TARGET_3,
-        ATR_TARGET_4,
-        ATR_TARGET_5,
-        ATR_TARGET_6,
-        ATR_TARGET_7,
-        ATR_TARGET_8
-    ]
+def calculate_targets(price, atr_value, direction):
+    if not atr_value or atr_value <= 0:
+        return []
 
     result = []
 
-    for multiplier in multipliers:
-
+    for multiplier in ATR_TARGETS:
         if direction == "UP":
-            target = price + (atr_value * multiplier)
+            result.append(price + atr_value * multiplier)
         else:
-            target = price - (atr_value * multiplier)
-
-        result.append(target)
+            result.append(price - atr_value * multiplier)
 
     return result
 
 
 # ============================================================
-# 🟢🔴 PERSISTENT TREND
+# NEWS
 # ============================================================
-
-def persistent_trend(symbol, current_trend):
-
-    with LOCK:
-
-        previous = TREND_STATE.get(symbol)
-
-        if current_trend == "NEUTRAL":
-
-            if previous:
-                return previous
-
-            return "NEUTRAL"
-
-        TREND_STATE[symbol] = current_trend
-
-        return current_trend
-
-
-# ============================================================
-# 📰 NEWS SENTIMENT
-# ============================================================
-
-POSITIVE_WORDS = [
-    "beat",
-    "beats",
-    "growth",
-    "profit",
-    "profits",
-    "upgrade",
-    "upgraded",
-    "buy",
-    "strong",
-    "positive",
-    "partnership",
-    "contract",
-    "approval",
-    "revenue",
-    "surge",
-    "record"
-]
-
-NEGATIVE_WORDS = [
-    "loss",
-    "losses",
-    "downgrade",
-    "downgraded",
-    "sell",
-    "weak",
-    "negative",
-    "lawsuit",
-    "decline",
-    "drop",
-    "warning",
-    "debt",
-    "offering",
-    "investigation",
-    "risk"
-]
-
 
 def news_sentiment(symbol):
-
     data = td_request(
         "/news",
         {
             "symbol": symbol,
-            "limit": 10
-        }
+            "limit": 10,
+        },
     )
 
     if not data:
@@ -552,8 +548,10 @@ def news_sentiment(symbol):
 
     if isinstance(data, dict):
         articles = data.get("news", [])
-    else:
+    elif isinstance(data, list):
         articles = data
+    else:
+        articles = []
 
     if not articles:
         return "⚪ محايد"
@@ -562,20 +560,16 @@ def news_sentiment(symbol):
     negative = 0
 
     for article in articles:
+        if not isinstance(article, dict):
+            continue
 
         text = (
-            str(article.get("title", "")) +
-            " " +
+            str(article.get("title", "")) + " " +
             str(article.get("description", ""))
         ).lower()
 
-        for word in POSITIVE_WORDS:
-            if word in text:
-                positive += 1
-
-        for word in NEGATIVE_WORDS:
-            if word in text:
-                negative += 1
+        positive += sum(1 for word in POSITIVE_WORDS if word in text)
+        negative += sum(1 for word in NEGATIVE_WORDS if word in text)
 
     if positive > negative:
         return "🟢 إيجابي"
@@ -587,134 +581,78 @@ def news_sentiment(symbol):
 
 
 # ============================================================
-# 🧠 SIGNAL ENGINE
+# ANALYSIS
 # ============================================================
 
 def analyze_symbol(symbol, market):
+    candles = get_series(symbol)
 
-    candles = get_series(
-        symbol,
-        PRIMARY_TIMEFRAME,
-        220
-    )
-
-    if not candles or len(candles) < 100:
+    if not candles:
         return None
 
-    closes = [x["close"] for x in candles]
-    highs = [x["high"] for x in candles]
-    lows = [x["low"] for x in candles]
-    volumes = [x["volume"] for x in candles]
+    closes = [c["close"] for c in candles]
+    highs = [c["high"] for c in candles]
+    lows = [c["low"] for c in candles]
+    volumes = [c["volume"] for c in candles]
 
     price = closes[-1]
 
-    ema8 = ema(closes, EMA_FAST)
-    ema21 = ema(closes, EMA_MID)
-    ema50 = ema(closes, EMA_SLOW)
-    ema200 = ema(closes, EMA_LONG)
+    e8 = ema(closes, EMA_FAST)
+    e21 = ema(closes, EMA_MID)
+    e50 = ema(closes, EMA_SLOW)
+    e200 = ema(closes, EMA_LONG)
 
-    rsi_value = rsi(
-        closes,
-        RSI_LENGTH
-    )
-
-    atr_value = atr(
-        highs,
-        lows,
-        closes,
-        ATR_LENGTH
-    )
-
-    vwap_value = vwap(
-        highs,
-        lows,
-        closes,
-        volumes
-    )
+    rsi_value = rsi(closes, RSI_LENGTH)
+    atr_value = atr(highs, lows, closes, ATR_LENGTH)
+    vwap_value = vwap(highs, lows, closes, volumes)
 
     support, resistance = support_resistance(candles)
-
     ars = calculate_ars(candles)
-
     buy_power, sell_power = calculate_power(candles)
-
     volume_ratio = volume_strength(candles)
 
     raw_trend = calculate_trend(candles)
-
-    trend = persistent_trend(
-        symbol,
-        raw_trend
-    )
+    trend = persistent_trend(market, symbol, raw_trend)
 
     score = 50
 
-    # EMA
-    if price > ema8:
-        score += 5
-    else:
-        score -= 5
+    if e8 is not None:
+        score += 5 if price > e8 else -5
 
-    if ema8 > ema21:
-        score += 7
-    else:
-        score -= 7
+    if e8 is not None and e21 is not None:
+        score += 7 if e8 > e21 else -7
 
-    if ema21 > ema50:
-        score += 7
-    else:
-        score -= 7
+    if e21 is not None and e50 is not None:
+        score += 7 if e21 > e50 else -7
 
-    if ema50 > ema200:
-        score += 7
-    else:
-        score -= 7
+    if e50 is not None and e200 is not None:
+        score += 7 if e50 > e200 else -7
 
-    # VWAP
-    if vwap_value:
+    if vwap_value is not None:
+        score += 7 if price > vwap_value else -7
 
-        if price > vwap_value:
-            score += 7
-        else:
-            score -= 7
-
-    # RSI
-    if rsi_value:
-
+    if rsi_value is not None:
         if 50 <= rsi_value <= 70:
             score += 8
-
         elif 30 <= rsi_value < 50:
             score += 2
-
         elif rsi_value < 30:
             score += 5
-
         elif rsi_value > 70:
             score -= 3
 
-    # Buy / Sell power
-    if buy_power > sell_power:
-        score += 8
-    else:
-        score -= 8
+    score += 8 if buy_power > sell_power else -8
 
-    # Volume
     if volume_ratio >= 1.5:
         score += 5
 
     score = max(0, min(100, score))
-
-    # ========================================================
-    # SIGNAL
-    # ========================================================
 
     if (
         trend == "UP"
         and score >= MIN_SIGNAL_SCORE
         and buy_power >= sell_power
     ):
-
         signal = "BUY"
         signal_text = "🟢 شراء قوي"
 
@@ -723,51 +661,37 @@ def analyze_symbol(symbol, market):
         and score <= 45
         and sell_power >= buy_power
     ):
-
         signal = "SELL"
         signal_text = "🔴 بيع قوي"
 
     else:
-
         signal = "WAIT"
         signal_text = "⚪ انتظار"
 
-    # ========================================================
-    # TARGETS
-    # ========================================================
+    targets = []
 
-    direction = "UP" if signal == "BUY" else "DOWN"
-
-    target_values = []
-
-    if atr_value and signal != "WAIT":
-
-        target_values = targets(
+    if signal != "WAIT":
+        direction = "UP" if signal == "BUY" else "DOWN"
+        targets = calculate_targets(
             price,
             atr_value,
-            direction
+            direction,
         )
 
-    # ========================================================
-    # NEWS
-    # ========================================================
-
-    if market == "US":
-
+    # الأخبار فقط عند وجود إشارة قوية
+    if market == "US" and signal != "WAIT":
         news = news_sentiment(symbol)
-
     else:
-
         news = "⚪ غير متاح"
 
     return {
         "symbol": symbol,
         "market": market,
         "price": price,
-        "ema8": ema8,
-        "ema21": ema21,
-        "ema50": ema50,
-        "ema200": ema200,
+        "ema8": e8,
+        "ema21": e21,
+        "ema50": e50,
+        "ema200": e200,
         "rsi": rsi_value,
         "atr": atr_value,
         "vwap": vwap_value,
@@ -782,18 +706,19 @@ def analyze_symbol(symbol, market):
         "signal": signal,
         "signal_text": signal_text,
         "news": news,
-        "targets": target_values
+        "targets": targets,
     }
 
 
 # ============================================================
-# 🔢 FORMAT
+# FORMAT
 # ============================================================
 
 def fmt(value):
-
     if value is None:
         return "-"
+
+    value = float(value)
 
     if abs(value) >= 1_000_000_000:
         return f"{value / 1_000_000_000:.2f}B"
@@ -804,234 +729,157 @@ def fmt(value):
     if abs(value) >= 1_000:
         return f"{value / 1_000:.2f}K"
 
-    return f"{value:.2f}"
+    return f"{value:.4f}"
 
 
 def pct(value):
-
     if value is None:
         return "-"
-
     return f"{value:.1f}%"
 
 
 # ============================================================
-# 📱 TELEGRAM
+# TELEGRAM
 # ============================================================
 
 def telegram_send(token, message):
-
     if not token or not CHAT_ID:
         return False
 
-    url = (
-        "https://api.telegram.org/bot"
-        + token
-        + "/sendMessage"
-    )
+    # Telegram أيضاً يستخدم Session معاد الاستخدام
+    session = get_session()
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
 
     try:
-
-        response = requests.post(
+        response = session.post(
             url,
             data={
                 "chat_id": CHAT_ID,
                 "text": message,
                 "parse_mode": "HTML",
-                "disable_web_page_preview": True
+                "disable_web_page_preview": True,
             },
-            timeout=20
+            timeout=(10, 30),
         )
-
         return response.ok
-
     except Exception:
         return False
 
 
 # ============================================================
-# 📨 MESSAGE
+# MESSAGE
 # ============================================================
 
 def build_message(result):
-
     market = result["market"]
 
-    if market == "TASI":
-        market_name = "🇸🇦 السوق السعودي TASI"
+    names = {
+        "TASI": "🇸🇦 السوق السعودي TASI",
+        "US": "🇺🇸 السوق الأمريكي US",
+        "CRYPTO": "🪙 سوق العملات الرقمية",
+    }
 
-    elif market == "US":
-        market_name = "🇺🇸 السوق الأمريكي US"
-
-    else:
-        market_name = "🪙 العملات الرقمية CRYPTO"
+    market_name = names.get(market, market)
 
     if result["trend"] == "UP":
-
         trend_text = "🟢 اتجاه صاعد"
-
     elif result["trend"] == "DOWN":
-
         trend_text = "🔴 اتجاه هابط"
-
     else:
-
         trend_text = "⚪ اتجاه محايد"
 
-    if result["vwap"]:
-
-        if result["price"] > result["vwap"]:
-            vwap_text = "🟢 فوق VWAP"
-
-        else:
-            vwap_text = "🔴 تحت VWAP"
-
+    if result["vwap"] is not None:
+        vwap_text = (
+            "🟢 فوق VWAP"
+            if result["price"] > result["vwap"]
+            else "🔴 تحت VWAP"
+        )
     else:
-
         vwap_text = "-"
 
-    text = []
-
-    text.append("💀🚀 <b>AI PRO MAX SIGNAL</b>")
-    text.append("")
-    text.append(market_name)
-    text.append("")
-    text.append(
-        f"<b>{result['symbol']}</b>"
-    )
-
-    text.append("")
-    text.append(
-        f"{result['signal_text']}   |   قوة الإشارة: "
-        f"<b>{result['score']}/100</b>"
-    )
-
-    text.append("")
-    text.append(
-        f"💰 السعر: <b>{fmt(result['price'])}</b>"
-    )
-
-    text.append(
-        f"📈 EMA 8: {fmt(result['ema8'])}"
-    )
-
-    text.append(
-        f"EMA 21: {fmt(result['ema21'])}"
-    )
-
-    text.append(
-        f"EMA 50: {fmt(result['ema50'])}"
-    )
-
-    text.append(
-        f"EMA 200: {fmt(result['ema200'])}"
-    )
-
-    text.append("")
-    text.append(
-        f"🧠 RSI: {fmt(result['rsi'])}"
-    )
-
-    text.append(
-        f"📐 ATR: {fmt(result['atr'])}"
-    )
-
-    text.append(
-        f"📊 VWAP: {fmt(result['vwap'])} "
-        f"{vwap_text}"
-    )
-
-    text.append("")
-    text.append(
-        f"🟢 قوة الشراء: {pct(result['buy_power'])}"
-    )
-
-    text.append(
-        f"🔴 قوة البيع: {pct(result['sell_power'])}"
-    )
-
-    text.append(
-        f"📦 قوة الحجم: {result['volume_ratio']:.2f}x"
-    )
-
-    text.append("")
-    text.append(
-        f"🛡️ الدعم: <b>{fmt(result['support'])}</b>"
-    )
-
-    text.append(
-        f"🚧 المقاومة: <b>{fmt(result['resistance'])}</b>"
-    )
-
-    text.append("")
-    text.append(
-        f"🧭 ARS: <b>{result['ars']}/100</b>"
-    )
-
-    text.append(
-        f"📈 اتجاه السوق: <b>{trend_text}</b>"
-    )
+    lines = [
+        "💀🚀 <b>AI PRO MAX SIGNAL</b>",
+        "",
+        market_name,
+        "",
+        f"<b>{result['symbol']}</b>",
+        "",
+        f"{result['signal_text']} | قوة الإشارة: "
+        f"<b>{result['score']}/100</b>",
+        "",
+        f"💰 السعر: <b>{fmt(result['price'])}</b>",
+        f"📈 EMA 8: {fmt(result['ema8'])}",
+        f"📈 EMA 21: {fmt(result['ema21'])}",
+        f"📈 EMA 50: {fmt(result['ema50'])}",
+        f"📈 EMA 200: {fmt(result['ema200'])}",
+        "",
+        f"🧠 RSI: {fmt(result['rsi'])}",
+        f"📐 ATR: {fmt(result['atr'])}",
+        f"📊 VWAP: {fmt(result['vwap'])} {vwap_text}",
+        "",
+        f"🟢 قوة الشراء: {pct(result['buy_power'])}",
+        f"🔴 قوة البيع: {pct(result['sell_power'])}",
+        f"📦 قوة الحجم: {result['volume_ratio']:.2f}x",
+        "",
+        f"🛡️ الدعم: <b>{fmt(result['support'])}</b>",
+        f"🚧 المقاومة: <b>{fmt(result['resistance'])}</b>",
+        "",
+        f"🧭 ARS: <b>{result['ars']}/100</b>",
+        f"📈 اتجاه السوق: <b>{trend_text}</b>",
+    ]
 
     if market == "US":
-
-        text.append(
+        lines.append(
             f"📰 أخبار السهم: <b>{result['news']}</b>"
         )
 
     if result["targets"]:
+        lines.extend([
+            "",
+            "🎯 <b>أهداف ATR — 8 أهداف</b>",
+        ])
 
-        text.append("")
-        text.append("🎯 <b>أهداف ATR — 8 أهداف</b>")
+        for i, target in enumerate(result["targets"], 1):
+            if result["price"]:
+                change = (
+                    (target - result["price"])
+                    / result["price"]
+                    * 100
+                )
+            else:
+                change = 0
 
-        for i, target in enumerate(
-            result["targets"],
-            start=1
-        ):
-
-            change = (
-                (target - result["price"])
-                / result["price"]
-            ) * 100
-
-            text.append(
-                f"TP{i}: {fmt(target)} "
-                f"({change:+.2f}%)"
+            lines.append(
+                f"TP{i}: {fmt(target)} ({change:+.2f}%)"
             )
 
-    text.append("")
-    text.append(
-        "🤖 الفحص تلقائي"
-    )
+    lines.extend([
+        "",
+        "🤖 الفحص تلقائي",
+        "🔄 الاتجاه يستمر حتى ظهور انعكاس مؤكد",
+        f"⏱️ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+    ])
 
-    text.append(
-        "🔄 الاتجاه يستمر حتى ظهور انعكاس مؤكد"
-    )
-
-    text.append(
-        f"⏱️ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    )
-
-    return "\n".join(text)
+    return "\n".join(lines)
 
 
 # ============================================================
-# 🚫 DUPLICATE CONTROL
+# DUPLICATE CONTROL
 # ============================================================
 
 def should_send(result):
-
     if result["signal"] == "WAIT":
         return False
 
-    key = result["symbol"]
+    key = f"{result['market']}:{result['symbol']}"
 
     current_state = (
         result["signal"],
-        result["trend"]
+        result["trend"],
     )
 
-    with LOCK:
-
+    with state_lock:
         previous = LAST_SIGNAL.get(key)
 
         if previous == current_state:
@@ -1043,328 +891,262 @@ def should_send(result):
 
 
 # ============================================================
-# 📋 SYMBOL DISCOVERY
+# SYMBOL DISCOVERY
 # ============================================================
 
-def get_tasi_symbols():
-
-    data = td_request(
-        "/stocks",
-        {
-            "exchange": "TADAWUL"
-        }
-    )
+def _extract_symbols(data):
+    if isinstance(data, dict):
+        values = data.get("data", [])
+    elif isinstance(data, list):
+        values = data
+    else:
+        values = []
 
     symbols = []
 
-    if isinstance(data, dict):
-
-        values = data.get("data", [])
-
-    else:
-
-        values = data or []
-
     for item in values:
+        if not isinstance(item, dict):
+            continue
 
         symbol = item.get("symbol")
 
         if symbol:
-            symbols.append(symbol)
+            symbols.append(str(symbol).strip())
 
-    return symbols[:375]
+    return list(dict.fromkeys(symbols))
+
+
+def get_tasi_symbols():
+    data = td_request(
+        "/stocks",
+        {"exchange": "TADAWUL"},
+    )
+
+    return _extract_symbols(data)[:375]
 
 
 def get_us_symbols():
-
     symbols = []
 
-    exchanges = [
-        "NASDAQ",
-        "NYSE",
-        "AMEX"
-    ]
-
-    for exchange in exchanges:
-
+    for exchange in ("NASDAQ", "NYSE", "AMEX"):
         data = td_request(
             "/stocks",
-            {
-                "exchange": exchange
-            }
+            {"exchange": exchange},
         )
-
-        if not data:
-            continue
-
-        values = data.get("data", [])
-
-        for item in values:
-
-            symbol = item.get("symbol")
-
-            if symbol:
-                symbols.append(symbol)
+        symbols.extend(_extract_symbols(data))
 
     return list(dict.fromkeys(symbols))
 
 
 def get_crypto_symbols():
-
     data = td_request(
         "/cryptocurrencies",
-        {}
+        {},
     )
 
-    symbols = []
+    return _extract_symbols(data)
 
-    if isinstance(data, dict):
 
-        values = data.get("data", [])
+# ============================================================
+# SYMBOL CACHE
+# ============================================================
 
-    else:
+def get_symbols(market, loader):
+    now = time.time()
 
-        values = data or []
+    with symbol_cache_lock:
+        cached = SYMBOL_CACHE[market]
 
-    for item in values:
+        if (
+            cached["symbols"]
+            and now - cached["updated"] < SYMBOL_REFRESH_SECONDS
+        ):
+            return list(cached["symbols"])
 
-        symbol = item.get("symbol")
+    symbols = loader()
 
-        if symbol:
-            symbols.append(symbol)
+    if symbols:
+        with symbol_cache_lock:
+            SYMBOL_CACHE[market] = {
+                "symbols": list(symbols),
+                "updated": now,
+            }
 
     return symbols
 
 
 # ============================================================
-# 🔎 SCAN MARKET
+# MARKET SCANNER
 # ============================================================
 
-def scan_market(
-    symbols,
-    market,
-    token
-):
-
+def scan_market(symbols, market, token):
     if not symbols:
+        print(f"[{market}] لا توجد رموز للفحص")
         return
 
+    total = len(symbols)
+
     print(
-        f"[{market}] "
-        f"Scanning {len(symbols)} symbols..."
+        f"[{market}] بدء الفحص: {total} رمز | "
+        f"Workers={MAX_WORKERS}"
     )
 
-    with ThreadPoolExecutor(
-        max_workers=MAX_WORKERS
-    ) as executor:
+    completed = 0
+    signals = 0
 
-        jobs = {
-            executor.submit(
-                analyze_symbol,
-                symbol,
-                market
-            ): symbol
+    # دفعات صغيرة:
+    # لا نضع آلاف Future objects في الذاكرة دفعة واحدة.
+    BATCH_SIZE = MAX_WORKERS * 10
 
-            for symbol in symbols
-        }
+    for start in range(0, total, BATCH_SIZE):
+        batch = symbols[start:start + BATCH_SIZE]
 
-        for job in as_completed(jobs):
+        with ThreadPoolExecutor(
+            max_workers=MAX_WORKERS
+        ) as executor:
 
-            try:
+            jobs = {
+                executor.submit(
+                    analyze_symbol,
+                    symbol,
+                    market,
+                ): symbol
+                for symbol in batch
+            }
 
-                result = job.result()
+            for job in as_completed(jobs):
+                completed += 1
 
-                if not result:
-                    continue
+                try:
+                    result = job.result()
 
-                if should_send(result):
+                    if not result:
+                        continue
 
-                    message = build_message(result)
+                    if should_send(result):
+                        message = build_message(result)
 
-                    telegram_send(
-                        token,
-                        message
-                    )
+                        if telegram_send(token, message):
+                            signals += 1
 
+                            print(
+                                f"[{market}] 📲 "
+                                f"{result['symbol']} "
+                                f"{result['signal']} "
+                                f"{result['score']}/100"
+                            )
+
+                except Exception as error:
                     print(
-                        f"[{market}] "
-                        f"{result['symbol']} "
-                        f"{result['signal']} "
-                        f"{result['score']}"
+                        f"[{market}] تحليل خطأ: {error}"
                     )
 
-            except Exception as error:
+        if completed % 100 == 0 or completed == total:
+            print(
+                f"[{market}] progress "
+                f"{completed}/{total} | "
+                f"signals={signals}"
+            )
 
-                print(
-                    f"[{market}] error:",
-                    error
-                )
+    print(
+        f"[{market}] انتهى الفحص | "
+        f"فحص={total} | إشارات مرسلة={signals}"
+    )
 
 
 # ============================================================
-# 🔄 MARKET LOOP
+# MARKET LOOP
 # ============================================================
 
-def market_loop(
-    market,
-    token,
-    symbol_function
-):
-
-    symbols = []
-
+def market_loop(market, token, loader):
     while True:
-
         try:
-
-            # تحديث قائمة الأسهم
-            new_symbols = symbol_function()
-
-            if new_symbols:
-
-                symbols = new_symbols
+            symbols = get_symbols(market, loader)
 
             print(
-                f"💀 {market}: "
-                f"{len(symbols)} symbols loaded"
+                f"💀 {market}: تم تحميل "
+                f"{len(symbols)} رمز"
             )
 
             scan_market(
                 symbols,
                 market,
-                token
+                token,
             )
 
         except Exception as error:
-
             print(
-                f"{market} loop error:",
-                error
+                f"[{market}] loop error: {error}"
             )
 
         time.sleep(SCAN_INTERVAL)
 
 
 # ============================================================
-# ❤️ HEARTBEAT
+# HEARTBEAT
 # ============================================================
 
 def heartbeat():
-
     while True:
-
         print(
-            "💀🚀 AI PRO MAX يعمل "
-            "24/7 | "
+            "💀🚀 AI PRO MAX يعمل 24/7 | "
             + datetime.now().strftime(
                 "%Y-%m-%d %H:%M:%S"
             )
         )
-
         time.sleep(300)
 
 
 # ============================================================
-# 🚀 START
+# START
 # ============================================================
 
 def main():
-
-    print("=" * 60)
-    print("💀🚀 AI PRO MAX")
+    print("=" * 68)
+    print("💀🚀 AI PRO MAX — STABLE EDITION")
     print("🇸🇦 TASI 375")
     print("🇺🇸 US MARKET")
     print("🪙 CRYPTO MARKET")
-    print("=" * 60)
+    print("=" * 68)
 
     if not TWELVEDATA_API_KEY:
-
-        print(
-            "❌ TWELVEDATA_API_KEY غير موجود"
-        )
-
+        print("❌ TWELVEDATA_API_KEY غير موجود")
         return
 
     if not CHAT_ID:
-
-        print(
-            "❌ CHAT_ID غير موجود"
-        )
-
+        print("❌ CHAT_ID غير موجود")
         return
 
-    print(
-        "🟢 TWELVEDATA_API_KEY: OK"
-    )
-
-    print(
-        "🟢 CHAT_ID: OK"
-    )
-
-    print(
-        "🇸🇦 TASI TOKEN:",
-        "OK" if TASI_TOKEN else "MISSING"
-    )
-
-    print(
-        "🇺🇸 US TOKEN:",
-        "OK" if US_TOKEN else "MISSING"
-    )
-
-    print(
-        "🪙 CRYPTO TOKEN:",
-        "OK" if CRYPTO_TOKEN else "MISSING"
-    )
+    print("🟢 TWELVEDATA_API_KEY: OK")
+    print("🟢 CHAT_ID: OK")
+    print("🇸🇦 TASI TOKEN:", "OK" if TASI_TOKEN else "MISSING")
+    print("🇺🇸 US TOKEN:", "OK" if US_TOKEN else "MISSING")
+    print("🪙 CRYPTO TOKEN:", "OK" if CRYPTO_TOKEN else "MISSING")
 
     threading.Thread(
         target=heartbeat,
-        daemon=True
+        daemon=True,
     ).start()
-
-    # ========================================================
-    # 🇸🇦 TASI
-    # ========================================================
 
     threading.Thread(
         target=market_loop,
-        args=(
-            "TASI",
-            TASI_TOKEN,
-            get_tasi_symbols
-        ),
-        daemon=True
+        args=("TASI", TASI_TOKEN, get_tasi_symbols),
+        daemon=True,
     ).start()
-
-    # ========================================================
-    # 🇺🇸 US
-    # ========================================================
 
     threading.Thread(
         target=market_loop,
-        args=(
-            "US",
-            US_TOKEN,
-            get_us_symbols
-        ),
-        daemon=True
+        args=("US", US_TOKEN, get_us_symbols),
+        daemon=True,
     ).start()
-
-    # ========================================================
-    # 🪙 CRYPTO
-    # ========================================================
 
     threading.Thread(
         target=market_loop,
-        args=(
-            "CRYPTO",
-            CRYPTO_TOKEN,
-            get_crypto_symbols
-        ),
-        daemon=True
+        args=("CRYPTO", CRYPTO_TOKEN, get_crypto_symbols),
+        daemon=True,
     ).start()
 
     while True:
-
         time.sleep(60)
 
 
