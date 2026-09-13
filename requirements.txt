@@ -1,6 +1,0 @@
-pyTelegramBotAPI
-yfinance
-pandas
-numpy
-requests
-lxml
