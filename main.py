@@ -1,19 +1,26 @@
 
-import os
-import json
-import asyncio
-import aiohttp
-import time
-from aiohttp import web
-from datetime import datetime, timezone
-
 # ============================================================
 # 💀🚀 AI PRO MAX
-# CLEAN AUTONOMOUS ENGINE
-# US + CRYPTO + TELEGRAM
+# Autonomous Telegram Market Scanner
+# US + CRYPTO
+# Twelve Data
 # ============================================================
 
-API_KEY = os.getenv("TWELVE_DATA_API_KEY", "").strip()
+import os
+import json
+import time
+import asyncio
+from datetime import datetime, timezone
+
+import aiohttp
+from aiohttp import web
+
+
+# ============================================================
+# ⚙️ CONFIGURATION
+# ============================================================
+
+TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY", "").strip()
 
 TASI_TOKEN = os.getenv("TASI_TOKEN", "").strip()
 US_TOKEN = os.getenv("US_TOKEN", "").strip()
@@ -21,896 +28,1107 @@ CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN", "").strip()
 
 PORT = int(os.getenv("PORT", "8080"))
 
-TD_URL = "https://api.twelvedata.com"
-TG_URL = "https://api.telegram.org"
-
-# ============================================================
-# ⚙️ الإعدادات
-# ============================================================
-
 SCAN_SECONDS = 120
 
-# رمز واحد في كل طلب
-# حتى لا نستنزف 8 credits دفعة واحدة
-SYMBOLS_PER_SCAN = 1
+# Twelve Data Basic:
+# 8 credits / minute
+# 800 credits / day
+#
+# نحن نستخدم طلب بيانات واحد فقط لكل عملية فحص.
+MAX_CREDITS_PER_MINUTE = 8
 
-ALERT_COOLDOWN = 3600
+# لا نستهلك أكثر من طلب واحد في الدورة.
+REQUESTS_PER_CYCLE = 1
 
-MIN_US_PRICE = 0.20
-
-# لا نحاول تحديث قوائم الرموز باستمرار
-CATALOG_REFRESH = 86400
-
-# ============================================================
-# 📦 التخزين
-# ============================================================
-
-US_SYMBOLS = []
-CRYPTO_SYMBOLS = []
-
-US_INDEX = 0
-CRYPTO_INDEX = 0
-
-US_CHAT_IDS = set()
-CRYPTO_CHAT_IDS = set()
-TASI_CHAT_IDS = set()
-
-ALERT_CACHE = {}
-
-LAST_CREDITS_LEFT = None
-
-NEXT_US_CATALOG = 0
-NEXT_CRYPTO_CATALOG = 0
 
 # ============================================================
-# 🇺🇸 قائمة تشغيل أولية
+# 📊 SYMBOL LISTS
 # ============================================================
-# هذه ليست القائمة الكاملة.
-# هدفها أن يبدأ البوت فورًا بدل انتظار /stocks.
 
-START_US = [
+# البداية تكون برموز معروفة.
+# المدير يواصل من مكانه ولا يعيد الفحص من البداية.
+
+US_SYMBOLS = [
     "AAPL",
     "MSFT",
     "NVDA",
     "AMZN",
-    "META",
     "GOOGL",
-    "GOOG",
+    "META",
     "TSLA",
     "AVGO",
     "AMD",
-    "NFLX",
     "INTC",
+    "NFLX",
+    "PLTR",
     "MU",
     "QCOM",
-    "PLTR",
-    "SMCI",
-    "ARM",
-    "MSTR",
-    "COIN",
-    "HOOD",
+    "COST",
+    "PEP",
+    "KO",
+    "JPM",
+    "BAC",
+    "WMT",
+    "XOM",
+    "CVX",
+    "DIS",
+    "NKE",
+    "PYPL",
     "SOFI",
-    "NIO",
-    "RIVN",
-    "LCID",
-    "AAL",
+    "COIN",
     "MARA",
     "RIOT",
-    "IONQ",
-    "SOUN",
-    "BBAI",
-    "ACHR",
-    "JOBY",
-    "RKLB",
-    "GME",
-    "AMC",
-    "TQQQ",
-    "SQQQ",
-    "SPY",
-    "QQQ",
-    "IWM"
+    "RIVN",
+    "LCID",
+    "F",
+    "GM",
+    "UBER",
+    "ABNB",
+    "SHOP",
+    "SNOW",
+    "ORCL",
+    "CRM",
+    "ADBE",
 ]
 
-# ============================================================
-# 🪙 قائمة تشغيل أولية للعملات
-# ============================================================
-
-START_CRYPTO = [
+CRYPTO_SYMBOLS = [
     "BTC/USD",
     "ETH/USD",
-    "BNB/USD",
     "SOL/USD",
     "XRP/USD",
-    "ADA/USD",
     "DOGE/USD",
+    "ADA/USD",
     "AVAX/USD",
-    "DOT/USD",
     "LINK/USD",
-    "TRX/USD",
+    "DOT/USD",
     "LTC/USD",
     "BCH/USD",
-    "SHIB/USD",
     "UNI/USD",
     "ATOM/USD",
     "XLM/USD",
-    "ETC/USD",
+    "TRX/USD",
+    "NEAR/USD",
     "FIL/USD",
-    "NEAR/USD"
+    "ETC/USD",
+    "AAVE/USD",
+    "ALGO/USD",
 ]
 
+
 # ============================================================
-# 🔢 أدوات
+# 💾 STATE
 # ============================================================
 
-def n(value, default=0.0):
+STATE_FILE = "scanner_state.json"
+
+state = {
+    "us_index": 0,
+    "crypto_index": 0,
+    "last_market": "CRYPTO",
+    "telegram_chats": {
+        "us": [],
+        "crypto": [],
+        "tasi": []
+    },
+    "last_alerts": {},
+    "daily_date": "",
+    "daily_requests": 0
+}
+
+
+def load_state():
+    global state
+
     try:
-        return float(value)
-    except Exception:
-        return default
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+
+            if isinstance(saved, dict):
+                state.update(saved)
+
+    except Exception as e:
+        print(f"ℹ️ تعذر قراءة الحالة: {e}")
 
 
-def ema(values, period):
-    if not values:
-        return 0.0
+def save_state():
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(
+                state,
+                f,
+                ensure_ascii=False,
+                indent=2
+            )
+    except Exception as e:
+        print(f"ℹ️ تعذر حفظ الحالة: {e}")
 
-    alpha = 2 / (period + 1)
-    result = values[0]
 
-    for value in values[1:]:
-        result = alpha * value + (1 - alpha) * result
+load_state()
+
+
+# ============================================================
+# 🧠 CREDIT MANAGER
+# ============================================================
+
+class CreditManager:
+
+    def __init__(self):
+        self.lock = asyncio.Lock()
+
+        self.minute_start = time.monotonic()
+        self.minute_requests = 0
+
+        self.daily_date = datetime.now(
+            timezone.utc
+        ).strftime("%Y-%m-%d")
+
+        self.daily_requests = int(
+            state.get("daily_requests", 0)
+        )
+
+    async def wait_for_slot(self):
+
+        async with self.lock:
+
+            now = time.monotonic()
+
+            # إعادة ضبط عداد الدقيقة
+            if now - self.minute_start >= 60:
+                self.minute_start = now
+                self.minute_requests = 0
+
+            # إذا وصلنا الحد، ننتظر حتى الدقيقة التالية
+            if self.minute_requests >= MAX_CREDITS_PER_MINUTE:
+
+                wait_time = 60 - (
+                    now - self.minute_start
+                )
+
+                if wait_time > 0:
+                    print(
+                        f"ℹ️ Credits: انتظار {int(wait_time)} ثانية"
+                    )
+
+                    await asyncio.sleep(
+                        wait_time + 1
+                    )
+
+                self.minute_start = time.monotonic()
+                self.minute_requests = 0
+
+            # اليوم الجديد UTC
+            today = datetime.now(
+                timezone.utc
+            ).strftime("%Y-%m-%d")
+
+            if today != self.daily_date:
+                self.daily_date = today
+                self.daily_requests = 0
+
+            # حد Basic اليومي
+            if self.daily_requests >= 790:
+                print(
+                    "ℹ️ Credits اليومية اقتربت من الحد"
+                )
+                return False
+
+            self.minute_requests += 1
+            self.daily_requests += 1
+
+            state["daily_requests"] = self.daily_requests
+            save_state()
+
+            return True
+
+
+credits = CreditManager()
+
+
+# ============================================================
+# 🌐 TWELVE DATA REQUEST
+# ============================================================
+
+async def twelve_time_series(
+    session,
+    symbol,
+    interval="5min",
+    outputsize=80
+):
+
+    allowed = await credits.wait_for_slot()
+
+    if not allowed:
+        return None
+
+    url = "https://api.twelvedata.com/time_series"
+
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "outputsize": outputsize,
+        "apikey": TWELVE_DATA_API_KEY,
+    }
+
+    try:
+
+        async with session.get(
+            url,
+            params=params,
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as response:
+
+            data = await response.json(
+                content_type=None
+            )
+
+            used = response.headers.get(
+                "api-credits-used"
+            )
+
+            left = response.headers.get(
+                "api-credits-left"
+            )
+
+            if used or left:
+                print(
+                    f"📊 Credits used={used or '?'} "
+                    f"left={left or '?'}"
+                )
+
+            if response.status == 429:
+
+                print(
+                    "ℹ️ Twelve Data: الرصيد في الدقيقة ممتلئ"
+                )
+
+                # نعيد الطلب إلى المدير في الدورة القادمة
+                credits.minute_requests = (
+                    MAX_CREDITS_PER_MINUTE
+                )
+
+                return None
+
+            if response.status != 200:
+
+                print(
+                    f"ℹ️ Twelve Data HTTP {response.status}"
+                )
+
+                return None
+
+            if not isinstance(data, dict):
+                return None
+
+            if "status" in data:
+                if data.get("status") == "error":
+
+                    msg = data.get(
+                        "message",
+                        "خطأ غير معروف"
+                    )
+
+                    print(
+                        f"ℹ️ Twelve Data: {msg}"
+                    )
+
+                    return None
+
+            values = data.get("values")
+
+            if not values:
+                print(
+                    f"ℹ️ لا توجد بيانات: {symbol}"
+                )
+                return None
+
+            return values
+
+    except asyncio.TimeoutError:
+
+        print(
+            f"ℹ️ انتهت مهلة البيانات: {symbol}"
+        )
+
+        return None
+
+    except Exception as e:
+
+        print(
+            f"ℹ️ خطأ بيانات {symbol}: {e}"
+        )
+
+        return None
+
+
+# ============================================================
+# 📐 MATH FUNCTIONS
+# ============================================================
+
+def closes(values):
+
+    result = []
+
+    for x in reversed(values):
+
+        try:
+            result.append(
+                float(x["close"])
+            )
+        except:
+            pass
 
     return result
 
 
-def rsi(values, period=14):
-    if len(values) < period + 1:
+def highs(values):
+
+    result = []
+
+    for x in reversed(values):
+
+        try:
+            result.append(
+                float(x["high"])
+            )
+        except:
+            pass
+
+    return result
+
+
+def lows(values):
+
+    result = []
+
+    for x in reversed(values):
+
+        try:
+            result.append(
+                float(x["low"])
+            )
+        except:
+            pass
+
+    return result
+
+
+def volumes(values):
+
+    result = []
+
+    for x in reversed(values):
+
+        try:
+            result.append(
+                float(x.get("volume", 0))
+            )
+        except:
+            result.append(0)
+
+    return result
+
+
+def ema(data, period):
+
+    if not data:
+        return 0.0
+
+    if len(data) < period:
+        return sum(data) / len(data)
+
+    multiplier = 2 / (period + 1)
+
+    value = sum(
+        data[:period]
+    ) / period
+
+    for price in data[period:]:
+
+        value = (
+            (price - value) * multiplier
+        ) + value
+
+    return value
+
+
+def rsi(data, period=14):
+
+    if len(data) < period + 1:
         return 50.0
 
     gains = []
     losses = []
 
-    for i in range(1, len(values)):
-        change = values[i] - values[i - 1]
+    for i in range(1, len(data)):
 
-        if change > 0:
+        change = data[i] - data[i - 1]
+
+        if change >= 0:
             gains.append(change)
             losses.append(0)
         else:
             gains.append(0)
             losses.append(abs(change))
 
-    avg_gain = sum(gains[-period:]) / period
-    avg_loss = sum(losses[-period:]) / period
+    avg_gain = (
+        sum(gains[:period]) / period
+    )
+
+    avg_loss = (
+        sum(losses[:period]) / period
+    )
+
+    for i in range(period, len(gains)):
+
+        avg_gain = (
+            (avg_gain * (period - 1))
+            + gains[i]
+        ) / period
+
+        avg_loss = (
+            (avg_loss * (period - 1))
+            + losses[i]
+        ) / period
 
     if avg_loss == 0:
         return 100.0
 
     rs = avg_gain / avg_loss
 
-    return 100 - (100 / (1 + rs))
-
-
-def atr(rows, period=14):
-    if len(rows) < period + 1:
-        return 0.0
-
-    ranges = []
-
-    for i in range(1, len(rows)):
-        high = n(rows[i].get("high"))
-        low = n(rows[i].get("low"))
-        previous_close = n(rows[i - 1].get("close"))
-
-        true_range = max(
-            high - low,
-            abs(high - previous_close),
-            abs(low - previous_close)
-        )
-
-        ranges.append(true_range)
-
-    return sum(ranges[-period:]) / period
-
-
-def volume_text(value):
-    value = n(value)
-
-    if value >= 1_000_000_000:
-        return f"{value / 1_000_000_000:.2f}B"
-
-    if value >= 1_000_000:
-        return f"{value / 1_000_000:.2f}M"
-
-    if value >= 1_000:
-        return f"{value / 1_000:.2f}K"
-
-    return f"{value:.0f}"
-
-
-# ============================================================
-# 💾 حفظ / تحميل القائمة
-# ============================================================
-
-def load_file(filename, fallback):
-    try:
-        with open(filename, "r", encoding="utf-8") as file:
-            data = json.load(file)
-
-        if isinstance(data, list) and data:
-            return data
-
-    except Exception:
-        pass
-
-    return list(fallback)
-
-
-def save_file(filename, data):
-    try:
-        with open(filename, "w", encoding="utf-8") as file:
-            json.dump(
-                data,
-                file,
-                ensure_ascii=False
-            )
-    except Exception:
-        pass
-
-
-# ============================================================
-# 📡 Twelve Data
-# ============================================================
-
-async def td_request(session, endpoint, params):
-    global LAST_CREDITS_LEFT
-
-    if not API_KEY:
-        print("ℹ️ مفتاح Twelve Data غير موجود")
-        return None
-
-    query = dict(params)
-    query["apikey"] = API_KEY
-
-    try:
-
-        async with session.get(
-            TD_URL + endpoint,
-            params=query,
-            timeout=aiohttp.ClientTimeout(total=20)
-        ) as response:
-
-            text = await response.text()
-
-            credits_left = response.headers.get(
-                "api-credits-left"
-            )
-
-            credits_used = response.headers.get(
-                "api-credits-used"
-            )
-
-            if credits_left is not None:
-                LAST_CREDITS_LEFT = n(
-                    credits_left,
-                    None
-                )
-
-            if credits_left is not None:
-                print(
-                    f"📊 Credits "
-                    f"used={credits_used or '?'} "
-                    f"left={credits_left}"
-                )
-
-            # --------------------------------------------
-            # حد الدقيقة
-            # --------------------------------------------
-
-            if response.status == 429:
-
-                print(
-                    "ℹ️ Twelve Data: "
-                    "انتظار تجدد رصيد الدقيقة"
-                )
-
-                return None
-
-            # --------------------------------------------
-            # أي HTTP آخر
-            # --------------------------------------------
-
-            if response.status != 200:
-
-                print(
-                    f"ℹ️ Twelve Data HTTP "
-                    f"{response.status}: "
-                    f"{text[:180]}"
-                )
-
-                return None
-
-            try:
-                data = json.loads(text)
-            except Exception:
-                return None
-
-            # --------------------------------------------
-            # خطأ API داخل JSON
-            # --------------------------------------------
-
-            if (
-                isinstance(data, dict)
-                and data.get("status") == "error"
-            ):
-
-                print(
-                    "ℹ️ Twelve Data: "
-                    + str(
-                        data.get(
-                            "message",
-                            "خطأ غير معروف"
-                        )
-                    )
-                )
-
-                return None
-
-            return data
-
-    except asyncio.TimeoutError:
-
-        print("ℹ️ انتهت مهلة Twelve Data")
-        return None
-
-    except Exception as error:
-
-        print(
-            f"ℹ️ Twelve Data: {error}"
-        )
-
-        return None
-
-
-# ============================================================
-# 📊 بيانات رمز واحد
-# ============================================================
-
-async def get_history(session, symbol):
-
-    return await td_request(
-        session,
-        "/time_series",
-        {
-            "symbol": symbol,
-            "interval": "1min",
-            "outputsize": 60
-        }
+    return 100 - (
+        100 / (1 + rs)
     )
 
 
+def atr(values, period=14):
+
+    if len(values) < period + 1:
+        return 0.0
+
+    trs = []
+
+    previous_close = None
+
+    for row in reversed(values):
+
+        try:
+
+            high = float(row["high"])
+            low = float(row["low"])
+            close = float(row["close"])
+
+            if previous_close is None:
+
+                tr = high - low
+
+            else:
+
+                tr = max(
+                    high - low,
+                    abs(high - previous_close),
+                    abs(low - previous_close)
+                )
+
+            trs.append(tr)
+
+            previous_close = close
+
+        except:
+            continue
+
+    if not trs:
+        return 0.0
+
+    return sum(
+        trs[-period:]
+    ) / min(
+        period,
+        len(trs)
+    )
+
+
+def average_volume(values, period=20):
+
+    vols = volumes(values)
+
+    valid = [
+        x for x in vols
+        if x > 0
+    ]
+
+    if not valid:
+        return 0.0
+
+    sample = valid[-period:]
+
+    return sum(sample) / len(sample)
+
+
 # ============================================================
-# 🧠 تحليل AI PRO MAX
+# 🧠 MARKET ANALYZER
 # ============================================================
 
-def analyze(symbol, packet, market):
-
-    if not packet:
-        return None
-
-    values = packet.get("values", [])
+def analyze(values):
 
     if len(values) < 30:
         return None
 
-    rows = list(reversed(values))
+    c = closes(values)
+    h = highs(values)
+    l = lows(values)
 
-    closes = [
-        n(row.get("close"))
-        for row in rows
-    ]
-
-    if not closes:
+    if not c:
         return None
 
-    price = closes[-1]
+    price = c[-1]
 
-    # --------------------------------------------
-    # السعر الأدنى للأمريكي
-    # --------------------------------------------
+    ema8 = ema(c, 8)
+    ema21 = ema(c, 21)
+    ema50 = ema(c, 50)
 
-    if market == "US" and price < MIN_US_PRICE:
-        return None
+    rsi14 = rsi(c, 14)
 
-    ema8 = ema(closes, 8)
-    ema21 = ema(closes, 21)
-    ema50 = ema(closes, 50)
+    atr14 = atr(values, 14)
 
-    rsi14 = rsi(closes, 14)
-
-    atr14 = atr(rows, 14)
-
-    previous = (
-        closes[-2]
-        if len(closes) > 1
-        else price
+    support = min(
+        l[-20:]
     )
 
-    change = (
-        ((price - previous) / previous) * 100
-        if previous
+    resistance = max(
+        h[-20:]
+    )
+
+    vols = volumes(values)
+
+    current_volume = (
+        vols[-1]
+        if vols
         else 0
     )
 
-    # --------------------------------------------
-    # الحجم
-    # --------------------------------------------
-
-    volumes = [
-        n(row.get("volume"))
-        for row in rows[-20:]
-    ]
-
-    average_volume = (
-        sum(volumes) / len(volumes)
-        if volumes
-        else 0
+    avg_vol = average_volume(
+        values,
+        20
     )
 
-    current_volume = n(
-        rows[-1].get("volume")
+    if avg_vol > 0:
+        volume_strength = (
+            current_volume / avg_vol
+        )
+    else:
+        volume_strength = 1.0
+
+    # --------------------------------------------------------
+    # Trend
+    # --------------------------------------------------------
+
+    bullish = (
+        ema8 > ema21 > ema50
     )
 
-    volume_strength = (
-        current_volume / average_volume
-        if average_volume
-        else 1
+    bearish = (
+        ema8 < ema21 < ema50
     )
 
-    # --------------------------------------------
-    # قوة الاتجاه
-    # --------------------------------------------
+    if bullish:
+        trend = "صاعد قوي"
+    elif bearish:
+        trend = "هابط قوي"
+    elif ema8 > ema21:
+        trend = "صاعد"
+    elif ema8 < ema21:
+        trend = "هابط"
+    else:
+        trend = "محايد"
 
-    score = 50
+    # --------------------------------------------------------
+    # Buy / Sell Power
+    # --------------------------------------------------------
+
+    buy_power = 50.0
+
+    if price > ema8:
+        buy_power += 10
 
     if ema8 > ema21:
-        score += 15
-    else:
-        score -= 15
+        buy_power += 10
 
     if ema21 > ema50:
-        score += 15
-    else:
-        score -= 15
+        buy_power += 10
 
-    if rsi14 >= 55:
-        score += 10
-
-    elif rsi14 <= 45:
-        score -= 10
+    if rsi14 > 50:
+        buy_power += 10
 
     if volume_strength >= 1.5:
-        score += 10
+        buy_power += 10
 
-    score = max(
-        0,
-        min(100, score)
+    buy_power = min(
+        100,
+        max(0, buy_power)
     )
 
-    # --------------------------------------------
-    # الإشارة
-    # --------------------------------------------
+    sell_power = 100 - buy_power
 
-    if score >= 80:
+    # --------------------------------------------------------
+    # Signal strength
+    # --------------------------------------------------------
 
-        side = "BUY"
+    signal_strength = 50.0
+
+    if bullish:
+        signal_strength += 20
+
+    if bearish:
+        signal_strength += 20
+
+    if rsi14 >= 55:
+        signal_strength += 10
+
+    if rsi14 <= 45:
+        signal_strength += 10
+
+    if volume_strength >= 1.5:
+        signal_strength += 10
+
+    signal_strength = min(
+        100,
+        max(0, signal_strength)
+    )
+
+    # --------------------------------------------------------
+    # Signal
+    # --------------------------------------------------------
+
+    if (
+        bullish
+        and rsi14 >= 55
+        and price >= ema8
+    ):
+
         signal = "🟢⬆️ شراء قوي"
 
-    elif score <= 20:
+    elif (
+        bearish
+        and rsi14 <= 45
+        and price <= ema8
+    ):
 
-        side = "SELL"
         signal = "🔴⬇️ بيع قوي"
 
     else:
 
-        return None
+        signal = "محايد"
 
-    # --------------------------------------------
-    # دعم ومقاومة
-    # --------------------------------------------
+    # --------------------------------------------------------
+    # ATR TARGETS
+    # --------------------------------------------------------
 
-    highs = [
-        n(row.get("high"))
-        for row in rows[-20:]
-    ]
+    targets = []
 
-    lows = [
-        n(row.get("low"))
-        for row in rows[-20:]
-    ]
+    if atr14 > 0:
 
-    support = (
-        min(lows)
-        if lows
-        else price
-    )
+        if "شراء" in signal:
 
-    resistance = (
-        max(highs)
-        if highs
-        else price
-    )
+            for i in range(1, 9):
+
+                targets.append(
+                    price + (
+                        atr14 * i
+                    )
+                )
+
+        elif "بيع" in signal:
+
+            for i in range(1, 9):
+
+                targets.append(
+                    price - (
+                        atr14 * i
+                    )
+                )
 
     return {
-        "symbol": symbol,
         "price": price,
-        "change": change,
-        "score": score,
-        "side": side,
-        "signal": signal,
-        "buy": round(score),
-        "sell": 100 - round(score),
-        "volume": current_volume,
-        "volume_strength": volume_strength,
         "ema8": ema8,
         "ema21": ema21,
         "ema50": ema50,
         "rsi": rsi14,
         "atr": atr14,
         "support": support,
-        "resistance": resistance
+        "resistance": resistance,
+        "volume_strength": volume_strength,
+        "buy_power": buy_power,
+        "sell_power": sell_power,
+        "signal_strength": signal_strength,
+        "signal": signal,
+        "trend": trend,
+        "targets": targets
     }
 
 
 # ============================================================
-# 🎯 رسالة الإشارة
+# 💰 NUMBER FORMAT
 # ============================================================
 
-def make_signal(data, market):
+def fmt(value, digits=2):
 
-    price = data["price"]
-    atr14 = data["atr"]
+    try:
 
-    if data["side"] == "BUY":
+        return f"{float(value):,.{digits}f}"
 
-        targets = [
-            price + (atr14 * i)
-            for i in range(1, 9)
-        ]
+    except:
+        return "-"
 
-    else:
 
-        targets = [
-            price - (atr14 * i)
-            for i in range(1, 9)
-        ]
+def fmt_volume(value):
 
-    target_text = "\n".join(
-        f"{i}️⃣ {targets[i - 1]:.4f}"
-        for i in range(1, 9)
-    )
+    try:
 
-    return f"""💀🚀 AI PRO MAX SIGNAL
+        value = float(value)
 
-{market}
+        if value >= 1_000_000_000:
+            return f"{value / 1_000_000_000:.2f}B"
 
-<b>{data["symbol"]}</b>
+        if value >= 1_000_000:
+            return f"{value / 1_000_000:.2f}M"
 
-{data["signal"]}
+        if value >= 1_000:
+            return f"{value / 1_000:.2f}K"
 
-💰 السعر: {price:.4f}
-📈 التغير: {data["change"]:+.2f}%
+        return f"{value:.0f}"
 
-🎯 قوة الإشارة: {data["score"]}/100
-
-🟢 قوة الشراء: {data["buy"]}%
-🔴 قوة البيع: {data["sell"]}%
-
-📊 قوة الحجم: {data["volume_strength"]:.2f}x
-📦 الحجم: {volume_text(data["volume"])}
-
-EMA 8: {data["ema8"]:.4f}
-EMA 21: {data["ema21"]:.4f}
-EMA 50: {data["ema50"]:.4f}
-
-RSI 14: {data["rsi"]:.1f}
-ATR 14: {data["atr"]:.4f}
-
-🟦 الدعم: {data["support"]:.4f}
-🟥 المقاومة: {data["resistance"]:.4f}
-
-🎯 أهداف ATR:
-
-{target_text}
-
-⏱️ الفحص تلقائي
-🤖 AI PRO MAX"""
+    except:
+        return "-"
 
 
 # ============================================================
-# 📲 Telegram
+# 📱 TELEGRAM
 # ============================================================
 
 async def telegram_send(
     session,
     token,
     chat_id,
-    message
+    text
 ):
 
-    if not token or not chat_id:
+    if not token:
         return False
+
+    url = (
+        f"https://api.telegram.org/bot"
+        f"{token}/sendMessage"
+    )
+
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": True
+    }
 
     try:
 
         async with session.post(
-            f"{TG_URL}/bot{token}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": message,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True
-            },
-            timeout=15
+            url,
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=20)
         ) as response:
 
             return response.status == 200
 
-    except Exception:
+    except:
 
         return False
 
 
-async def broadcast(
+async def telegram_broadcast(
     session,
-    token,
-    chat_ids,
-    message
+    market,
+    text
 ):
 
-    for chat_id in list(chat_ids):
+    token = {
+        "us": US_TOKEN,
+        "crypto": CRYPTO_TOKEN,
+        "tasi": TASI_TOKEN
+    }.get(market, "")
 
-        await telegram_send(
+    chats = state[
+        "telegram_chats"
+    ].get(market, [])
+
+    if not token or not chats:
+        return
+
+    for chat_id in list(chats):
+
+        ok = await telegram_send(
             session,
             token,
             chat_id,
-            message
+            text
         )
 
+        if not ok:
+
+            print(
+                f"ℹ️ تعذر إرسال Telegram: {chat_id}"
+            )
+
+        await asyncio.sleep(0.2)
+
 
 # ============================================================
-# 🚫 منع التكرار
+# 📨 SIGNAL MESSAGE
 # ============================================================
 
-def allow_alert(symbol, side):
+def build_signal_message(
+    market,
+    symbol,
+    analysis
+):
 
-    key = (
-        f"{symbol}:{side}"
-    )
+    if market == "us":
+        market_name = "🇺🇸 السوق الأمريكي"
+    elif market == "crypto":
+        market_name = "🪙 العملات الرقمية"
+    else:
+        market_name = "🇸🇦 السوق السعودي (TASI)"
+
+    a = analysis
+
+    lines = [
+        "💀🚀 AI PRO MAX SIGNAL",
+        "",
+        market_name,
+        f"📌 {symbol}",
+        "",
+        f"📈 السعر: {fmt(a['price'])}",
+        f"🎯 الإشارة: {a['signal']}",
+        f"💪 قوة الإشارة: {fmt(a['signal_strength'], 0)}/100",
+        "",
+        f"🟢 قوة الشراء: {fmt(a['buy_power'], 0)}%",
+        f"🔴 قوة البيع: {fmt(a['sell_power'], 0)}%",
+        f"📊 قوة الحجم: {fmt(a['volume_strength'], 2)}x",
+        "",
+        "🧠 المؤشرات",
+        f"EMA 8: {fmt(a['ema8'])}",
+        f"EMA 21: {fmt(a['ema21'])}",
+        f"EMA 50: {fmt(a['ema50'])}",
+        f"RSI 14: {fmt(a['rsi'], 1)}",
+        f"ATR 14: {fmt(a['atr'])}",
+        "",
+        f"🟩 الدعم: {fmt(a['support'])}",
+        f"🟥 المقاومة: {fmt(a['resistance'])}",
+        f"📈 الاتجاه: {a['trend']}",
+        "",
+        "🎯 أهداف ATR"
+    ]
+
+    for i, target in enumerate(
+        a["targets"],
+        start=1
+    ):
+
+        lines.append(
+            f"TP{i}: {fmt(target)}"
+        )
+
+    lines.extend([
+        "",
+        "📡 Twelve Data",
+        "🤖 الفحص تلقائي"
+    ])
+
+    return "\n".join(lines)
+
+
+# ============================================================
+# 🔔 ALERT FILTER
+# ============================================================
+
+def should_alert(
+    market,
+    symbol,
+    analysis
+):
+
+    signal = analysis["signal"]
+
+    if signal == "محايد":
+        return False
+
+    key = f"{market}:{symbol}"
 
     now = time.time()
 
-    last = ALERT_CACHE.get(
-        key,
-        0
-    )
+    previous = state[
+        "last_alerts"
+    ].get(key)
 
-    if (
-        now - last
-        < ALERT_COOLDOWN
-    ):
-        return False
+    # منع تكرار الإشارة لمدة 30 دقيقة
+    if previous:
 
-    ALERT_CACHE[key] = now
+        if (
+            now - previous < 1800
+        ):
+            return False
+
+    state[
+        "last_alerts"
+    ][key] = now
+
+    save_state()
 
     return True
 
 
 # ============================================================
-# 🔎 فحص رمز
+# 🔎 SCAN ONE SYMBOL
 # ============================================================
 
 async def scan_symbol(
     session,
-    symbol,
-    market
+    market,
+    symbol
 ):
 
     print(
-        f"🔎 فحص {market}: {symbol}"
+        f"🔎 فحص {market.upper()}: {symbol}"
     )
 
-    packet = await get_history(
+    values = await twelve_time_series(
         session,
         symbol
     )
 
-    if not packet:
+    if not values:
         return
 
-    result = analyze(
-        symbol,
-        packet,
-        market
-    )
+    result = analyze(values)
 
     if not result:
+        print(
+            f"ℹ️ بيانات غير كافية: {symbol}"
+        )
         return
 
-    if not allow_alert(
-        symbol,
-        result["side"]
-    ):
-        return
-
-    if market == "US":
-
-        message = make_signal(
-            result,
-            "🇺🇸 السوق الأمريكي"
-        )
-
-        await broadcast(
-            session,
-            US_TOKEN,
-            US_CHAT_IDS,
-            message
-        )
-
-    else:
-
-        message = make_signal(
-            result,
-            "🪙 العملات الرقمية"
-        )
-
-        await broadcast(
-            session,
-            CRYPTO_TOKEN,
-            CRYPTO_CHAT_IDS,
-            message
-        )
+    signal = result["signal"]
 
     print(
-        f"🚨 إشارة {market}: "
-        f"{symbol} "
-        f"{result['side']} "
-        f"{result['score']}/100"
+        f"📊 {symbol} | "
+        f"{signal} | "
+        f"RSI={result['rsi']:.1f} | "
+        f"ATR={result['atr']:.4f}"
     )
 
+    if should_alert(
+        market,
+        symbol,
+        result
+    ):
 
-# ============================================================
-# 📚 تحديث قائمة الرموز في الخلفية
-# ============================================================
-
-async def update_us_catalog(session):
-
-    global US_SYMBOLS
-
-    data = await td_request(
-        session,
-        "/stocks",
-        {
-            "country": "United States",
-            "type": "Common Stock",
-            "outputsize": 5000
-        }
-    )
-
-    if not data:
-        return
-
-    rows = data.get(
-        "data",
-        []
-    )
-
-    symbols = []
-
-    for row in rows:
-
-        symbol = str(
-            row.get("symbol", "")
-        ).strip()
-
-        if symbol:
-            symbols.append(symbol)
-
-    symbols = list(
-        dict.fromkeys(symbols)
-    )
-
-    if symbols:
-
-        # نضيف القائمة الجديدة
-        # بعد القائمة الحالية
-        US_SYMBOLS = list(
-            dict.fromkeys(
-                US_SYMBOLS + symbols
-            )
+        message = build_signal_message(
+            market,
+            symbol,
+            result
         )
 
-        save_file(
-            "us_symbols.json",
-            US_SYMBOLS
+        await telegram_broadcast(
+            session,
+            market,
+            message
         )
 
         print(
-            f"📚 US أصبح لديه "
-            f"{len(US_SYMBOLS)} رمز"
-        )
-
-
-async def update_crypto_catalog(session):
-
-    global CRYPTO_SYMBOLS
-
-    data = await td_request(
-        session,
-        "/cryptocurrencies",
-        {
-            "currency": "USD",
-            "outputsize": 5000
-        }
-    )
-
-    if not data:
-        return
-
-    rows = data.get(
-        "data",
-        []
-    )
-
-    symbols = []
-
-    for row in rows:
-
-        symbol = str(
-            row.get("symbol", "")
-        ).strip()
-
-        if symbol:
-            symbols.append(symbol)
-
-    symbols = list(
-        dict.fromkeys(symbols)
-    )
-
-    if symbols:
-
-        CRYPTO_SYMBOLS = list(
-            dict.fromkeys(
-                CRYPTO_SYMBOLS + symbols
-            )
-        )
-
-        save_file(
-            "crypto_symbols.json",
-            CRYPTO_SYMBOLS
-        )
-
-        print(
-            f"📚 CRYPTO أصبح لديه "
-            f"{len(CRYPTO_SYMBOLS)} رمز"
+            f"📨 تم إرسال إشارة: {symbol}"
         )
 
 
 # ============================================================
-# 💬 رسالة بدء البوت
+# 🔄 ROTATION ENGINE
 # ============================================================
 
-def startup_message(market):
+def next_symbol(market):
 
-    return f"""💀🚀 AI PRO MAX
+    if market == "us":
+
+        if not US_SYMBOLS:
+            return None
+
+        index = int(
+            state.get("us_index", 0)
+        )
+
+        symbol = US_SYMBOLS[
+            index % len(US_SYMBOLS)
+        ]
+
+        state["us_index"] = (
+            index + 1
+        )
+
+        return symbol
+
+    if market == "crypto":
+
+        if not CRYPTO_SYMBOLS:
+            return None
+
+        index = int(
+            state.get("crypto_index", 0)
+        )
+
+        symbol = CRYPTO_SYMBOLS[
+            index % len(CRYPTO_SYMBOLS)
+        ]
+
+        state["crypto_index"] = (
+            index + 1
+        )
+
+        return symbol
+
+    return None
+
+
+def next_market():
+
+    last = state.get(
+        "last_market",
+        "CRYPTO"
+    )
+
+    if last == "CRYPTO":
+        market = "US"
+    else:
+        market = "CRYPTO"
+
+    state["last_market"] = market
+
+    save_state()
+
+    return market.lower()
+
+
+# ============================================================
+# 🤖 STARTUP MESSAGE
+# ============================================================
+
+async def send_startup_messages(
+    session
+):
+
+    us_text = """💀🚀 AI PRO MAX
 
 ✅ البوت يعمل الآن
 🔄 الفحص تلقائي
-⏱️ الفحص مستمر
+⏱️ الفحص كل دقيقتين
 
-📊 السوق: {market}
+📊 السوق: الولايات المتحدة
 
 🧠 المحرك الذكي:
-
 • EMA 8
 • EMA 21
 • EMA 50
@@ -930,31 +1148,105 @@ def startup_message(market):
 🤖 لا تحتاج إلى تشغيل الفحص يدويًا.
 
 📡 مصدر البيانات:
+Twelve Data فقط"""
+
+    crypto_text = """💀🚀 AI PRO MAX
+
+✅ البوت يعمل الآن
+🔄 الفحص تلقائي
+⏱️ الفحص كل دقيقتين
+
+📊 السوق: العملات الرقمية
+
+🧠 المحرك الذكي:
+• EMA 8
+• EMA 21
+• EMA 50
+• RSI 14
+• ATR 14
+• دعم
+• مقاومة
+• قوة الحجم
+• قوة الشراء
+• قوة البيع
+• 8 أهداف ATR
+• منع تكرار التنبيهات
+
+🟢⬆️ شراء قوي
+🔴⬇️ بيع قوي
+
+🤖 لا تحتاج إلى تشغيل الفحص يدويًا.
+
+📡 مصدر البيانات:
+Twelve Data فقط"""
+
+    tasi_text = """💀🚀 AI PRO MAX
+
+✅ بوت TASI جاهز
+🔄 الفحص تلقائي
+⏱️ الفحص كل دقيقتين
+
+📊 السوق: TASI
+
+🧠 المحرك الذكي:
+• EMA 8
+• EMA 21
+• EMA 50
+• RSI 14
+• ATR 14
+• دعم
+• مقاومة
+• قوة الحجم
+• قوة الشراء
+• قوة البيع
+• 8 أهداف ATR
+• منع تكرار التنبيهات
+
+📡 مصدر البيانات:
 Twelve Data"""
 
-
-# ============================================================
-# 🤖 Telegram Webhook
-# ============================================================
-
-async def telegram_webhook(request):
-
-    market = request.match_info.get(
-        "market",
-        ""
+    await telegram_broadcast(
+        session,
+        "us",
+        us_text
     )
+
+    await telegram_broadcast(
+        session,
+        "crypto",
+        crypto_text
+    )
+
+    await telegram_broadcast(
+        session,
+        "tasi",
+        tasi_text
+    )
+
+
+# ============================================================
+# 📲 TELEGRAM WEBHOOK
+# ============================================================
+
+async def telegram_webhook(
+    request
+):
+
+    market = request.match_info[
+        "market"
+    ]
 
     try:
 
-        update = await request.json()
+        body = await request.json()
 
-    except Exception:
+    except:
 
-        return web.json_response(
-            {"ok": True}
-        )
+        return web.json_response({
+            "ok": True
+        })
 
-    message = update.get(
+    message = body.get(
         "message",
         {}
     )
@@ -975,445 +1267,361 @@ async def telegram_webhook(request):
         )
     ).strip()
 
-    if not chat_id:
+    if chat_id is None:
+        return web.json_response({
+            "ok": True
+        })
 
-        return web.json_response(
-            {"ok": True}
+    chats = state[
+        "telegram_chats"
+    ].setdefault(
+        market,
+        []
+    )
+
+    if chat_id not in chats:
+
+        chats.append(
+            chat_id
         )
 
-    session = request.app[
-        "session"
-    ]
+        save_state()
 
-    if text.startswith("/start"):
+    if text == "/start":
 
         if market == "us":
 
-            US_CHAT_IDS.add(
-                chat_id
-            )
+            reply = """💀🚀 AI PRO MAX
 
-            await telegram_send(
-                session,
-                US_TOKEN,
-                chat_id,
-                startup_message(
-                    "🇺🇸 US"
-                )
-            )
+✅ تم تفعيل بوت السوق الأمريكي
+
+🔄 الفحص تلقائي
+⏱️ كل دقيقتين
+
+📡 Twelve Data"""
 
         elif market == "crypto":
 
-            CRYPTO_CHAT_IDS.add(
-                chat_id
-            )
+            reply = """💀🚀 AI PRO MAX
 
-            await telegram_send(
-                session,
-                CRYPTO_TOKEN,
-                chat_id,
-                startup_message(
-                    "🪙 CRYPTO"
-                )
-            )
+✅ تم تفعيل بوت العملات الرقمية
 
-        elif market == "tasi":
+🔄 الفحص تلقائي
+⏱️ كل دقيقتين
 
-            TASI_CHAT_IDS.add(
-                chat_id
-            )
+📡 Twelve Data"""
 
-            await telegram_send(
-                session,
-                TASI_TOKEN,
-                chat_id,
-                startup_message(
-                    "🇸🇦 TASI"
-                )
-            )
+        else:
 
-    return web.json_response(
-        {"ok": True}
-    )
+            reply = """💀🚀 AI PRO MAX
+
+✅ تم تفعيل بوت TASI
+
+🔄 الفحص تلقائي
+⏱️ كل دقيقتين
+
+📡 Twelve Data"""
+
+        token = {
+            "us": US_TOKEN,
+            "crypto": CRYPTO_TOKEN,
+            "tasi": TASI_TOKEN
+        }.get(
+            market,
+            ""
+        )
+
+        await telegram_send(
+            request.app["session"],
+            token,
+            chat_id,
+            reply
+        )
+
+    return web.json_response({
+        "ok": True
+    })
 
 
 # ============================================================
-# ❤️ Health
+# ❤️ HEALTH
 # ============================================================
 
 async def health(request):
 
     return web.json_response({
-
         "status": "online",
-
-        "engine":
-            "AI PRO MAX",
-
-        "US":
-            len(US_SYMBOLS),
-
-        "CRYPTO":
-            len(CRYPTO_SYMBOLS),
-
-        "credits_left":
-            LAST_CREDITS_LEFT,
-
-        "time":
-            datetime.now(
-                timezone.utc
-            ).isoformat()
+        "name": "AI PRO MAX",
+        "data": "Twelve Data",
+        "scan_seconds": SCAN_SECONDS,
+        "us_symbols": len(US_SYMBOLS),
+        "crypto_symbols": len(CRYPTO_SYMBOLS),
+        "us_index": state["us_index"],
+        "crypto_index": state["crypto_index"],
+        "daily_requests": credits.daily_requests
     })
 
 
 # ============================================================
-# 🔗 Telegram Webhooks
+# 🔗 SET WEBHOOK
 # ============================================================
 
 async def set_webhook(
     session,
+    market,
     token,
-    path
+    base_url
 ):
 
     if not token:
-        return
-
-    domain = (
-        os.getenv(
-            "RAILWAY_PUBLIC_DOMAIN"
-        )
-        or
-        os.getenv(
-            "RAILWAY_STATIC_URL"
-        )
-        or ""
-    )
-
-    domain = (
-        domain
-        .replace(
-            "https://",
-            ""
-        )
-        .replace(
-            "http://",
-            ""
-        )
-        .rstrip("/")
-    )
-
-    if not domain:
-
         print(
-            f"ℹ️ لا يوجد عنوان Railway لـ {path}"
+            f"ℹ️ Telegram {market}: لا يوجد TOKEN"
         )
-
         return
+
+    webhook_url = (
+        f"{base_url}/telegram/{market}"
+    )
+
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{token}/setWebhook"
+    )
 
     try:
 
         async with session.post(
-
-            f"{TG_URL}/bot{token}/setWebhook",
-
+            url,
             json={
-                "url":
-                    f"https://{domain}/telegram/{path}",
-
-                "drop_pending_updates":
-                    True
+                "url": webhook_url,
+                "drop_pending_updates": True
             },
-
-            timeout=20
-
+            timeout=aiohttp.ClientTimeout(total=20)
         ) as response:
 
-            result = await response.json(
+            data = await response.json(
                 content_type=None
             )
 
             print(
-                f"Telegram Webhook {path}: "
-                f"{result}"
+                f"Telegram Webhook {market}: "
+                f"{data}"
             )
 
-    except Exception as error:
+    except Exception as e:
 
         print(
-            f"ℹ️ Webhook {path}: "
-            f"{error}"
+            f"ℹ️ Telegram webhook {market}: {e}"
         )
 
 
 # ============================================================
-# 🚀 محرك الفحص
+# 🚀 SCANNER LOOP
 # ============================================================
 
-async def scanner():
+async def scanner_loop(
+    session
+):
 
-    global US_SYMBOLS
-    global CRYPTO_SYMBOLS
-    global US_INDEX
-    global CRYPTO_INDEX
+    # أول تشغيل بدون انتظار
+    first_cycle = True
 
-    # --------------------------------------------
-    # تحميل القوائم المحلية أو قوائم البداية
-    # --------------------------------------------
+    while True:
 
-    US_SYMBOLS = load_file(
-        "us_symbols.json",
-        START_US
+        try:
+
+            if not first_cycle:
+
+                print(
+                    f"⏱️ الدورة التالية بعد "
+                    f"{SCAN_SECONDS} ثانية"
+                )
+
+                await asyncio.sleep(
+                    SCAN_SECONDS
+                )
+
+            first_cycle = False
+
+            market = next_market()
+
+            symbol = next_symbol(
+                market
+            )
+
+            if not symbol:
+
+                print(
+                    f"ℹ️ لا توجد رموز: {market}"
+                )
+
+                continue
+
+            await scan_symbol(
+                session,
+                market,
+                symbol
+            )
+
+        except asyncio.CancelledError:
+
+            raise
+
+        except Exception as e:
+
+            print(
+                f"ℹ️ خطأ في دورة الفحص: {e}"
+            )
+
+            await asyncio.sleep(
+                10
+            )
+
+
+# ============================================================
+# 🏁 MAIN
+# ============================================================
+
+async def main():
+
+    if not TWELVE_DATA_API_KEY:
+
+        print(
+            "ℹ️ TWELVE_DATA_API_KEY غير موجود"
+        )
+
+    print("")
+    print("💀🚀 AI PRO MAX")
+    print("🟢 النظام يعمل 24/7")
+    print("📡 Twelve Data")
+    print("🛡️ مدير Credits مفعل")
+    print(
+        f"🇺🇸 US: {len(US_SYMBOLS)}"
     )
-
-    CRYPTO_SYMBOLS = load_file(
-        "crypto_symbols.json",
-        START_CRYPTO
+    print(
+        f"🪙 CRYPTO: {len(CRYPTO_SYMBOLS)}"
     )
 
     connector = aiohttp.TCPConnector(
-        limit=2
+        limit=10,
+        ttl_dns_cache=300
     )
 
     async with aiohttp.ClientSession(
         connector=connector
     ) as session:
 
-        print("")
-        print("💀🚀 AI PRO MAX")
-        print("🟢 النظام يعمل 24/7")
-        print("📡 Twelve Data")
-        print("🛡️ مدير Credits مفعل")
-        print(
-            f"🇺🇸 US: {len(US_SYMBOLS)}"
+        app = web.Application()
+
+        app["session"] = session
+
+        app.router.add_get(
+            "/",
+            health
         )
-        print(
-            f"🪙 CRYPTO: {len(CRYPTO_SYMBOLS)}"
+
+        app.router.add_get(
+            "/health",
+            health
         )
-        print("")
 
-        # --------------------------------------------
-        # نبدأ فورًا
-        # --------------------------------------------
+        app.router.add_post(
+            "/telegram/{market}",
+            telegram_webhook
+        )
 
-        market_turn = 0
+        runner = web.AppRunner(
+            app
+        )
 
-        while True:
+        await runner.setup()
 
-            started = time.time()
+        site = web.TCPSite(
+            runner,
+            "0.0.0.0",
+            PORT
+        )
 
-            try:
+        await site.start()
 
-                # ------------------------------------
-                # الأمريكي
-                # ------------------------------------
+        print(
+            f"🚀 AI PRO MAX {PORT}"
+        )
 
-                if market_turn == 0:
+        # Railway يعطينا RAILWAY_PUBLIC_DOMAIN
+        domain = os.getenv(
+            "RAILWAY_PUBLIC_DOMAIN"
+        )
 
-                    if US_SYMBOLS:
+        if domain:
 
-                        symbol = US_SYMBOLS[
-                            US_INDEX %
-                            len(US_SYMBOLS)
-                        ]
-
-                        US_INDEX += 1
-
-                        await scan_symbol(
-                            session,
-                            symbol,
-                            "US"
-                        )
-
-                    market_turn = 1
-
-                # ------------------------------------
-                # العملات
-                # ------------------------------------
-
-                else:
-
-                    if CRYPTO_SYMBOLS:
-
-                        symbol = CRYPTO_SYMBOLS[
-                            CRYPTO_INDEX %
-                            len(CRYPTO_SYMBOLS)
-                        ]
-
-                        CRYPTO_INDEX += 1
-
-                        await scan_symbol(
-                            session,
-                            symbol,
-                            "CRYPTO"
-                        )
-
-                    market_turn = 0
-
-                # ------------------------------------
-                # تحديث القائمة بشكل متباعد
-                # ------------------------------------
-
-                # لا نطلب catalog كل دقيقتين.
-                # بعد وجود القوائم المحلية،
-                # يتم التحديث لاحقًا فقط.
-
-                now = time.time()
-
-                if (
-                    now % CATALOG_REFRESH
-                    < 2
-                ):
-
-                    if market_turn == 0:
-
-                        await update_us_catalog(
-                            session
-                        )
-
-                    else:
-
-                        await update_crypto_catalog(
-                            session
-                        )
-
-            except Exception as error:
-
-                print(
-                    f"ℹ️ خطأ في الفحص: "
-                    f"{error}"
+            if not domain.startswith(
+                "http"
+            ):
+                base_url = (
+                    "https://" + domain
                 )
+            else:
+                base_url = domain
 
-            elapsed = (
-                time.time() - started
+            await set_webhook(
+                session,
+                "us",
+                US_TOKEN,
+                base_url
             )
 
-            wait = max(
-                1,
-                SCAN_SECONDS - elapsed
+            await set_webhook(
+                session,
+                "crypto",
+                CRYPTO_TOKEN,
+                base_url
             )
+
+            await set_webhook(
+                session,
+                "tasi",
+                TASI_TOKEN,
+                base_url
+            )
+
+        else:
 
             print(
-                f"⏱️ الدورة التالية بعد "
-                f"{wait:.0f} ثانية"
+                "ℹ️ RAILWAY_PUBLIC_DOMAIN غير موجود"
             )
 
-            await asyncio.sleep(
-                wait
-            )
+        # رسالة البداية
+        await send_startup_messages(
+            session
+        )
+
+        # تشغيل المحرك
+        await scanner_loop(
+            session
+        )
 
 
 # ============================================================
-# 🌐 التطبيق
-# ============================================================
-
-async def create_app():
-
-    app = web.Application()
-
-    session = aiohttp.ClientSession()
-
-    app["session"] = session
-
-    app.router.add_get(
-        "/",
-        health
-    )
-
-    app.router.add_get(
-        "/health",
-        health
-    )
-
-    app.router.add_post(
-        "/telegram/{market}",
-        telegram_webhook
-    )
-
-    return app
-
-
-# ============================================================
-# ▶️ MAIN
-# ============================================================
-
-async def main():
-
-    app = await create_app()
-
-    session = app["session"]
-
-    # --------------------------------------------
-    # Telegram
-    # --------------------------------------------
-
-    await set_webhook(
-        session,
-        US_TOKEN,
-        "us"
-    )
-
-    await set_webhook(
-        session,
-        CRYPTO_TOKEN,
-        "crypto"
-    )
-
-    await set_webhook(
-        session,
-        TASI_TOKEN,
-        "tasi"
-    )
-
-    # --------------------------------------------
-    # Scanner
-    # --------------------------------------------
-
-    asyncio.create_task(
-        scanner()
-    )
-
-    # --------------------------------------------
-    # Web Server
-    # --------------------------------------------
-
-    runner = web.AppRunner(
-        app
-    )
-
-    await runner.setup()
-
-    site = web.TCPSite(
-        runner,
-        "0.0.0.0",
-        PORT
-    )
-
-    await site.start()
-
-    print(
-        f"🚀 AI PRO MAX {PORT}"
-    )
-
-    try:
-
-        while True:
-
-            await asyncio.sleep(
-                3600
-            )
-
-    finally:
-
-        await session.close()
-
-        await runner.cleanup()
-
-
-# ============================================================
-# تشغيل
+# START
 # ============================================================
 
 if __name__ == "__main__":
 
-    asyncio.run(main())
+    try:
+
+        asyncio.run(
+            main()
+        )
+
+    except KeyboardInterrupt:
+
+        print(
+            "ℹ️ تم إيقاف النظام"
+        )
+
+    except Exception as e:
+
+        print(
+            f"ℹ️ خطأ رئيسي: {e}"
+        )
