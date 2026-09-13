@@ -1,0 +1,216 @@
+
+import os
+import time
+import telebot
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import threading
+
+# ================= الإعدادات =================
+BOT_TOKEN = os.getenv('API') 
+if not BOT_TOKEN:
+    print("❌ خطأ: لم يتم العثور على متغير البيئة API. يرجى إضافته في Railway.")
+    exit(1)
+
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# قوائم الأسهم للمتابعة
+TASI_STOCKS = ["2222.SR", "1120.SR", "2010.SR", "4013.SR"]
+US_STOCKS = ["TSLA", "AAPL", "NVDA", "MSFT"]
+CRYPTO_STOCKS = ["BTC-USD", "ETH-USD", "SOL-USD"]
+
+STOCK_NAMES = {
+    "2222.SR": "أرامكو السعودية", "1120.SR": "الراجحي", "2010.SR": "سابك", "4013.SR": "د. سليمان الحبيب",
+    "TSLA": "Tesla Inc", "AAPL": "Apple Inc", "NVDA": "NVIDIA", "MSFT": "Microsoft",
+    "BTC-USD": "Bitcoin", "ETH-USD": "Ethereum", "SOL-USD": "Solana"
+}
+
+# ================= دوال المؤشرات الفنية =================
+def calculate_indicators(df):
+    try:
+        df['EMA_8'] = df['Close'].ewm(span=8, adjust=False).mean()
+        df['EMA_21'] = df['Close'].ewm(span=21, adjust=False).mean()
+        df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
+        
+        delta = df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
+        
+        high_low = df['High'] - df['Low']
+        high_close = np.abs(df['High'] - df['Close'].shift())
+        low_close = np.abs(df['Low'] - df['Close'].shift())
+        ranges = pd.concat([high_low, high_close, low_close], axis=1)
+        true_range = np.max(ranges, axis=1)
+        df['ATR'] = true_range.rolling(14).mean()
+        
+        df['Typical_Price'] = (df['High'] + df['Low'] + df['Close']) / 3
+        df['VWAP'] = (df['Typical_Price'] * df['Volume']).cumsum() / df['Volume'].cumsum()
+    except Exception as e:
+        print(f"Error in indicators: {e}")
+    return df
+
+def get_support_resistance(df, window=20):
+    recent_df = df.tail(window)
+    if recent_df.empty:
+        return 0, 0
+    return recent_df['Low'].min(), recent_df['High'].max()
+
+def analyze_news(symbol):
+    try:
+        ticker = yf.Ticker(symbol)
+        news = ticker.news
+        if not news:
+            return "لا توجد أخبار حديثة ⚪", "⚪"
+        
+        pos_words = ['beat', 'rise', 'growth', 'up', 'surge', 'profit', 'record', 'buy']
+        neg_words = ['miss', 'fall', 'drop', 'down', 'loss', 'cut', 'sell', 'warn']
+        pos_count = sum(1 for item in news[:5] if any(w in item.get('title', '').lower() for w in pos_words))
+        neg_count = sum(1 for item in news[:5] if any(w in item.get('title', '').lower() for w in neg_words))
+        
+        if pos_count > neg_count: return "أخبار إيجابية 🟢", "🟢"
+        elif neg_count > pos_count: return "أخبار سلبية 🔴", "🔴"
+        else: return "أخبار محايدة ⚪", "⚪"
+    except Exception:
+        return "تعذر جلب الأخبار", "⚪"
+
+# ================= توليد التقرير =================
+def generate_report(symbol):
+    try:
+        # استخدام Ticker.history بدلاً من download لتجنب مشاكل الأعمدة المتعددة
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period="2d", interval="5m")
+        
+        if df.empty:
+            return None
+            
+        df = calculate_indicators(df)
+        df = df.dropna() # التخلص من الصفوف الفارغة
+        
+        if df.empty:
+            return None
+
+        current_price = df['Close'].iloc[-1]
+        prev_price = df['Close'].iloc[-2] if len(df) > 1 else current_price
+        change_pct = ((current_price - prev_price) / prev_price) * 100
+        
+        ema8 = df['EMA_8'].iloc[-1]
+        ema21 = df['EMA_21'].iloc[-1]
+        ema50 = df['EMA_50'].iloc[-1]
+        rsi = df['RSI'].iloc[-1]
+        atr = df['ATR'].iloc[-1]
+        vwap = df['VWAP'].iloc[-1]
+        
+        support, resistance = get_support_resistance(df)
+        
+        trend_arrow = "📈" if ema8 > ema21 else "📉"
+        trend_text = "صاعد قوي" if ema8 > ema21 > ema50 else ("هابط قوي" if ema8 < ema21 < ema50 else "عرضي")
+        
+        signal = "⚪ محايد"
+        signal_color = "⚪"
+        if current_price > vwap and ema8 > ema21 and rsi > 50:
+            signal = "🟢 شراء قوي"
+            signal_color = "🟢"
+        elif current_price < vwap and ema8 < ema21 and rsi < 50:
+            signal = "🔴 بيع قوي"
+            signal_color = "🔴"
+            
+        targets = []
+        for i in range(1, 9):
+            target_price = current_price + (i * atr) if signal_color == "🟢" else current_price - (i * atr)
+            target_pct = ((target_price - current_price) / current_price) * 100
+            targets.append(f"TP{i}: {target_price:.2f} ({target_pct:+.1f}%)")
+            
+        news_text, news_emoji = "", ""
+        if symbol in US_STOCKS:
+            news_text, news_emoji = analyze_news(symbol)
+            
+        name = STOCK_NAMES.get(symbol, symbol)
+        
+        msg = f"💀🚀 <b>AI PRO MAX SIGNAL</b>\n━━━━━━━━━━━━━━━━━━\n"
+        if symbol.endswith(".SR"): msg += f"🇸🇦 السوق السعودي (TASI)\n"
+        elif symbol in US_STOCKS: msg += f"🇺🇸 السوق الأمريكي (US)\n"
+        elif "-USD" in symbol: msg += f"🪙 العملات الرقمية (CRYPTO)\n"
+            
+        msg += f"<b>{symbol}</b> | {name}\n\n"
+        msg += f"💰 السعر: <b>{current_price:.2f}</b>\n"
+        msg += f"📊 التغير: <b>{change_pct:+.2f}%</b>\n"
+        msg += f"🎯 الإشارة: <b>{signal}</b>\n"
+        msg += f"📈 الاتجاه: {trend_text} {trend_arrow}\n"
+        if news_text: msg += f"📰 الأخبار: {news_text} {news_emoji}\n"
+        msg += f"\n📉 <b>المؤشرات الفنية:</b>\n"
+        msg += f"EMA 8: {ema8:.2f} | EMA 21: {ema21:.2f}\n"
+        msg += f"EMA 50: {ema50:.2f} | RSI: {rsi:.1f}\n"
+        msg += f"ATR: {atr:.2f} | VWAP: {vwap:.2f}\n\n"
+        msg += f"🛡️ <b>الدعم والمقاومة:</b>\nالدعم: {support:.2f} | المقاومة: {resistance:.2f}\n\n"
+        msg += f"🎯 <b>أهداف ATR الثمانية:</b>\n"
+        msg += " | ".join(targets[:4]) + "\n"
+        msg += " | ".join(targets[4:]) + "\n━━━━━━━━━━━━━━━━━━"
+        
+        return msg
+        
+    except Exception as e:
+        print(f"Error analyzing {symbol}: {e}")
+        return None
+
+# ================= أوامر البوت =================
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    welcome_text = (
+        "أهلاً بك في <b>AI PRO MAX</b> 🤖🚀\n\n"
+        "الأوامر المتاحة:\n"
+        "/tasi - تحليل السوق السعودي\n"
+        "/us - تحليل السوق الأمريكي\n"
+        "/crypto - تحليل العملات الرقمية\n"
+        "/all - تحليل كافة الأسواق\n"
+        "/scan - تشغيل الفحص التلقائي الآن"
+    )
+    bot.reply_to(message, welcome_text, parse_mode='HTML')
+
+def send_reports(chat_id, symbols):
+    for symbol in symbols:
+        report = generate_report(symbol)
+        if report:
+            try:
+                bot.send_message(chat_id, report, parse_mode='HTML')
+                time.sleep(2) 
+            except Exception as e:
+                print(f"Telegram Send Error: {e}")
+
+@bot.message_handler(commands=['tasi'])
+def scan_tasi(message): send_reports(message.chat.id, TASI_STOCKS)
+
+@bot.message_handler(commands=['us'])
+def scan_us(message): send_reports(message.chat.id, US_STOCKS)
+
+@bot.message_handler(commands=['crypto'])
+def scan_crypto(message): send_reports(message.chat.id, CRYPTO_STOCKS)
+
+@bot.message_handler(commands=['all'])
+def scan_all(message): send_reports(message.chat.id, TASI_STOCKS + US_STOCKS + CRYPTO_STOCKS)
+
+# ================= الفحص التلقائي =================
+def auto_scanner():
+    CHAT_ID = os.getenv('CHAT_ID') 
+    if not CHAT_ID:
+        print("⚠️ لم يتم تحديد CHAT_ID. الفحص التلقائي معطل.")
+        return
+
+    while True:
+        try:
+            print(f"⏳ بدء الفحص التلقائي: {datetime.now()}")
+            send_reports(CHAT_ID, TASI_STOCKS + US_STOCKS + CRYPTO_STOCKS)
+            print("✅ انتهى الفحص. الانتظار دقيقتين...")
+            time.sleep(120)
+        except Exception as e:
+            print(f"خطأ في الفحص التلقائي: {e}")
+            time.sleep(60)
+
+if os.getenv('CHAT_ID'):
+    threading.Thread(target=auto_scanner, daemon=True).start()
+
+print("🚀 AI PRO MAX Bot is running...")
+bot.infinity_polling()
