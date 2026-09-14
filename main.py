@@ -1005,14 +1005,29 @@ def get_tasi_symbols():
 
 
 def get_us_symbols():
-    symbols = []
+    """
+    🇺🇸 تحميل كامل الرموز الأمريكية المتاحة من TwelveData.
 
-    for exchange in ("NASDAQ", "NYSE", "AMEX"):
-        data = td_request(
-            "/stocks",
-            {"exchange": exchange},
-        )
-        symbols.extend(_extract_symbols(data))
+    لا نحصر السوق في NASDAQ/NYSE/AMEX فقط؛ نستخدم فلتر الدولة
+    United States حتى نحصل على قائمة السوق الأمريكي الأوسع التي
+    يوفرها TwelveData.
+    """
+    data = td_request(
+        "/stocks",
+        {"country": "United States"},
+    )
+
+    symbols = _extract_symbols(data)
+
+    # احتياط: إذا لم ترجع واجهة country بيانات، نرجع لطريقة البورصات
+    # السابقة بدل أن يتوقف البوت.
+    if not symbols:
+        for exchange in ("NASDAQ", "NYSE", "AMEX"):
+            data = td_request(
+                "/stocks",
+                {"exchange": exchange},
+            )
+            symbols.extend(_extract_symbols(data))
 
     return list(dict.fromkeys(symbols))
 
@@ -1184,7 +1199,7 @@ def main():
     print("=" * 68)
     print("💀🚀 AI PRO MAX — STABLE EDITION")
     print("🇸🇦 TASI 375 — 24/7")
-    print("🇺🇸 US MARKET — $0.20+ | 24/7 | PRE + REGULAR + POST")
+    print("🇺🇸 US MARKET — FULL US | $0.20+ | 24/7 | PRE + REGULAR + POST")
     print("🪙 CRYPTO MARKET — FULL | 24/7")
     print("=" * 68)
 
