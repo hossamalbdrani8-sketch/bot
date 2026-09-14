@@ -1,4 +1,5 @@
-# ============================================================
+
+============================================================
 # AI PRO MAX — TASI + US + CRYPTO
 # Stable / Low-Connection Edition
 # ============================================================
@@ -46,6 +47,10 @@ SYMBOL_REFRESH_SECONDS = 21600
 
 PRIMARY_TIMEFRAME = "15min"
 OUTPUTSIZE = 220
+
+# 🇺🇸 لا ترسل/تعتمد إشارات للأسهم الأمريكية الأقل من 0.20$
+# جميع الأسهم من 0.20$ فأعلى تبقى ضمن الفحص.
+MIN_US_PRICE = 0.20
 
 EMA_FAST = 8
 EMA_MID = 21
@@ -316,16 +321,28 @@ def vwap(highs, lows, closes, volumes):
 # PRICE DATA
 # ============================================================
 
-def get_series(symbol, interval=PRIMARY_TIMEFRAME):
-    data = td_request(
-        "/time_series",
-        {
-            "symbol": symbol,
-            "interval": interval,
-            "outputsize": OUTPUTSIZE,
-            "format": "JSON",
-        },
-    )
+def get_series(symbol, market, interval=PRIMARY_TIMEFRAME):
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "outputsize": OUTPUTSIZE,
+        "format": "JSON",
+    }
+
+    # 🇺🇸 الأمريكي يعمل بلا أي قيد زمني: قبل السوق + أثناء السوق + بعد الإغلاق.
+    # prepost=true لطلب بيانات الجلسات الممتدة عند دعمها من خطة TwelveData.
+    # إذا كانت الخطة تدعم TwelveData Extended Hours.
+    # لا توجد أي بوابة زمنية هنا؛ البوت يبقى شغال 24/7.
+    if market == "US":
+        params["prepost"] = "true"
+
+    data = td_request("/time_series", params)
+
+    # إذا كانت الخطة لا تدعم prepost، نرجع تلقائيًا للبيانات العادية
+    # بدل توقف الفحص بالكامل.
+    if data is None and market == "US":
+        params.pop("prepost", None)
+        data = td_request("/time_series", params)
 
     if not isinstance(data, dict):
         return None
@@ -345,12 +362,21 @@ def get_series(symbol, interval=PRIMARY_TIMEFRAME):
                 "high": float(item["high"]),
                 "low": float(item["low"]),
                 "close": float(item["close"]),
+                # Extended-hours bars may not contain volume.
                 "volume": float(item.get("volume", 0) or 0),
             })
         except (TypeError, ValueError, KeyError):
             continue
 
-    return candles if len(candles) >= 100 else None
+    if len(candles) < 100:
+        return None
+
+    meta = data.get("meta") or {}
+    return {
+        "candles": candles,
+        "name": str(meta.get("name") or "").strip(),
+        "exchange": str(meta.get("exchange") or "").strip(),
+    }
 
 
 # ============================================================
@@ -472,19 +498,34 @@ def calculate_ars(candles):
 def calculate_power(candles):
     recent = candles[-20:]
 
+    # أثناء ما قبل/بعد السوق قد لا تعيد TwelveData حجمًا للشموع الممتدة.
+    # في هذه الحالة نستخدم قوة الحركة السعرية بدل أن تصبح القوة 0/0.
+    volume_available = sum(c["volume"] for c in recent) > 0
+
     buy_volume = 0.0
     sell_volume = 0.0
 
-    for candle in recent:
-        volume = candle["volume"]
+    if volume_available:
+        for candle in recent:
+            volume = candle["volume"]
 
-        if candle["close"] > candle["open"]:
-            buy_volume += volume
-        elif candle["close"] < candle["open"]:
-            sell_volume += volume
-        else:
-            buy_volume += volume * 0.5
-            sell_volume += volume * 0.5
+            if candle["close"] > candle["open"]:
+                buy_volume += volume
+            elif candle["close"] < candle["open"]:
+                sell_volume += volume
+            else:
+                buy_volume += volume * 0.5
+                sell_volume += volume * 0.5
+    else:
+        # fallback سعري للـ extended hours
+        for candle in recent:
+            if candle["close"] > candle["open"]:
+                buy_volume += 1.0
+            elif candle["close"] < candle["open"]:
+                sell_volume += 1.0
+            else:
+                buy_volume += 0.5
+                sell_volume += 0.5
 
     total = buy_volume + sell_volume
 
@@ -499,6 +540,10 @@ def calculate_power(candles):
 
 def volume_strength(candles):
     volumes = [c["volume"] for c in candles]
+
+    # Extended-hours قد لا تحتوي على volume.
+    if sum(volumes[-VOLUME_LENGTH:]) <= 0:
+        return 1.0
 
     if len(volumes) < VOLUME_LENGTH + 1:
         return 1.0
@@ -585,10 +630,13 @@ def news_sentiment(symbol):
 # ============================================================
 
 def analyze_symbol(symbol, market):
-    candles = get_series(symbol)
+    series = get_series(symbol, market)
 
-    if not candles:
+    if not series:
         return None
+
+    candles = series["candles"]
+    company_name = series.get("name") or ""
 
     closes = [c["close"] for c in candles]
     highs = [c["high"] for c in candles]
@@ -596,6 +644,13 @@ def analyze_symbol(symbol, market):
     volumes = [c["volume"] for c in candles]
 
     price = closes[-1]
+
+    # 🇺🇸 نطاق الأمريكي المطلوب: 0.20$ فأعلى
+    # لا يوجد قيد ساعات: قبل السوق + أثناء السوق + بعد الإغلاق + 24/7.
+    if market == "US" and price < MIN_US_PRICE:
+        return None
+
+    previous_close = closes[-2] if len(closes) >= 2 else None
 
     e8 = ema(closes, EMA_FAST)
     e21 = ema(closes, EMA_MID)
@@ -686,8 +741,10 @@ def analyze_symbol(symbol, market):
 
     return {
         "symbol": symbol,
+        "name": company_name,
         "market": market,
         "price": price,
+        "previous_close": previous_close,
         "ema8": e8,
         "ema21": e21,
         "ema50": e50,
@@ -771,23 +828,37 @@ def telegram_send(token, message):
 # MESSAGE
 # ============================================================
 
+def escape_html(value):
+    text = str(value if value is not None else "-")
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
 def build_message(result):
     market = result["market"]
 
     names = {
-        "TASI": "🇸🇦 السوق السعودي TASI",
-        "US": "🇺🇸 السوق الأمريكي US",
-        "CRYPTO": "🪙 سوق العملات الرقمية",
+        "TASI": "🇸🇦 السوق السعودي (TASI)",
+        "US": "🇺🇸 السوق الأمريكي (US)",
+        "CRYPTO": "🪙 العملات الرقمية (CRYPTO)",
     }
 
     market_name = names.get(market, market)
+    symbol = escape_html(result["symbol"])
+    company_name = escape_html(result.get("name") or "")
 
     if result["trend"] == "UP":
-        trend_text = "🟢 اتجاه صاعد"
+        trend_text = "🟢 صاعد قوي"
+        trend_icon = "📈"
     elif result["trend"] == "DOWN":
-        trend_text = "🔴 اتجاه هابط"
+        trend_text = "🔴 هابط قوي"
+        trend_icon = "📉"
     else:
-        trend_text = "⚪ اتجاه محايد"
+        trend_text = "⚪ محايد"
+        trend_icon = "↔️"
 
     if result["vwap"] is not None:
         vwap_text = (
@@ -796,43 +867,58 @@ def build_message(result):
             else "🔴 تحت VWAP"
         )
     else:
-        vwap_text = "-"
+        vwap_text = "⚪ VWAP غير متاح"
+
+    change_pct = None
+    if result.get("previous_close") not in (None, 0):
+        change_pct = (result["price"] - result["previous_close"]) / result["previous_close"] * 100
+
+    if result["signal"] == "BUY":
+        signal_badge = "🟢 <b>شراء قوي</b>"
+    elif result["signal"] == "SELL":
+        signal_badge = "🔴 <b>بيع قوي</b>"
+    else:
+        signal_badge = "⚪ <b>انتظار</b>"
 
     lines = [
         "💀🚀 <b>AI PRO MAX SIGNAL</b>",
         "",
-        market_name,
-        "",
-        f"<b>{result['symbol']}</b>",
-        "",
-        f"{result['signal_text']} | قوة الإشارة: "
-        f"<b>{result['score']}/100</b>",
-        "",
-        f"💰 السعر: <b>{fmt(result['price'])}</b>",
-        f"📈 EMA 8: {fmt(result['ema8'])}",
-        f"📈 EMA 21: {fmt(result['ema21'])}",
-        f"📈 EMA 50: {fmt(result['ema50'])}",
-        f"📈 EMA 200: {fmt(result['ema200'])}",
-        "",
-        f"🧠 RSI: {fmt(result['rsi'])}",
-        f"📐 ATR: {fmt(result['atr'])}",
-        f"📊 VWAP: {fmt(result['vwap'])} {vwap_text}",
-        "",
-        f"🟢 قوة الشراء: {pct(result['buy_power'])}",
-        f"🔴 قوة البيع: {pct(result['sell_power'])}",
-        f"📦 قوة الحجم: {result['volume_ratio']:.2f}x",
-        "",
-        f"🛡️ الدعم: <b>{fmt(result['support'])}</b>",
-        f"🚧 المقاومة: <b>{fmt(result['resistance'])}</b>",
-        "",
-        f"🧭 ARS: <b>{result['ars']}/100</b>",
-        f"📈 اتجاه السوق: <b>{trend_text}</b>",
+        f"{market_name}",
+        f"<b>{symbol}</b>",
     ]
 
+    if company_name and company_name.lower() != result["symbol"].lower():
+        lines.append(f"{company_name}")
+
+    lines.extend([
+        "",
+        f"{signal_badge}    🎯 قوة الإشارة: <b>{result['score']}/100</b>",
+        "",
+        f"💰 <b>السعر:</b> {fmt(result['price'])}" + (f"  ({change_pct:+.2f}%)" if change_pct is not None else ""),
+        f"📊 <b>VWAP:</b> {fmt(result['vwap'])}  {vwap_text}",
+        f"🧠 <b>RSI 14:</b> {fmt(result['rsi'])}",
+        f"📐 <b>ATR 14:</b> {fmt(result['atr'])}",
+        "",
+        f"📈 <b>EMA 8:</b> {fmt(result['ema8'])}    <b>EMA 21:</b> {fmt(result['ema21'])}",
+        f"📈 <b>EMA 50:</b> {fmt(result['ema50'])}    <b>EMA 200:</b> {fmt(result['ema200'])}",
+        "",
+        f"🟢 <b>قوة الشراء:</b> {pct(result['buy_power'])}",
+        f"🔴 <b>قوة البيع:</b> {pct(result['sell_power'])}",
+        f"📦 <b>قوة الحجم:</b> {result['volume_ratio']:.2f}x",
+        "",
+        f"🛡️ <b>الدعم:</b> {fmt(result['support'])}",
+        f"🚧 <b>المقاومة:</b> {fmt(result['resistance'])}",
+        f"{trend_icon} <b>اتجاه السوق:</b> {trend_text}",
+        f"🧭 <b>ARS:</b> {result['ars']}/100",
+    ])
+
     if market == "US":
-        lines.append(
-            f"📰 أخبار السهم: <b>{result['news']}</b>"
-        )
+        lines.append(f"📰 <b>أخبار السهم:</b> {result['news']}")
+        lines.append("🕒 <b>الوضع:</b> قبل السوق / أثناء السوق / بعد الإغلاق — الفحص مستمر 24/7")
+    elif market == "TASI":
+        lines.append("🕒 <b>الوضع:</b> المزاد / التداول / ما بعد الإغلاق — الفحص مستمر 24/7")
+    else:
+        lines.append("🕒 <b>الوضع:</b> سوق يعمل 24/7")
 
     if result["targets"]:
         lines.extend([
@@ -842,21 +928,15 @@ def build_message(result):
 
         for i, target in enumerate(result["targets"], 1):
             if result["price"]:
-                change = (
-                    (target - result["price"])
-                    / result["price"]
-                    * 100
-                )
+                change = (target - result["price"]) / result["price"] * 100
             else:
                 change = 0
 
-            lines.append(
-                f"TP{i}: {fmt(target)} ({change:+.2f}%)"
-            )
+            lines.append(f"TP{i}: <b>{fmt(target)}</b> ({change:+.2f}%)")
 
     lines.extend([
         "",
-        "🤖 الفحص تلقائي",
+        "🤖 <b>الفحص تلقائي بالكامل</b>",
         "🔄 الاتجاه يستمر حتى ظهور انعكاس مؤكد",
         f"⏱️ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
     ])
@@ -1104,9 +1184,9 @@ def heartbeat():
 def main():
     print("=" * 68)
     print("💀🚀 AI PRO MAX — STABLE EDITION")
-    print("🇸🇦 TASI 375")
-    print("🇺🇸 US MARKET")
-    print("🪙 CRYPTO MARKET")
+    print("🇸🇦 TASI 375 — 24/7")
+    print("🇺🇸 US MARKET — $0.20+ | 24/7 | PRE + REGULAR + POST")
+    print("🪙 CRYPTO MARKET — FULL | 24/7")
     print("=" * 68)
 
     if not TWELVEDATA_API_KEY:
