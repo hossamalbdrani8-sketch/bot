@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock, local
 
 import requests
+from PIL import Image, ImageDraw
 
 # ============================================================
 # VARIABLES — Railway
@@ -22,6 +23,14 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 TASI_TOKEN = os.getenv("TASI_TOKEN", "").strip()
 US_TOKEN = os.getenv("US_TOKEN", "").strip()
 CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN", "").strip()
+
+# ============================================================
+# TELEGRAM DIRECTION ANIMATION
+# ============================================================
+DIRECTION_GIF_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "telegram_gifs")
+UP_GIF = os.path.join(DIRECTION_GIF_DIR, "green_up.gif")
+DOWN_GIF = os.path.join(DIRECTION_GIF_DIR, "red_down.gif")
+
 
 # ============================================================
 # SETTINGS
@@ -799,6 +808,110 @@ def pct(value):
 # TELEGRAM
 # ============================================================
 
+def ensure_direction_gifs():
+    """Create looping green/red direction GIFs locally once at startup."""
+    try:
+        os.makedirs(DIRECTION_GIF_DIR, exist_ok=True)
+
+        def make_gif(path, direction, title):
+            if os.path.exists(path):
+                return
+
+            frames = []
+            size = (420, 260)
+
+            for i in range(8):
+                img = Image.new("RGB", size, (18, 18, 24))
+                draw = ImageDraw.Draw(img)
+
+                # pulsing arrow size
+                pulse = i if i <= 4 else 8 - i
+                if direction == "up":
+                    cx, cy = 210, 125 - pulse * 5
+                    points = [
+                        (210, 45 - pulse * 2),
+                        (95, 165 - pulse * 2),
+                        (165, 165 - pulse * 2),
+                        (165, 215),
+                        (255, 215),
+                        (255, 165 - pulse * 2),
+                        (325, 165 - pulse * 2),
+                    ]
+                    label = "UP"
+                    fill = (40, 220, 100)
+                else:
+                    cx, cy = 210, 135 + pulse * 5
+                    points = [
+                        (95, 95 + pulse * 2),
+                        (165, 95 + pulse * 2),
+                        (165, 45),
+                        (255, 45),
+                        (255, 95 + pulse * 2),
+                        (325, 95 + pulse * 2),
+                        (210, 215 + pulse * 2),
+                    ]
+                    label = "DOWN"
+                    fill = (240, 55, 65)
+
+                draw.polygon(points, fill=fill)
+                draw.text((145, 15), title, fill=(245, 245, 245))
+                draw.text((175, 225), label, fill=fill)
+                frames.append(img)
+
+            frames[0].save(
+                path,
+                save_all=True,
+                append_images=frames[1:],
+                duration=140,
+                loop=0,
+                optimize=True,
+            )
+
+        make_gif(UP_GIF, "up", "AI PRO MAX")
+        make_gif(DOWN_GIF, "down", "AI PRO MAX")
+        return True
+    except Exception as error:
+        print(f"⚠️ تعذر إنشاء GIF الاتجاه: {error}")
+        return False
+
+
+def telegram_send_animation(token, gif_path, caption):
+    if not token or not CHAT_ID or not os.path.exists(gif_path):
+        return False
+
+    session = get_session()
+    url = f"https://api.telegram.org/bot{token}/sendAnimation"
+
+    try:
+        with open(gif_path, "rb") as gif_file:
+            response = session.post(
+                url,
+                data={
+                    "chat_id": CHAT_ID,
+                    "caption": caption,
+                    "parse_mode": "HTML",
+                },
+                files={"animation": gif_file},
+                timeout=(10, 60),
+            )
+        return response.ok
+    except Exception:
+        return False
+
+
+def telegram_send_direction(token, result):
+    """Send a looping direction animation once when a new trend signal starts."""
+    if result["trend"] == "UP":
+        caption = "🟢 <b>اتجاه صاعد مستمر</b>\n⬆️ يستمر حتى ينتهي/ينعكس الاتجاه"
+        return telegram_send_animation(token, UP_GIF, caption)
+
+    if result["trend"] == "DOWN":
+        caption = "🔴 <b>اتجاه هابط مستمر</b>\n⬇️ يستمر حتى ينتهي/ينعكس الاتجاه"
+        return telegram_send_animation(token, DOWN_GIF, caption)
+
+    return False
+
+
 def telegram_send(token, message):
     if not token or not CHAT_ID:
         return False
@@ -1117,6 +1230,10 @@ def scan_market(symbols, market, token):
                         continue
 
                     if should_send(result):
+                        # اتجاه متحرك: الأخضر يستمر مع الاتجاه الصاعد،
+                        # والأحمر يستمر مع الاتجاه الهابط حتى تتغير الحالة.
+                        telegram_send_direction(token, result)
+
                         message = build_message(result)
 
                         if telegram_send(token, message):
@@ -1212,6 +1329,10 @@ def main():
 
     print("🟢 TWELVEDATA_API_KEY: OK")
     print("🟢 CHAT_ID: OK")
+
+    if ensure_direction_gifs():
+        print("🟢 Telegram Direction GIFs: OK | 🟢 UP + 🔴 DOWN | LOOP")
+
     print("🇸🇦 TASI TOKEN:", "OK" if TASI_TOKEN else "MISSING")
     print("🇺🇸 US TOKEN:", "OK" if US_TOKEN else "MISSING")
     print("🪙 CRYPTO TOKEN:", "OK" if CRYPTO_TOKEN else "MISSING")
