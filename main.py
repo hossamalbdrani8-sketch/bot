@@ -50,6 +50,7 @@ OUTPUTSIZE = 220
 # 🇺🇸 لا ترسل/تعتمد إشارات للأسهم الأمريكية الأقل من 0.20$
 # جميع الأسهم من 0.20$ فأعلى تبقى ضمن الفحص.
 MIN_US_PRICE = 0.20
+US_MAX_SYMBOLS = 13402
 
 EMA_FAST = 8
 EMA_MID = 21
@@ -1006,22 +1007,19 @@ def get_tasi_symbols():
 
 def get_us_symbols():
     """
-    🇺🇸 تحميل كامل الرموز الأمريكية المتاحة من TwelveData.
-
-    لا نحصر السوق في NASDAQ/NYSE/AMEX فقط؛ نستخدم فلتر الدولة
-    United States حتى نحصل على قائمة السوق الأمريكي الأوسع التي
-    يوفرها TwelveData.
+    🇺🇸 السوق الأمريكي: 13,402 رمز بالضبط كحد أعلى.
+    نطلب قائمة الولايات المتحدة كاملة من TwelveData، ثم نرتبها ونأخذ
+    أول 13,402 رمز بشكل ثابت حتى لا يتغير العدد عشوائياً بين الدورات.
+    إذا تعذر فلتر الدولة، نستخدم البورصات الرئيسية كخطة احتياطية.
     """
     data = td_request(
         "/stocks",
         {"country": "United States"},
     )
-
     symbols = _extract_symbols(data)
 
-    # احتياط: إذا لم ترجع واجهة country بيانات، نرجع لطريقة البورصات
-    # السابقة بدل أن يتوقف البوت.
     if not symbols:
+        symbols = []
         for exchange in ("NASDAQ", "NYSE", "AMEX"):
             data = td_request(
                 "/stocks",
@@ -1029,7 +1027,8 @@ def get_us_symbols():
             )
             symbols.extend(_extract_symbols(data))
 
-    return list(dict.fromkeys(symbols))
+    symbols = sorted(set(symbols), key=str.upper)
+    return symbols[:US_MAX_SYMBOLS]
 
 
 def get_crypto_symbols():
