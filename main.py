@@ -466,10 +466,17 @@ def persistent_trend(market, symbol, current_trend):
 
 
 # ============================================================
-# ARS
+# ARS — HIDDEN INTERNAL LEVEL ENGINE
 # ============================================================
 
+ARS_LEVELS = [20, 30, 40, 50, 60, 80, 100]
+
 def calculate_ars(candles):
+    """
+    ARS داخلي فقط. لا يظهر في Telegram.
+    القراءة محصورة بين 20 و100، مع مستويات مراقبة:
+    20 / 30 / 40 / 50 / 60 / 80 / 100.
+    """
     closes = [c["close"] for c in candles]
 
     if len(closes) < 50:
@@ -478,9 +485,9 @@ def calculate_ars(candles):
     e8 = ema(closes, 8)
     e21 = ema(closes, 21)
     e50 = ema(closes, 50)
+    current = closes[-1]
 
     score = 50
-    current = closes[-1]
 
     if e8 > e21:
         score += 15
@@ -497,8 +504,174 @@ def calculate_ars(candles):
     else:
         score -= 10
 
-    return max(0, min(100, score))
+    return max(20, min(100, score))
 
+
+def nearest_ars_level(value):
+    return min(ARS_LEVELS, key=lambda level: abs(level - value))
+
+
+def ars_ladder_bias(ars_value, previous_ars=None):
+    """
+    قراءة مستويات ARS من 20 إلى 100 داخليًا.
+    عند الصعود: متابعة تجاوز المستويات.
+    عند الهبوط: متابعة كسر المستويات والارتداد منها.
+    لا يُعرض هذا في الإشعار.
+    """
+    level = nearest_ars_level(ars_value)
+    if previous_ars is None:
+        return 0, level
+
+    if ars_value > previous_ars:
+        return 1, level
+    if ars_value < previous_ars:
+        return -1, level
+    return 0, level
+
+
+# ============================================================
+# DIVERGENCE — REGULAR + HIDDEN (HIDDEN FROM TELEGRAM)
+# ============================================================
+
+def _pivot_lows(values, left=3, right=3):
+    result = []
+    for i in range(left, len(values) - right):
+        window = values[i-left:i+right+1]
+        if values[i] == min(window):
+            result.append((i, values[i]))
+    return result
+
+
+def _pivot_highs(values, left=3, right=3):
+    result = []
+    for i in range(left, len(values) - right):
+        window = values[i-left:i+right+1]
+        if values[i] == max(window):
+            result.append((i, values[i]))
+    return result
+
+
+def detect_divergence(candles, rsi_value):
+    """
+    يكشف Regular/Hidden Divergence بين السعر وRSI من القمم والقيعان
+    المؤكدة. النتيجة داخلية فقط ولا تظهر في Telegram.
+    """
+    closes = [c["close"] for c in candles]
+    if len(closes) < 60 or rsi_value is None:
+        return {"regular_bull": False, "regular_bear": False,
+                "hidden_bull": False, "hidden_bear": False}
+
+    # RSI series كاملة بنفس ترتيب الشموع
+    rsi_series = []
+    for end_i in range(15, len(closes) + 1):
+        value = rsi(closes[:end_i], RSI_LENGTH)
+        rsi_series.append(value if value is not None else 50.0)
+    pad = len(closes) - len(rsi_series)
+    rsi_full = [50.0] * pad + rsi_series
+
+    lows = _pivot_lows(closes)
+    highs = _pivot_highs(closes)
+
+    result = {
+        "regular_bull": False,
+        "regular_bear": False,
+        "hidden_bull": False,
+        "hidden_bear": False,
+    }
+
+    if len(lows) >= 2:
+        (i1, p1), (i2, p2) = lows[-2], lows[-1]
+        r1, r2 = rsi_full[i1], rsi_full[i2]
+        result["regular_bull"] = p2 < p1 and r2 > r1
+        result["hidden_bull"] = p2 > p1 and r2 < r1
+
+    if len(highs) >= 2:
+        (i1, p1), (i2, p2) = highs[-2], highs[-1]
+        r1, r2 = rsi_full[i1], rsi_full[i2]
+        result["regular_bear"] = p2 > p1 and r2 < r1
+        result["hidden_bear"] = p2 < p1 and r2 > r1
+
+    return result
+
+
+def trendline_bias(candles):
+    """
+    قراءة اتجاه خطوط الترند من آخر قمتين/قاعين، داخلي فقط.
+    """
+    closes = [c["close"] for c in candles]
+    lows = _pivot_lows(closes)
+    highs = _pivot_highs(closes)
+
+    bias = 0
+
+    if len(lows) >= 2:
+        (_, l1), (_, l2) = lows[-2], lows[-1]
+        if l2 > l1:
+            bias += 1
+        elif l2 < l1:
+            bias -= 1
+
+    if len(highs) >= 2:
+        (_, h1), (_, h2) = highs[-2], highs[-1]
+        if h2 > h1:
+            bias += 1
+        elif h2 < h1:
+            bias -= 1
+
+    return max(-2, min(2, bias))
+
+
+# ============================================================
+# SMART MOVEMENT / SMART-MONEY PROXY (INFERRED)
+# ============================================================
+
+def detect_smart_movements(candles, trend, volume_ratio, buy_power, sell_power,
+                           atr_value, rsi_value):
+    """
+    استدلال احتمالي لتحركات كبيرة/تجميع من السعر والحجم.
+    لا يعني رصد هوية صندوق بعينه؛ هو Proxy تقني.
+    """
+    recent = candles[-20:]
+    if len(recent) < 10:
+        return {"maker": 0, "speculators": False, "accumulation": False, "unusual": False}
+
+    closes = [c["close"] for c in recent]
+    opens = [c["open"] for c in recent]
+    ranges = [abs(c["high"] - c["low"]) for c in recent]
+    avg_range = sum(ranges[:-1]) / max(1, len(ranges) - 1)
+    current_range = ranges[-1]
+    price_move = (closes[-1] - closes[0]) / closes[0] * 100 if closes[0] else 0
+
+    unusual = (volume_ratio >= 2.0 and abs(price_move) >= 1.0) or (volume_ratio >= 3.0)
+
+    # تجميع احتمالي: حجم قوي مع ضغط شرائي واتجاه/سلوك سعر متماسك.
+    accumulation = (
+        volume_ratio >= 1.5
+        and buy_power >= 58
+        and (trend == "UP" or (rsi_value is not None and rsi_value < 60))
+    )
+
+    # حركة مضاربين: اندفاع سعري + توسع نطاق/حجم.
+    speculators = (
+        (volume_ratio >= 2.0 and abs(price_move) >= 2.0)
+        or (avg_range > 0 and current_range >= avg_range * 1.8)
+    )
+
+    # سهم صغير متحرك لصنّاع السهم: نستخدم Proxy قوي وليس ادعاء معرفة جهة محددة.
+    maker = 0
+    if unusual and buy_power >= 65:
+        maker = 1
+    elif unusual and sell_power >= 65:
+        maker = -1
+    elif accumulation:
+        maker = 1
+
+    return {
+        "maker": maker,
+        "speculators": speculators,
+        "accumulation": accumulation,
+        "unusual": unusual,
+    }
 
 # ============================================================
 # BUY / SELL POWER
@@ -654,8 +827,6 @@ def analyze_symbol(symbol, market):
 
     price = closes[-1]
 
-    # 🇺🇸 نطاق الأمريكي المطلوب: 0.20$ فأعلى
-    # لا يوجد قيد ساعات: قبل السوق + أثناء السوق + بعد الإغلاق + 24/7.
     if market == "US" and price < MIN_US_PRICE:
         return None
 
@@ -677,6 +848,16 @@ def analyze_symbol(symbol, market):
 
     raw_trend = calculate_trend(candles)
     trend = persistent_trend(market, symbol, raw_trend)
+
+    # ARS ladder + divergence + trendline are internal confirmation only.
+    key = f"{market}:{symbol}"
+    with state_lock:
+        previous_ars = TREND_STATE.get(key + ":ARS")
+        TREND_STATE[key + ":ARS"] = ars
+
+    ars_bias, ars_level = ars_ladder_bias(ars, previous_ars)
+    divergence = detect_divergence(candles, rsi_value)
+    trendline = trendline_bias(candles)
 
     score = 50
 
@@ -710,6 +891,26 @@ def analyze_symbol(symbol, market):
     if volume_ratio >= 1.5:
         score += 5
 
+    # ARS ladder influence — no fixed ARS>=70 gate.
+    if trend == "UP" and ars >= 50:
+        score += 4
+    elif trend == "DOWN" and ars <= 50:
+        score -= 4
+
+    # Divergence confirmation/weakening.
+    if divergence["regular_bull"] or divergence["hidden_bull"]:
+        score += 5
+    if divergence["regular_bear"] or divergence["hidden_bear"]:
+        score -= 5
+
+    score += trendline * 2
+
+    # ARS rejection from ladder can reinforce the current direction.
+    if trend == "UP" and ars_bias > 0:
+        score += 2
+    elif trend == "DOWN" and ars_bias < 0:
+        score -= 2
+
     score = max(0, min(100, score))
 
     if (
@@ -732,17 +933,15 @@ def analyze_symbol(symbol, market):
         signal = "WAIT"
         signal_text = "⚪ انتظار"
 
-    targets = []
+    smart = detect_smart_movements(
+        candles, trend, volume_ratio, buy_power, sell_power, atr_value, rsi_value
+    )
 
+    targets = []
     if signal != "WAIT":
         direction = "UP" if signal == "BUY" else "DOWN"
-        targets = calculate_targets(
-            price,
-            atr_value,
-            direction,
-        )
+        targets = calculate_targets(price, atr_value, direction)
 
-    # الأخبار فقط عند وجود إشارة قوية
     if market == "US" and signal != "WAIT":
         news = news_sentiment(symbol)
     else:
@@ -764,6 +963,7 @@ def analyze_symbol(symbol, market):
         "support": support,
         "resistance": resistance,
         "ars": ars,
+        "ars_level": ars_level,
         "buy_power": buy_power,
         "sell_power": sell_power,
         "volume_ratio": volume_ratio,
@@ -773,6 +973,9 @@ def analyze_symbol(symbol, market):
         "signal_text": signal_text,
         "news": news,
         "targets": targets,
+        "divergence": divergence,
+        "trendline_bias": trendline,
+        "smart": smart,
     }
 
 
@@ -899,6 +1102,19 @@ def telegram_send_animation(token, gif_path, caption):
         return False
 
 
+def telegram_send_smart_animation(token, result):
+    """Send one small animated arrow only when a smart movement is detected."""
+    smart = result.get("smart", {})
+    maker = smart.get("maker", 0)
+    if not maker:
+        return False
+
+    direction = "up" if maker > 0 else "down"
+    path = UP_GIF if direction == "up" else DOWN_GIF
+    caption = "🐋 ↑ حركة صنّاع السهم" if maker > 0 else "🐋 ↓ حركة صنّاع السهم"
+    return telegram_send_animation(token, path, caption)
+
+
 def telegram_send_direction(token, result):
     """Send a looping direction animation once when a new trend signal starts."""
     if result["trend"] == "UP":
@@ -993,6 +1209,23 @@ def build_message(result):
     else:
         signal_badge = "⚪ <b>انتظار</b>"
 
+    smart = result.get("smart", {})
+    movement_lines = []
+
+    if smart.get("maker", 0) > 0:
+        movement_lines.append("🐋 <b>↑ حركة صنّاع السهم</b>")
+    elif smart.get("maker", 0) < 0:
+        movement_lines.append("🐋 <b>↓ حركة صنّاع السهم</b>")
+
+    if smart.get("speculators"):
+        movement_lines.append("⚡ <b>حركة مضاربين قوية</b>")
+
+    if smart.get("accumulation"):
+        movement_lines.append("💰 <b>عمليات التجميع ✅</b>")
+
+    if smart.get("unusual"):
+        movement_lines.append("🔎 <b>رصد حركة غير اعتيادية</b>")
+
     lines = [
         "💀🚀 <b>AI PRO MAX SIGNAL</b>",
         "",
@@ -1006,6 +1239,13 @@ def build_message(result):
     lines.extend([
         "",
         f"{signal_badge}    🎯 قوة الإشارة: <b>{result['score']}/100</b>",
+    ])
+
+    # هذه هي العناصر المطلوبة فقط لإشعارات الحركة.
+    if movement_lines:
+        lines.extend(["", *movement_lines])
+
+    lines.extend([
         "",
         f"💰 <b>السعر:</b> {fmt(result['price'])}" + (f"  ({change_pct:+.2f}%)" if change_pct is not None else ""),
         f"📊 <b>VWAP:</b> {fmt(result['vwap'])}  {vwap_text}",
@@ -1022,34 +1262,20 @@ def build_message(result):
         f"🛡️ <b>الدعم:</b> {fmt(result['support'])}",
         f"🚧 <b>المقاومة:</b> {fmt(result['resistance'])}",
         f"{trend_icon} <b>اتجاه السوق:</b> {trend_text}",
-        f"🧭 <b>ARS:</b> {result['ars']}/100",
     ])
 
     if market == "US":
         lines.append(f"📰 <b>أخبار السهم:</b> {result['news']}")
-        lines.append("🕒 <b>الوضع:</b> قبل السوق / أثناء السوق / بعد الإغلاق — الفحص مستمر 24/7")
-    elif market == "TASI":
-        lines.append("🕒 <b>الوضع:</b> المزاد / التداول / ما بعد الإغلاق — الفحص مستمر 24/7")
-    else:
-        lines.append("🕒 <b>الوضع:</b> سوق يعمل 24/7")
 
     if result["targets"]:
-        lines.extend([
-            "",
-            "🎯 <b>أهداف ATR — 8 أهداف</b>",
-        ])
+        lines.extend(["", "🎯 <b>أهداف ATR — 8 أهداف</b>"])
 
         for i, target in enumerate(result["targets"], 1):
-            if result["price"]:
-                change = (target - result["price"]) / result["price"] * 100
-            else:
-                change = 0
-
+            change = (target - result["price"]) / result["price"] * 100 if result["price"] else 0
             lines.append(f"TP{i}: <b>{fmt(target)}</b> ({change:+.2f}%)")
 
     lines.extend([
         "",
-        "🤖 <b>الفحص تلقائي بالكامل</b>",
         "🔄 الاتجاه يستمر حتى ظهور انعكاس مؤكد",
         f"⏱️ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
     ])
@@ -1233,6 +1459,9 @@ def scan_market(symbols, market, token):
                         # اتجاه متحرك: الأخضر يستمر مع الاتجاه الصاعد،
                         # والأحمر يستمر مع الاتجاه الهابط حتى تتغير الحالة.
                         telegram_send_direction(token, result)
+
+                        # سهم صغير متحرك لحركة صنّاع السهم عند وجود Proxy قوي.
+                        telegram_send_smart_animation(token, result)
 
                         message = build_message(result)
 
