@@ -6,6 +6,7 @@
 import os
 import time
 import threading
+import queue
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock, local
@@ -48,7 +49,7 @@ REQUEST_GAP = 0.25
 MAX_RETRIES = 3
 
 # بعد انتهاء دفعة الفحص، يبدأ التالي
-SCAN_INTERVAL = 120
+SCAN_INTERVAL = 0
 
 # تحديث قوائم الرموز كل 6 ساعات بدل طلبها كل دورتين
 SYMBOL_REFRESH_SECONDS = 21600
@@ -114,6 +115,41 @@ SYMBOL_CACHE = {
     "US": {"symbols": [], "updated": 0},
     "CRYPTO": {"symbols": [], "updated": 0},
 }
+
+# ============================================================
+# INSTANT TELEGRAM QUEUE
+# ============================================================
+# إرسال الإشارة يتم في مسار مستقل حتى لا يتوقف فحص السوق بانتظار Telegram.
+TELEGRAM_QUEUE = queue.Queue(maxsize=5000)
+
+def telegram_worker():
+    while True:
+        item = TELEGRAM_QUEUE.get()
+        if item is None:
+            TELEGRAM_QUEUE.task_done()
+            break
+        token, result = item
+        try:
+            telegram_send_direction(token, result)
+            telegram_send_smart_animation(token, result)
+            message = build_message(result)
+            if telegram_send(token, message):
+                print(
+                    f"[{result['market']}] 📲 {result['symbol']} "
+                    f"{result['signal']} {result['score']}/100 — أُرسلت فوراً"
+                )
+        except Exception as error:
+            print(f"[TELEGRAM] إرسال خطأ: {error}")
+        finally:
+            TELEGRAM_QUEUE.task_done()
+
+def enqueue_signal(token, result):
+    try:
+        TELEGRAM_QUEUE.put_nowait((token, result))
+        return True
+    except queue.Full:
+        print("[TELEGRAM] ⚠️ قائمة الإرسال ممتلئة — تم تجاوز الإشارة")
+        return False
 
 # ============================================================
 # HTTP SESSION
@@ -1456,24 +1492,10 @@ def scan_market(symbols, market, token):
                         continue
 
                     if should_send(result):
-                        # اتجاه متحرك: الأخضر يستمر مع الاتجاه الصاعد،
-                        # والأحمر يستمر مع الاتجاه الهابط حتى تتغير الحالة.
-                        telegram_send_direction(token, result)
-
-                        # سهم صغير متحرك لحركة صنّاع السهم عند وجود Proxy قوي.
-                        telegram_send_smart_animation(token, result)
-
-                        message = build_message(result)
-
-                        if telegram_send(token, message):
+                        # لا ننتظر Telegram هنا. توضع الإشارة في طابور مستقل
+                        # وتُرسل فور اكتشافها، بينما يستمر فحص بقية الرموز.
+                        if enqueue_signal(token, result):
                             signals += 1
-
-                            print(
-                                f"[{market}] 📲 "
-                                f"{result['symbol']} "
-                                f"{result['signal']} "
-                                f"{result['score']}/100"
-                            )
 
                 except Exception as error:
                     print(
@@ -1542,9 +1564,9 @@ def heartbeat():
 
 def main():
     print("=" * 68)
-    print("💀🚀 AI PRO MAX — STABLE EDITION")
+    print("💀🚀 AI PRO MAX — INSTANT SIGNAL EDITION")
     print("🇸🇦 TASI 375 — 24/7")
-    print("🇺🇸 US MARKET — FULL US | $0.20+ | 24/7 | PRE + REGULAR + POST")
+    print("🇺🇸 US MARKET — 13,402 SYMBOLS | $0.20+ | 24/7 | PRE + REGULAR + POST")
     print("🪙 CRYPTO MARKET — FULL | 24/7")
     print("=" * 68)
 
@@ -1565,6 +1587,13 @@ def main():
     print("🇸🇦 TASI TOKEN:", "OK" if TASI_TOKEN else "MISSING")
     print("🇺🇸 US TOKEN:", "OK" if US_TOKEN else "MISSING")
     print("🪙 CRYPTO TOKEN:", "OK" if CRYPTO_TOKEN else "MISSING")
+
+    threading.Thread(
+        target=telegram_worker,
+        daemon=True,
+        name="TelegramInstantSender",
+    ).start()
+    print("⚡ Telegram Instant Sender: ON")
 
     threading.Thread(
         target=heartbeat,
