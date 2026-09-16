@@ -16,15 +16,15 @@ import requests
 from PIL import Image, ImageDraw
 
 # ============================================================
-# VARIABLES — Railway
+# 🔐 SECRET CONFIG — القيم السرية داخل الكود
 # ============================================================
 
-TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "").strip()
-CHAT_ID = os.getenv("CHAT_ID", "").strip()
+CHAT_ID = "1179354586"
 
-TASI_TOKEN = os.getenv("TASI_TOKEN", "").strip()
-US_TOKEN = os.getenv("US_TOKEN", "").strip()
-CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN", "").strip()
+CRYPTO_TOKEN = "8727420383:AAGOpWWGmIeGriFkIf_R22E-97Qjlf5U6Bo"
+TASI_TOKEN = "7772382813:AAGIEbAFWcfDaJKaOCeDhZ5Cpcx7IryP3JA"
+TWELVEDATA_API_KEY = "2c1b2da4c6c44fc0ab68089f34757cea"
+US_TOKEN = "8652994768:AAFPhoXpKPjUnSykXrzQ-UKwO335p7VAcYc"
 
 # ============================================================
 # TELEGRAM DIRECTION ANIMATION
@@ -1859,7 +1859,7 @@ def main():
         print("❌ CHAT_ID غير موجود")
         return
 
-    print("🟢 TWELVEDATA_API_KEY: OK")
+    print("🟢 Twelve Data API: OK | Railway: TWELVEDATA_API_KEY / API")
     print("🟢 CHAT_ID: OK")
 
     if ensure_direction_gifs():
