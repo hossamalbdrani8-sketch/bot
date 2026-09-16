@@ -22,7 +22,7 @@ from PIL import Image, ImageDraw
 CHAT_ID = "1179354586"
 
 CRYPTO_TOKEN = "8727420383:AAEKSc7B_ZIb8EGRokpPdOlXE0KEgpmFdU4"
-TASI_TOKEN = "7772382813:AAECvG18eOKpWWM8fdL3xU8tbSib_AaQUbw"
+TASI_TOKEN =   "7772382813:AAECvG18eOKpWWM8fdL3xU8tbSib_AaQUbw"
 TWELVEDATA_API_KEY = "53f6bc98e70a4ff3b18e008c11cd56ba"
 US_TOKEN = "8652994768:AAFvl6rL-Ar_S4OT78iNZfHjhuzpnypo-KM"
 
@@ -63,6 +63,10 @@ OUTPUTSIZE = 220
 # جميع الأسهم من 0.20$ فأعلى تبقى ضمن الفحص.
 MIN_US_PRICE = 0.20
 US_MAX_SYMBOLS = 13402
+
+# 🔎 FAST FILTER — يقلل الفحص العميق قبل تشغيل الأطر الستة
+FAST_FILTER_LIMIT = {"TASI": 120, "US": 400, "CRYPTO": 300}
+FAST_FILTER_MIN_MOVE = {"TASI": 0.25, "US": 0.50, "CRYPTO": 0.35}
 
 EMA_FAST = 8
 EMA_MID = 21
@@ -1758,6 +1762,100 @@ def get_symbols(market, loader):
 
 
 # ============================================================
+# 🔎 FAST FILTER
+# ============================================================
+
+def fast_filter_symbol(symbol, market):
+    """
+    مرحلة أولى خفيفة: تستخدم 15min فقط لاختيار الرموز الأكثر نشاطًا.
+    لا تصدر أي إشارة Telegram هنا؛ الفحص العميق هو الذي يقرر الإشارة.
+    """
+    series = get_series(symbol, market, interval="15min")
+    if not series:
+        return None
+
+    candles = series.get("candles") or []
+    if len(candles) < 30:
+        return None
+
+    closes = [c["close"] for c in candles]
+    volumes = [c.get("volume", 0.0) or 0.0 for c in candles]
+    price = closes[-1]
+    prev = closes[-2] if len(closes) > 1 else price
+    if price <= 0 or prev <= 0:
+        return None
+
+    move = abs(price - prev) / prev * 100.0
+    lookback = min(20, len(closes) - 1)
+    base = closes[-1 - lookback]
+    move_window = abs(price - base) / base * 100.0 if base > 0 else 0.0
+
+    last_vol = volumes[-1]
+    avg_vol = sum(volumes[-21:-1]) / max(1, len(volumes[-21:-1])) if len(volumes) >= 21 else 0.0
+    volume_ratio = (last_vol / avg_vol) if avg_vol > 0 else 1.0
+
+    ema8 = ema(closes, 8)
+    ema21 = ema(closes, 21)
+    trend_bonus = 0.0
+    if ema8 is not None and ema21 is not None:
+        if ema8 > ema21:
+            trend_bonus = 1.0
+        elif ema8 < ema21:
+            trend_bonus = 1.0
+
+    threshold = FAST_FILTER_MIN_MOVE.get(market, 0.5)
+    active = (
+        move >= threshold
+        or move_window >= threshold * 1.5
+        or volume_ratio >= 1.5
+    )
+
+    if not active:
+        return None
+
+    score = move * 2.0 + move_window + max(0.0, volume_ratio - 1.0) * 5.0 + trend_bonus
+    return {
+        "symbol": symbol,
+        "score": score,
+        "move": move,
+        "move_window": move_window,
+        "volume_ratio": volume_ratio,
+    }
+
+
+def build_fast_candidates(symbols, market):
+    """Run the light first pass and return only the strongest candidates."""
+    total = len(symbols)
+    limit = FAST_FILTER_LIMIT.get(market, 300)
+    candidates = []
+    completed = 0
+    batch_size = MAX_WORKERS * 10
+
+    print(f"[{market}] 🔎 FAST FILTER بدء | {total} رمز | limit={limit}")
+
+    for start in range(0, total, batch_size):
+        batch = symbols[start:start + batch_size]
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            jobs = {executor.submit(fast_filter_symbol, symbol, market): symbol for symbol in batch}
+            for job in as_completed(jobs):
+                completed += 1
+                try:
+                    item = job.result()
+                    if item:
+                        candidates.append(item)
+                except Exception as error:
+                    print(f"[{market}] FAST FILTER error: {error}")
+
+        if completed % 100 == 0 or completed == total:
+            print(f"[{market}] FAST FILTER progress {completed}/{total} | candidates={len(candidates)}")
+
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+    selected = [x["symbol"] for x in candidates[:limit]]
+    print(f"[{market}] 🎯 FAST FILTER انتهى | {total} → {len(selected)} مرشح للفحص العميق")
+    return selected
+
+
+# ============================================================
 # MARKET SCANNER
 # ============================================================
 
@@ -1769,7 +1867,7 @@ def scan_market(symbols, market, token):
     total = len(symbols)
 
     print(
-        f"[{market}] بدء الفحص: {total} رمز | "
+        f"[{market}] 🧠 بدء الفحص العميق: {total} مرشح | "
         f"Workers={MAX_WORKERS}"
     )
 
@@ -1843,8 +1941,9 @@ def market_loop(market, token, loader):
                 f"{len(symbols)} رمز"
             )
 
+            candidates = build_fast_candidates(symbols, market)
             scan_market(
-                symbols,
+                candidates,
                 market,
                 token,
             )
