@@ -56,6 +56,7 @@ SCAN_INTERVAL = 120  # إعادة الدورة بعد 120 ثانية
 SYMBOL_REFRESH_SECONDS = 21600
 
 PRIMARY_TIMEFRAME = "15min"
+SIGNAL_TIMEFRAMES = ("3min", "5min", "15min", "30min", "1h", "4h")
 OUTPUTSIZE = 220
 
 # 🇺🇸 لا ترسل/تعتمد إشارات للأسهم الأمريكية الأقل من 0.20$
@@ -1118,51 +1119,72 @@ def _pine_indicator_parity(candles):
 # ANALYSIS
 # ============================================================
 
-def analyze_symbol(symbol, market):
-    series = get_series(symbol, market)
-
+def _analyze_symbol_interval(symbol, market, interval):
+    """Analyze one symbol on one of the approved signal timeframes."""
+    series = get_series(symbol, market, interval=interval)
     if not series:
         return None
 
     candles = series["candles"]
     company_name = series.get("name") or ""
-
     closes = [c["close"] for c in candles]
     highs = [c["high"] for c in candles]
     lows = [c["low"] for c in candles]
     volumes = [c["volume"] for c in candles]
 
+    if not closes:
+        return None
     price = closes[-1]
-
     if market == "US" and price < MIN_US_PRICE:
         return None
 
     previous_close = closes[-2] if len(closes) >= 2 else None
-
     e8 = ema(closes, EMA_FAST)
     e21 = ema(closes, EMA_MID)
     e50 = ema(closes, EMA_SLOW)
     e200 = ema(closes, EMA_LONG)
-
     rsi_value = rsi(closes, RSI_LENGTH)
     atr_value = atr(highs, lows, closes, ATR_LENGTH)
     vwap_value = vwap(highs, lows, closes, volumes)
-
     support, resistance = support_resistance(candles)
     ars = calculate_ars(candles)
     buy_power, sell_power = calculate_power(candles)
     volume_ratio = volume_strength(candles)
-
     raw_trend = calculate_trend(candles)
-    trend = persistent_trend(market, symbol, raw_trend)
 
+    pine = _pine_indicator_parity(candles)
+
+    if pine["final_buy"]:
+        signal, signal_text = "BUY", "🟢 شراء قوي — SMART BUY"
+    elif pine["final_sell"]:
+        signal, signal_text = "SELL", "🔴 بيع قوي — SMART SELL"
+    elif pine["golden_first"]:
+        signal, signal_text = "BUY", "🟡 شراء — GOLDEN CANDLE"
+    elif pine["vwap_buy"]:
+        signal, signal_text = "BUY", "🟢 شراء — VWAP"
+    elif pine["vwap_sell"]:
+        signal, signal_text = "SELL", "🔴 بيع — VWAP"
+    elif pine["strong_buy"]:
+        signal, signal_text = "BUY", "🟢 شراء قوي — EMA"
+    elif pine["strong_sell"]:
+        signal, signal_text = "SELL", "🔴 بيع قوي — EMA"
+    else:
+        signal, signal_text = "WAIT", "⚪ انتظار"
+
+    score = (
+        (30 if (pine["ema200"] is not None and (price > pine["ema200"] or price < pine["ema200"])) else 0)
+        + (30 if (pine["rsi"] is not None and (pine["rsi"] > 50 or pine["rsi"] < 50)) else 0)
+        + (40 if (pine["volume_sma20"] is not None and volumes[-1] > pine["volume_sma20"]) else 0)
+    )
+
+    # Keep trend state per symbol, but do not overwrite it six times in one pass.
+    trend = raw_trend
     key = f"{market}:{symbol}"
     with state_lock:
         previous_ars = TREND_STATE.get(key + ":ARS")
         TREND_STATE[key + ":ARS"] = ars
-
+    trend = persistent_trend(market, symbol, trend)
     ars_bias, ars_level = ars_ladder_bias(ars, previous_ars)
-    pine = _pine_indicator_parity(candles)
     divergence = {
         "regular_bull": False,
         "regular_bear": False,
@@ -1170,40 +1192,6 @@ def analyze_symbol(symbol, market):
         "hidden_bear": pine["hidden_bear"],
     }
     trendline = trendline_bias(candles)
-
-    # The supplied Pine script is now the source of truth for BUY/SELL.
-    if pine["final_buy"]:
-        signal = "BUY"
-        signal_text = "🟢 شراء قوي — SMART BUY"
-    elif pine["final_sell"]:
-        signal = "SELL"
-        signal_text = "🔴 بيع قوي — SMART SELL"
-    elif pine["golden_first"]:
-        signal = "BUY"
-        signal_text = "🟡 شراء — GOLDEN CANDLE"
-    elif pine["vwap_buy"]:
-        signal = "BUY"
-        signal_text = "🟢 شراء — VWAP"
-    elif pine["vwap_sell"]:
-        signal = "SELL"
-        signal_text = "🔴 بيع — VWAP"
-    elif pine["strong_buy"]:
-        signal = "BUY"
-        signal_text = "🟢 شراء قوي — EMA"
-    elif pine["strong_sell"]:
-        signal = "SELL"
-        signal_text = "🔴 بيع قوي — EMA"
-    else:
-        signal = "WAIT"
-        signal_text = "⚪ انتظار"
-
-    # Pine master-table strength: EMA filter 30 + RSI filter 30 + volume filter 40.
-    score = (
-        (30 if (pine["ema200"] is not None and (closes[-1] > pine["ema200"] or closes[-1] < pine["ema200"])) else 0)
-        + (30 if (pine["rsi"] is not None and (pine["rsi"] > 50 or pine["rsi"] < 50)) else 0)
-        + (40 if (pine["volume_sma20"] is not None and volumes[-1] > pine["volume_sma20"]) else 0)
-    )
-
     smart = detect_smart_movements(
         candles, trend, volume_ratio, buy_power, sell_power, atr_value, rsi_value
     )
@@ -1213,57 +1201,38 @@ def analyze_symbol(symbol, market):
         direction = "UP" if signal == "BUY" else "DOWN"
         targets = calculate_targets(price, atr_value, direction)
 
-    if market == "US" and signal != "WAIT":
-        news = news_sentiment(symbol)
-        split_info = get_stock_split(symbol)
-    else:
-        news = "⚪ غير متاح"
-        split_info = None
-
     return {
-        "symbol": symbol,
-        "name": company_name,
-        "market": market,
-        "price": price,
-        "previous_close": previous_close,
-        "ema8": e8,
-        "ema21": e21,
-        "ema50": e50,
-        "ema200": e200,
-        "rsi": rsi_value,
-        "atr": atr_value,
-        "vwap": vwap_value,
-        "support": support,
-        "resistance": resistance,
-        "ars": ars,
-        "ars_level": ars_level,
-        "buy_power": buy_power,
-        "sell_power": sell_power,
-        "volume_ratio": volume_ratio,
-        "trend": trend,
-        "score": score,
-        "signal": signal,
-        "signal_text": signal_text,
-        "news": news,
-        "split_info": split_info,
-        "targets": targets,
-        "divergence": divergence,
-        "trendline_bias": trendline,
-        "smart": smart,
-        "pine": pine,
-        "indicator_triggers": [
-            label for label, active in (
-                ("SMART BUY", pine["final_buy"]),
-                ("SMART SELL", pine["final_sell"]),
-                ("GOLDEN CANDLE", pine["golden_first"]),
-                ("GOLDEN CONTINUATION", pine["golden_continue"]),
-                ("VWAP BUY", pine["vwap_buy"]),
-                ("VWAP SELL", pine["vwap_sell"]),
-                ("STRONG BUY", pine["strong_buy"]),
-                ("STRONG SELL", pine["strong_sell"]),
-            ) if active
-        ],
+        "symbol": symbol, "name": company_name, "market": market,
+        "price": price, "previous_close": previous_close,
+        "ema8": e8, "ema21": e21, "ema50": e50, "ema200": e200,
+        "rsi": rsi_value, "atr": atr_value, "vwap": vwap_value,
+        "support": support, "resistance": resistance, "ars": ars,
+        "ars_level": ars_level, "buy_power": buy_power, "sell_power": sell_power,
+        "volume_ratio": volume_ratio, "trend": trend, "score": score,
+        "signal": signal, "signal_text": signal_text, "news": "⚪ غير متاح",
+        "split_info": None, "targets": targets, "divergence": divergence,
+        "trendline_bias": trendline, "smart": smart, "pine": pine,
+        "timeframe": interval,
+        "indicator_triggers": [label for label, active in (
+            ("SMART BUY", pine["final_buy"]), ("SMART SELL", pine["final_sell"]),
+            ("GOLDEN CANDLE", pine["golden_first"]),
+            ("GOLDEN CONTINUATION", pine["golden_continue"]),
+            ("VWAP BUY", pine["vwap_buy"]), ("VWAP SELL", pine["vwap_sell"]),
+            ("STRONG BUY", pine["strong_buy"]), ("STRONG SELL", pine["strong_sell"]),
+        ) if active],
     }
+
+
+def analyze_symbol(symbol, market):
+    """Check ONLY the six requested timeframes and return the first active signal."""
+    for interval in SIGNAL_TIMEFRAMES:
+        result = _analyze_symbol_interval(symbol, market, interval)
+        if result and result["signal"] != "WAIT":
+            if market == "US":
+                result["news"] = news_sentiment(symbol)
+                result["split_info"] = get_stock_split(symbol)
+            return result
+    return None
 
 
 # ============================================================
@@ -1913,7 +1882,7 @@ def main():
     print("🇸🇦 TASI 375 — 24/7")
     print("🇺🇸 US MARKET — 13,402 SYMBOLS | $0.20+ | 24/7 | PRE + REGULAR + POST")
     print("🪙 CRYPTO MARKET — FULL | 24/7")
-    print("⏱️ فاصل إعادة الفحص: 120 ثانية")
+    print("⏱️ إعادة الفحص: كل 120 ثانية | الأطر: 3m → 5m → 15m → 30m → 1h → 4h")
     print("=" * 68)
 
     if not TWELVEDATA_API_KEY:
