@@ -50,7 +50,7 @@ REQUEST_GAP = 0.25
 MAX_RETRIES = 3
 
 # بعد انتهاء دفعة الفحص، يبدأ التالي
-SCAN_INTERVAL = 0
+SCAN_INTERVAL = 120  # إعادة الدورة بعد 120 ثانية
 
 # تحديث قوائم الرموز كل 6 ساعات بدل طلبها كل دورتين
 SYMBOL_REFRESH_SECONDS = 21600
@@ -116,6 +116,11 @@ SYMBOL_CACHE = {
     "US": {"symbols": [], "updated": 0},
     "CRYPTO": {"symbols": [], "updated": 0},
 }
+
+# 🇺🇸 Stock split cache — لا نطلب التقسيم لكل الأسهم في كل دورة
+SPLIT_CACHE_TTL = 86400
+split_cache_lock = Lock()
+SPLIT_CACHE = {}
 
 # ============================================================
 # INSTANT TELEGRAM QUEUE
@@ -1210,8 +1215,10 @@ def analyze_symbol(symbol, market):
 
     if market == "US" and signal != "WAIT":
         news = news_sentiment(symbol)
+        split_info = get_stock_split(symbol)
     else:
         news = "⚪ غير متاح"
+        split_info = None
 
     return {
         "symbol": symbol,
@@ -1238,6 +1245,7 @@ def analyze_symbol(symbol, market):
         "signal": signal,
         "signal_text": signal_text,
         "news": news,
+        "split_info": split_info,
         "targets": targets,
         "divergence": divergence,
         "trendline_bias": trendline,
@@ -1256,6 +1264,52 @@ def analyze_symbol(symbol, market):
             ) if active
         ],
     }
+
+
+# ============================================================
+# 🇺🇸 STOCK SPLITS
+# ============================================================
+
+def get_stock_split(symbol):
+    """Get latest known split/reverse-split for a US symbol.
+    Cached for 24h so the scanner does not request /splits every 2 minutes.
+    Twelve Data may require a Grow/Venture plan for this endpoint.
+    """
+    if not symbol:
+        return None
+
+    now = time.time()
+    with split_cache_lock:
+        cached = SPLIT_CACHE.get(symbol)
+        if cached and now - cached.get("updated", 0) < SPLIT_CACHE_TTL:
+            return cached.get("data")
+
+    data = td_request("/splits", {"symbol": symbol})
+    split_data = None
+
+    if isinstance(data, dict):
+        events = data.get("splits") or []
+        if events:
+            # Latest event first when available; otherwise sort by date.
+            events = sorted(
+                [e for e in events if isinstance(e, dict)],
+                key=lambda e: str(e.get("date", "")),
+                reverse=True,
+            )
+            if events:
+                e = events[0]
+                split_data = {
+                    "date": e.get("date"),
+                    "description": e.get("description"),
+                    "ratio": e.get("ratio"),
+                    "from_factor": e.get("from_factor"),
+                    "to_factor": e.get("to_factor"),
+                }
+
+    with split_cache_lock:
+        SPLIT_CACHE[symbol] = {"updated": now, "data": split_data}
+
+    return split_data
 
 
 # ============================================================
@@ -1584,6 +1638,16 @@ def build_message(result):
     if market == "US":
         lines.append(f"📰 <b>أخبار السهم:</b> {result['news']}")
 
+        split_info = result.get("split_info")
+        if split_info:
+            lines.extend([
+                "",
+                "✂️ <b>تقسيم السهم</b>",
+                f"📅 التاريخ: <b>{escape_html(split_info.get('date') or '-')}</b>",
+                f"🔢 النسبة: <b>{escape_html(split_info.get('description') or '-')}</b>",
+                f"📊 العدد: <b>{fmt(split_info.get('from_factor'))} → {fmt(split_info.get('to_factor'))}</b>",
+            ])
+
     if result["targets"]:
         lines.extend(["", "🎯 <b>أهداف ATR — 8 أهداف</b>"])
 
@@ -1849,6 +1913,7 @@ def main():
     print("🇸🇦 TASI 375 — 24/7")
     print("🇺🇸 US MARKET — 13,402 SYMBOLS | $0.20+ | 24/7 | PRE + REGULAR + POST")
     print("🪙 CRYPTO MARKET — FULL | 24/7")
+    print("⏱️ فاصل إعادة الفحص: 120 ثانية")
     print("=" * 68)
 
     if not TWELVEDATA_API_KEY:
