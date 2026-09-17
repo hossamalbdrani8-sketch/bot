@@ -1766,58 +1766,139 @@ def get_symbols(market, loader):
 
 def fast_filter_symbol(symbol, market):
     """
-    مرحلة أولى خفيفة: تستخدم 15min فقط لاختيار الرموز الأكثر نشاطًا.
-    لا تصدر أي إشارة Telegram هنا؛ الفحص العميق هو الذي يقرر الإشارة.
+    مرحلة ترشيح مبكر محسّنة على 15min.
+    لا تشترط حركة سعرية كبيرة حتى لا تضيع الإشارات التي تتكوّن بهدوء.
+    تجمع عدة دلائل فنية قريبة من منطق AI PRO MAX / Golden Candle،
+    ثم تترك القرار النهائي للفحص العميق على جميع الأطر الزمنية.
     """
     series = get_series(symbol, market, interval="15min")
     if not series:
         return None
 
     candles = series.get("candles") or []
-    if len(candles) < 30:
+    if len(candles) < 50:
         return None
 
-    closes = [c["close"] for c in candles]
-    volumes = [c.get("volume", 0.0) or 0.0 for c in candles]
+    closes = [float(c["close"]) for c in candles]
+    highs = [float(c["high"]) for c in candles]
+    lows = [float(c["low"]) for c in candles]
+    opens = [float(c["open"]) for c in candles]
+    volumes = [float(c.get("volume", 0.0) or 0.0) for c in candles]
+
     price = closes[-1]
-    prev = closes[-2] if len(closes) > 1 else price
+    prev = closes[-2]
     if price <= 0 or prev <= 0:
         return None
 
-    move = abs(price - prev) / prev * 100.0
-    lookback = min(20, len(closes) - 1)
-    base = closes[-1 - lookback]
-    move_window = abs(price - base) / base * 100.0 if base > 0 else 0.0
+    e7 = ema(closes, 7)
+    e14 = ema(closes, 14)
+    e25 = ema(closes, 25)
+    e50 = ema(closes, 50)
+    r = rsi(closes, 14)
+    a = atr(highs, lows, closes, 14)
+    vw = vwap(highs, lows, closes, volumes)
+
+    recent_high = max(highs[-21:-1]) if len(highs) >= 21 else max(highs[:-1])
+    recent_low = min(lows[-21:-1]) if len(lows) >= 21 else min(lows[:-1])
 
     last_vol = volumes[-1]
-    avg_vol = sum(volumes[-21:-1]) / max(1, len(volumes[-21:-1])) if len(volumes) >= 21 else 0.0
-    volume_ratio = (last_vol / avg_vol) if avg_vol > 0 else 1.0
+    prior_vols = volumes[-21:-1]
+    avg_vol = sum(prior_vols) / len(prior_vols) if prior_vols else 0.0
+    volume_ratio = last_vol / avg_vol if avg_vol > 0 else 1.0
 
-    ema8 = ema(closes, 8)
-    ema21 = ema(closes, 21)
-    trend_bonus = 0.0
-    if ema8 is not None and ema21 is not None:
-        if ema8 > ema21:
-            trend_bonus = 1.0
-        elif ema8 < ema21:
-            trend_bonus = 1.0
+    move_1 = abs(price - prev) / prev * 100.0
+    base = closes[-21] if len(closes) >= 21 else closes[0]
+    move_20 = abs(price - base) / base * 100.0 if base > 0 else 0.0
 
-    threshold = FAST_FILTER_MIN_MOVE.get(market, 0.5)
-    active = (
-        move >= threshold
-        or move_window >= threshold * 1.5
-        or volume_ratio >= 1.5
-    )
+    score = 0.0
+    reasons = 0
 
-    if not active:
-        return None
+    # اتجاه EMA المبكر
+    if e7 is not None and e14 is not None:
+        if e7 > e14:
+            score += 12.0
+            reasons += 1
+        elif e7 < e14:
+            score += 12.0
+            reasons += 1
 
-    score = move * 2.0 + move_window + max(0.0, volume_ratio - 1.0) * 5.0 + trend_bonus
+    if e25 is not None:
+        distance_25 = abs(price - e25) / price * 100.0
+        if distance_25 <= 1.5:
+            score += 12.0
+            reasons += 1
+        if price > e25:
+            score += 4.0
+        else:
+            score += 4.0
+
+    if e50 is not None:
+        if e25 is not None and ((e25 > e50) or (e25 < e50)):
+            score += 8.0
+
+    # RSI: نلتقط مناطق الاستعداد قبل الإشارة النهائية
+    if r is not None:
+        if 45.0 <= r <= 65.0:
+            score += 12.0
+            reasons += 1
+        elif r >= 65.0 or r <= 35.0:
+            score += 8.0
+            reasons += 1
+
+    # VWAP
+    if vw is not None and vw > 0:
+        vwap_distance = abs(price - vw) / price * 100.0
+        if vwap_distance <= 1.5:
+            score += 10.0
+            reasons += 1
+        if (price > vw) != (prev > vw):
+            score += 18.0
+            reasons += 1
+
+    # اختراق / اقتراب من قمة أو قاع حديث
+    if recent_high > 0:
+        if price >= recent_high * 0.995:
+            score += 15.0
+            reasons += 1
+    if recent_low > 0:
+        if price <= recent_low * 1.005:
+            score += 15.0
+            reasons += 1
+
+    # شمعة قوية قريبة من Golden Candle
+    candle_range = highs[-1] - lows[-1]
+    body = abs(closes[-1] - opens[-1])
+    body_ratio = body / candle_range if candle_range > 0 else 0.0
+    bullish = closes[-1] > opens[-1]
+    if body_ratio >= 0.45 and e7 is not None and e25 is not None:
+        if bullish and price > e7 and e7 > e25:
+            score += 25.0
+            reasons += 1
+
+    # نشاط غير اعتيادي
+    if volume_ratio >= 1.15:
+        score += min(20.0, (volume_ratio - 1.0) * 12.0)
+        reasons += 1
+
+    if a is not None and a > 0 and price > 0:
+        atr_pct = a / price * 100.0
+        if atr_pct >= 0.5:
+            score += 5.0
+
+    # الحركة الأخيرة تبقى عامل تعزيز فقط وليست شرطًا.
+    score += min(10.0, move_1 * 1.5)
+    score += min(10.0, move_20 * 0.5)
+
+    # مهم: لا نرفض الرمز فقط لأنه لم يتحرك كثيرًا.
+    # القرار النهائي سيكون داخل analyze_symbol على الأطر الستة.
+    if reasons == 0 and score < 8.0:
+        score = 8.0
+
     return {
         "symbol": symbol,
         "score": score,
-        "move": move,
-        "move_window": move_window,
+        "move": move_1,
+        "move_window": move_20,
         "volume_ratio": volume_ratio,
     }
 
@@ -1850,6 +1931,8 @@ def build_fast_candidates(symbols, market):
 
     candidates.sort(key=lambda x: x["score"], reverse=True)
     selected = [x["symbol"] for x in candidates[:limit]]
+    if not selected:
+        print(f"[{market}] ⚠️ لا توجد بيانات صالحة في هذه الدورة")
     print(f"[{market}] 🎯 FAST FILTER انتهى | {total} → {len(selected)} مرشح للفحص العميق")
     return selected
 
