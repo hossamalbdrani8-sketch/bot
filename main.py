@@ -63,10 +63,11 @@ OUTPUTSIZE = 220
 MIN_US_PRICE = 0.20
 US_MAX_SYMBOLS = 13402
 
-EMA_FAST = 8
-EMA_MID = 21
-EMA_SLOW = 50
-EMA_LONG = 200
+EMA_10 = 10
+EMA_14 = 14
+EMA_15 = 15
+EMA_25 = 25
+EMA_50 = 50
 
 RSI_LENGTH = 14
 ATR_LENGTH = 14
@@ -452,47 +453,27 @@ def support_resistance(candles):
 def calculate_trend(candles):
     closes = [c["close"] for c in candles]
 
-    e8 = ema(closes, EMA_FAST)
-    e21 = ema(closes, EMA_MID)
-    e50 = ema(closes, EMA_SLOW)
-    e200 = ema(closes, EMA_LONG)
+    e10 = ema(closes, EMA_10)
+    e14 = ema(closes, EMA_14)
+    e15 = ema(closes, EMA_15)
+    e25 = ema(closes, EMA_25)
+    e50 = ema(closes, EMA_50)
 
-    if None in (e8, e21, e50, e200):
+    if None in (e10, e14, e15, e25, e50):
         return "NEUTRAL"
 
-    current = closes[-1]
-
-    bullish = 0
-    bearish = 0
-
-    if e8 > e21:
-        bullish += 1
-    else:
-        bearish += 1
-
-    if e21 > e50:
-        bullish += 1
-    else:
-        bearish += 1
-
-    if e50 > e200:
-        bullish += 1
-    else:
-        bearish += 1
-
-    if current > e200:
-        bullish += 1
-    else:
-        bearish += 1
+    bullish = sum([
+        e10 > e14, e14 > e15, e15 > e25, e25 > e50, closes[-1] > e50
+    ])
+    bearish = sum([
+        e10 < e14, e14 < e15, e15 < e25, e25 < e50, closes[-1] < e50
+    ])
 
     if bullish >= 3:
         return "UP"
-
     if bearish >= 3:
         return "DOWN"
-
     return "NEUTRAL"
-
 
 def persistent_trend(market, symbol, current_trend):
     key = f"{market}:{symbol}"
@@ -524,19 +505,20 @@ def calculate_ars(candles):
     if len(closes) < 50:
         return 50
 
-    e8 = ema(closes, 8)
-    e21 = ema(closes, 21)
+    e10 = ema(closes, 10)
+    e14 = ema(closes, 14)
+    e25 = ema(closes, 25)
     e50 = ema(closes, 50)
     current = closes[-1]
 
     score = 50
 
-    if e8 > e21:
+    if e10 > e14:
         score += 15
     else:
         score -= 15
 
-    if e21 > e50:
+    if e14 > e25:
         score += 15
     else:
         score -= 15
@@ -667,100 +649,9 @@ def trendline_bias(candles):
 # SMART MOVEMENT / SMART-MONEY PROXY (INFERRED)
 # ============================================================
 
-def detect_smart_movements(candles, trend, volume_ratio, buy_power, sell_power,
-                           atr_value, rsi_value):
-    """
-    استدلال احتمالي لتحركات كبيرة/تجميع من السعر والحجم.
-    لا يعني رصد هوية صندوق بعينه؛ هو Proxy تقني.
-    """
-    recent = candles[-20:]
-    if len(recent) < 10:
-        return {"maker": 0, "speculators": False, "accumulation": False, "unusual": False}
-
-    closes = [c["close"] for c in recent]
-    opens = [c["open"] for c in recent]
-    ranges = [abs(c["high"] - c["low"]) for c in recent]
-    avg_range = sum(ranges[:-1]) / max(1, len(ranges) - 1)
-    current_range = ranges[-1]
-    price_move = (closes[-1] - closes[0]) / closes[0] * 100 if closes[0] else 0
-
-    unusual = (volume_ratio >= 2.0 and abs(price_move) >= 1.0) or (volume_ratio >= 3.0)
-
-    # تجميع احتمالي: حجم قوي مع ضغط شرائي واتجاه/سلوك سعر متماسك.
-    accumulation = (
-        volume_ratio >= 1.5
-        and buy_power >= 58
-        and (trend == "UP" or (rsi_value is not None and rsi_value < 60))
-    )
-
-    # حركة مضاربين: اندفاع سعري + توسع نطاق/حجم.
-    speculators = (
-        (volume_ratio >= 2.0 and abs(price_move) >= 2.0)
-        or (avg_range > 0 and current_range >= avg_range * 1.8)
-    )
-
-    # سهم صغير متحرك لصنّاع السهم: نستخدم Proxy قوي وليس ادعاء معرفة جهة محددة.
-    maker = 0
-    if unusual and buy_power >= 65:
-        maker = 1
-    elif unusual and sell_power >= 65:
-        maker = -1
-    elif accumulation:
-        maker = 1
-
-    return {
-        "maker": maker,
-        "speculators": speculators,
-        "accumulation": accumulation,
-        "unusual": unusual,
-    }
-
 # ============================================================
 # BUY / SELL POWER
 # ============================================================
-
-def calculate_power(candles):
-    recent = candles[-20:]
-
-    # أثناء ما قبل/بعد السوق قد لا تعيد TwelveData حجمًا للشموع الممتدة.
-    # في هذه الحالة نستخدم قوة الحركة السعرية بدل أن تصبح القوة 0/0.
-    volume_available = sum(c["volume"] for c in recent) > 0
-
-    buy_volume = 0.0
-    sell_volume = 0.0
-
-    if volume_available:
-        for candle in recent:
-            volume = candle["volume"]
-
-            if candle["close"] > candle["open"]:
-                buy_volume += volume
-            elif candle["close"] < candle["open"]:
-                sell_volume += volume
-            else:
-                buy_volume += volume * 0.5
-                sell_volume += volume * 0.5
-    else:
-        # fallback سعري للـ extended hours
-        for candle in recent:
-            if candle["close"] > candle["open"]:
-                buy_volume += 1.0
-            elif candle["close"] < candle["open"]:
-                sell_volume += 1.0
-            else:
-                buy_volume += 0.5
-                sell_volume += 0.5
-
-    total = buy_volume + sell_volume
-
-    if total <= 0:
-        return 50.0, 50.0
-
-    return (
-        buy_volume / total * 100,
-        sell_volume / total * 100,
-    )
-
 
 def volume_strength(candles):
     volumes = [c["volume"] for c in candles]
@@ -913,15 +804,13 @@ def _pine_indicator_parity(candles):
 
     # --------------------------------------------------------
     # RSI / EMA block from the supplied AI PRO MAX script
-    # EMA 7 / 14 / 25 / 50 / 180 / 320 / 380
+    # EMA 10 / 14 / 15 / 25 / 50
     # --------------------------------------------------------
-    ema7 = _pine_ema_series(closes, 7)
+    ema10 = _pine_ema_series(closes, 10)
     ema14 = _pine_ema_series(closes, 14)
+    ema15 = _pine_ema_series(closes, 15)
     ema25 = _pine_ema_series(closes, 25)
     ema50 = _pine_ema_series(closes, 50)
-    ema180 = _pine_ema_series(closes, 180)
-    ema320 = _pine_ema_series(closes, 320)
-    ema380 = _pine_ema_series(closes, 380)
 
     rsi_series = []
     for i in range(n):
@@ -937,51 +826,16 @@ def _pine_indicator_parity(candles):
     strong_sell = False
     if n:
         i = n - 1
-        bull_ema = all(x is not None for x in (ema7[i], ema14[i], ema25[i], ema50[i])) and ema7[i] > ema14[i] > ema25[i] > ema50[i]
-        bear_ema = all(x is not None for x in (ema7[i], ema14[i], ema25[i], ema50[i])) and ema7[i] < ema14[i] < ema25[i] < ema50[i]
+        bull_ema = all(x is not None for x in (ema10[i], ema14[i], ema15[i], ema25[i], ema50[i])) and ema10[i] > ema14[i] > ema15[i] > ema25[i] > ema50[i]
+        bear_ema = all(x is not None for x in (ema10[i], ema14[i], ema15[i], ema25[i], ema50[i])) and ema10[i] < ema14[i] < ema15[i] < ema25[i] < ema50[i]
         vol_filter = atr_series[i] is not None and atr_sma20[i] is not None and atr_series[i] > atr_sma20[i]
         strong_buy = _cross_over(closes, ema25, i) and bull_ema and vol_filter
         strong_sell = _cross_under(closes, ema25, i) and bear_ema and vol_filter
 
     # --------------------------------------------------------
-    # Doji waiting/breakout logic — exact stateful behavior
-    # --------------------------------------------------------
-    waiting = False
-    doji_high = None
-    doji_low = None
-    wait_bars = 0
     doji_buy = False
     doji_sell = False
-    for i in range(n):
-        body = abs(closes[i] - opens[i])
-        rng = highs[i] - lows[i]
-        is_doji = rng > 0 and body <= rng * 0.10
 
-        if is_doji and not waiting:
-            waiting = True
-            doji_high = highs[i]
-            doji_low = lows[i]
-            wait_bars = 0
-
-        if waiting:
-            wait_bars += 1
-            if wait_bars >= 10:
-                waiting = False
-                doji_high = None
-                doji_low = None
-                wait_bars = 0
-
-        buy_now = waiting and doji_high is not None and closes[i] > doji_high
-        sell_now = waiting and doji_low is not None and closes[i] < doji_low
-        if buy_now or sell_now:
-            doji_buy = buy_now
-            doji_sell = sell_now
-            waiting = False
-            doji_high = None
-            doji_low = None
-            wait_bars = 0
-
-    # --------------------------------------------------------
     # Hidden divergence: pivot length 5, price vs RSI
     # --------------------------------------------------------
     hidden_bull = False
@@ -1012,14 +866,14 @@ def _pine_indicator_parity(candles):
     rsi_sell_filter = rsi_series[i] is not None and rsi_series[i] < 50
     volume_filter = volume_sma20[i] is not None and volumes[i] > volume_sma20[i]
 
-    final_buy = (doji_buy or hidden_bull) and ema_buy_filter and rsi_buy_filter and volume_filter
-    final_sell = (doji_sell or hidden_bear) and ema_sell_filter and rsi_sell_filter and volume_filter
+    final_buy = hidden_bull and ema_buy_filter and rsi_buy_filter and volume_filter
+    final_sell = hidden_bear and ema_sell_filter and rsi_sell_filter and volume_filter
 
     # --------------------------------------------------------
     # Golden Candle PRO — exact conditions from the supplied file
     # EMA 7 / EMA 25 / RSI14 / body 45% / volume 1.10x / avg20
     # --------------------------------------------------------
-    g_ema_fast = ema7
+    g_ema_fast = ema10
     g_ema_slow = ema25
     g_rsi = rsi_series
     g_avg_volume = _pine_sma_series(volumes, 20)
@@ -1089,8 +943,6 @@ def _pine_indicator_parity(candles):
     return {
         "final_buy": final_buy,
         "final_sell": final_sell,
-        "doji_buy": doji_buy,
-        "doji_sell": doji_sell,
         "hidden_bull": hidden_bull,
         "hidden_bear": hidden_bear,
         "strong_buy": strong_buy,
@@ -1101,14 +953,10 @@ def _pine_indicator_parity(candles):
         "vwap_buy": vwap_buy,
         "vwap_sell": vwap_sell,
         "rsi": rsi_series[i],
-        "ema7": ema7[i],
+        "ema10": ema10[i],
         "ema14": ema14[i],
         "ema25": ema25[i],
         "ema50": ema50[i],
-        "ema180": ema180[i],
-        "ema320": ema320[i],
-        "ema380": ema380[i],
-        "ema200": ema200_series[i],
         "volume_sma20": volume_sma20[i],
         "vwap": vwap_series[i],
     }
@@ -1138,16 +986,16 @@ def _analyze_symbol_interval(symbol, market, interval):
         return None
 
     previous_close = closes[-2] if len(closes) >= 2 else None
-    e8 = ema(closes, EMA_FAST)
-    e21 = ema(closes, EMA_MID)
-    e50 = ema(closes, EMA_SLOW)
-    e200 = ema(closes, EMA_LONG)
+    e10 = ema(closes, EMA_10)
+    e14 = ema(closes, EMA_14)
+    e15 = ema(closes, EMA_15)
+    e25 = ema(closes, EMA_25)
+    e50 = ema(closes, EMA_50)
     rsi_value = rsi(closes, RSI_LENGTH)
     atr_value = atr(highs, lows, closes, ATR_LENGTH)
     vwap_value = vwap(highs, lows, closes, volumes)
     support, resistance = support_resistance(candles)
     ars = calculate_ars(candles)
-    buy_power, sell_power = calculate_power(candles)
     volume_ratio = volume_strength(candles)
     raw_trend = calculate_trend(candles)
 
@@ -1171,7 +1019,7 @@ def _analyze_symbol_interval(symbol, market, interval):
         signal, signal_text = "WAIT", "⚪ انتظار"
 
     score = (
-        (30 if (pine["ema200"] is not None and (price > pine["ema200"] or price < pine["ema200"])) else 0)
+        (30 if (pine["ema50"] is not None and (price > pine["ema50"] or price < pine["ema50"])) else 0)
         + (30 if (pine["rsi"] is not None and (pine["rsi"] > 50 or pine["rsi"] < 50)) else 0)
         + (40 if (pine["volume_sma20"] is not None and volumes[-1] > pine["volume_sma20"]) else 0)
     )
@@ -1191,10 +1039,6 @@ def _analyze_symbol_interval(symbol, market, interval):
         "hidden_bear": pine["hidden_bear"],
     }
     trendline = trendline_bias(candles)
-    smart = detect_smart_movements(
-        candles, trend, volume_ratio, buy_power, sell_power, atr_value, rsi_value
-    )
-
     targets = []
     if signal != "WAIT":
         direction = "UP" if signal == "BUY" else "DOWN"
@@ -1203,14 +1047,14 @@ def _analyze_symbol_interval(symbol, market, interval):
     return {
         "symbol": symbol, "name": company_name, "market": market,
         "price": price, "previous_close": previous_close,
-        "ema8": e8, "ema21": e21, "ema50": e50, "ema200": e200,
+        "ema10": e10, "ema14": e14, "ema15": e15, "ema25": e25, "ema50": e50,
         "rsi": rsi_value, "atr": atr_value, "vwap": vwap_value,
         "support": support, "resistance": resistance, "ars": ars,
-        "ars_level": ars_level, "buy_power": buy_power, "sell_power": sell_power,
+        "ars_level": ars_level,
         "volume_ratio": volume_ratio, "trend": trend, "score": score,
         "signal": signal, "signal_text": signal_text, "news": "⚪ غير متاح",
         "split_info": None, "targets": targets, "divergence": divergence,
-        "trendline_bias": trendline, "smart": smart, "pine": pine,
+        "trendline_bias": trendline, "pine": pine,
         "timeframe": interval,
         "indicator_triggers": [label for label, active in (
             ("SMART BUY", pine["final_buy"]), ("SMART SELL", pine["final_sell"]),
@@ -1433,129 +1277,6 @@ def telegram_send_animation(token, gif_path, caption, tradingview_url=None):
 
 def telegram_send_smart_animation(token, result):
     """Send one small animated arrow only when a smart movement is detected."""
-    smart = result.get("smart", {})
-    maker = smart.get("maker", 0)
-    if not maker:
-        return False
-
-    direction = "up" if maker > 0 else "down"
-    path = UP_GIF if direction == "up" else DOWN_GIF
-    caption = "🐋 ↑ حركة صنّاع السهم" if maker > 0 else "🐋 ↓ حركة صنّاع السهم"
-    return telegram_send_animation(token, path, caption, build_tradingview_url(result))
-
-
-def telegram_send_direction(token, result):
-    """Send a looping direction animation once when a new trend signal starts."""
-    if result["trend"] == "UP":
-        caption = "🟢 <b>اتجاه صاعد مستمر</b>\n⬆️ يستمر حتى ينتهي/ينعكس الاتجاه"
-        return telegram_send_animation(token, UP_GIF, caption, build_tradingview_url(result))
-
-    if result["trend"] == "DOWN":
-        caption = "🔴 <b>اتجاه هابط مستمر</b>\n⬇️ يستمر حتى ينتهي/ينعكس الاتجاه"
-        return telegram_send_animation(token, DOWN_GIF, caption, build_tradingview_url(result))
-
-    return False
-
-
-def telegram_send(token, message, tradingview_url=None):
-    if not token or not CHAT_ID:
-        return False
-
-    # Telegram أيضاً يستخدم Session معاد الاستخدام
-    session = get_session()
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-
-    try:
-        response = session.post(
-            url,
-            data={
-                "chat_id": CHAT_ID,
-                "text": message,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True,
-                "reply_markup": tradingview_markup(tradingview_url) if tradingview_url else None,
-            },
-            timeout=(10, 30),
-        )
-        return response.ok
-    except Exception:
-        return False
-
-
-# ============================================================
-# MESSAGE
-# ============================================================
-
-def escape_html(value):
-    text = str(value if value is not None else "-")
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
-
-
-def build_message(result):
-    market = result["market"]
-
-    names = {
-        "TASI": "🇸🇦 السوق السعودي (TASI)",
-        "US": "🇺🇸 السوق الأمريكي (US)",
-        "CRYPTO": "🪙 العملات الرقمية (CRYPTO)",
-    }
-
-    market_name = names.get(market, market)
-    symbol = escape_html(result["symbol"])
-    company_name = escape_html(result.get("name") or "")
-
-    if result["trend"] == "UP":
-        trend_text = "🟢 صاعد قوي"
-        trend_icon = "📈"
-    elif result["trend"] == "DOWN":
-        trend_text = "🔴 هابط قوي"
-        trend_icon = "📉"
-    else:
-        trend_text = "⚪ محايد"
-        trend_icon = "↔️"
-
-    if result["vwap"] is not None:
-        vwap_text = (
-            "🟢 فوق VWAP"
-            if result["price"] > result["vwap"]
-            else "🔴 تحت VWAP"
-        )
-    else:
-        vwap_text = "⚪ VWAP غير متاح"
-
-    change_pct = None
-    if result.get("previous_close") not in (None, 0):
-        change_pct = (result["price"] - result["previous_close"]) / result["previous_close"] * 100
-
-    if result["signal"] == "BUY":
-        signal_badge = "🟢 <b>شراء قوي</b>"
-    elif result["signal"] == "SELL":
-        signal_badge = "🔴 <b>بيع قوي</b>"
-    else:
-        signal_badge = "⚪ <b>انتظار</b>"
-
-    smart = result.get("smart", {})
-    movement_lines = []
-
-    if smart.get("maker", 0) > 0:
-        movement_lines.append("🐋 <b>↑ حركة صنّاع السهم</b>")
-    elif smart.get("maker", 0) < 0:
-        movement_lines.append("🐋 <b>↓ حركة صنّاع السهم</b>")
-
-    if smart.get("speculators"):
-        movement_lines.append("⚡ <b>حركة مضاربين قوية</b>")
-
-    if smart.get("accumulation"):
-        movement_lines.append("💰 <b>عمليات التجميع ✅</b>")
-
-    if smart.get("unusual"):
-        movement_lines.append("🔎 <b>رصد حركة غير اعتيادية</b>")
-
     lines = [
         "💀🚀 <b>AI PRO MAX SIGNAL</b>",
         "",
@@ -1591,11 +1312,10 @@ def build_message(result):
         f"🧠 <b>RSI 14:</b> {fmt(result['rsi'])}",
         f"📐 <b>ATR 14:</b> {fmt(result['atr'])}",
         "",
-        f"📈 <b>EMA 8:</b> {fmt(result['ema8'])}    <b>EMA 21:</b> {fmt(result['ema21'])}",
-        f"📈 <b>EMA 50:</b> {fmt(result['ema50'])}    <b>EMA 200:</b> {fmt(result['ema200'])}",
+        f"📈 <b>EMA 10:</b> {fmt(result['ema10'])}    <b>EMA 14:</b> {fmt(result['ema14'])}",
+        f"📈 <b>EMA 15:</b> {fmt(result['ema15'])}    <b>EMA 25:</b> {fmt(result['ema25'])}",
+        f"📈 <b>EMA 50:</b> {fmt(result['ema50'])}",
         "",
-        f"🟢 <b>قوة الشراء:</b> {pct(result['buy_power'])}",
-        f"🔴 <b>قوة البيع:</b> {pct(result['sell_power'])}",
         f"📦 <b>قوة الحجم:</b> {result['volume_ratio']:.2f}x",
         "",
         f"🛡️ <b>الدعم:</b> {fmt(result['support'])}",
