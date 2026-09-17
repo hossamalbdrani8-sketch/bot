@@ -63,10 +63,6 @@ OUTPUTSIZE = 220
 MIN_US_PRICE = 0.20
 US_MAX_SYMBOLS = 13402
 
-# 🔎 FAST FILTER — يقلل الفحص العميق قبل تشغيل الأطر الستة
-FAST_FILTER_LIMIT = {"TASI": 120, "US": 400, "CRYPTO": 300}
-FAST_FILTER_MIN_MOVE = {"TASI": 0.25, "US": 0.50, "CRYPTO": 0.35}
-
 EMA_FAST = 8
 EMA_MID = 21
 EMA_SLOW = 50
@@ -1761,183 +1757,6 @@ def get_symbols(market, loader):
 
 
 # ============================================================
-# 🔎 FAST FILTER
-# ============================================================
-
-def fast_filter_symbol(symbol, market):
-    """
-    مرحلة ترشيح مبكر محسّنة على 15min.
-    لا تشترط حركة سعرية كبيرة حتى لا تضيع الإشارات التي تتكوّن بهدوء.
-    تجمع عدة دلائل فنية قريبة من منطق AI PRO MAX / Golden Candle،
-    ثم تترك القرار النهائي للفحص العميق على جميع الأطر الزمنية.
-    """
-    series = get_series(symbol, market, interval="15min")
-    if not series:
-        return None
-
-    candles = series.get("candles") or []
-    if len(candles) < 50:
-        return None
-
-    closes = [float(c["close"]) for c in candles]
-    highs = [float(c["high"]) for c in candles]
-    lows = [float(c["low"]) for c in candles]
-    opens = [float(c["open"]) for c in candles]
-    volumes = [float(c.get("volume", 0.0) or 0.0) for c in candles]
-
-    price = closes[-1]
-    prev = closes[-2]
-    if price <= 0 or prev <= 0:
-        return None
-
-    e7 = ema(closes, 7)
-    e14 = ema(closes, 14)
-    e25 = ema(closes, 25)
-    e50 = ema(closes, 50)
-    r = rsi(closes, 14)
-    a = atr(highs, lows, closes, 14)
-    vw = vwap(highs, lows, closes, volumes)
-
-    recent_high = max(highs[-21:-1]) if len(highs) >= 21 else max(highs[:-1])
-    recent_low = min(lows[-21:-1]) if len(lows) >= 21 else min(lows[:-1])
-
-    last_vol = volumes[-1]
-    prior_vols = volumes[-21:-1]
-    avg_vol = sum(prior_vols) / len(prior_vols) if prior_vols else 0.0
-    volume_ratio = last_vol / avg_vol if avg_vol > 0 else 1.0
-
-    move_1 = abs(price - prev) / prev * 100.0
-    base = closes[-21] if len(closes) >= 21 else closes[0]
-    move_20 = abs(price - base) / base * 100.0 if base > 0 else 0.0
-
-    score = 0.0
-    reasons = 0
-
-    # اتجاه EMA المبكر
-    if e7 is not None and e14 is not None:
-        if e7 > e14:
-            score += 12.0
-            reasons += 1
-        elif e7 < e14:
-            score += 12.0
-            reasons += 1
-
-    if e25 is not None:
-        distance_25 = abs(price - e25) / price * 100.0
-        if distance_25 <= 1.5:
-            score += 12.0
-            reasons += 1
-        if price > e25:
-            score += 4.0
-        else:
-            score += 4.0
-
-    if e50 is not None:
-        if e25 is not None and ((e25 > e50) or (e25 < e50)):
-            score += 8.0
-
-    # RSI: نلتقط مناطق الاستعداد قبل الإشارة النهائية
-    if r is not None:
-        if 45.0 <= r <= 65.0:
-            score += 12.0
-            reasons += 1
-        elif r >= 65.0 or r <= 35.0:
-            score += 8.0
-            reasons += 1
-
-    # VWAP
-    if vw is not None and vw > 0:
-        vwap_distance = abs(price - vw) / price * 100.0
-        if vwap_distance <= 1.5:
-            score += 10.0
-            reasons += 1
-        if (price > vw) != (prev > vw):
-            score += 18.0
-            reasons += 1
-
-    # اختراق / اقتراب من قمة أو قاع حديث
-    if recent_high > 0:
-        if price >= recent_high * 0.995:
-            score += 15.0
-            reasons += 1
-    if recent_low > 0:
-        if price <= recent_low * 1.005:
-            score += 15.0
-            reasons += 1
-
-    # شمعة قوية قريبة من Golden Candle
-    candle_range = highs[-1] - lows[-1]
-    body = abs(closes[-1] - opens[-1])
-    body_ratio = body / candle_range if candle_range > 0 else 0.0
-    bullish = closes[-1] > opens[-1]
-    if body_ratio >= 0.45 and e7 is not None and e25 is not None:
-        if bullish and price > e7 and e7 > e25:
-            score += 25.0
-            reasons += 1
-
-    # نشاط غير اعتيادي
-    if volume_ratio >= 1.15:
-        score += min(20.0, (volume_ratio - 1.0) * 12.0)
-        reasons += 1
-
-    if a is not None and a > 0 and price > 0:
-        atr_pct = a / price * 100.0
-        if atr_pct >= 0.5:
-            score += 5.0
-
-    # الحركة الأخيرة تبقى عامل تعزيز فقط وليست شرطًا.
-    score += min(10.0, move_1 * 1.5)
-    score += min(10.0, move_20 * 0.5)
-
-    # مهم: لا نرفض الرمز فقط لأنه لم يتحرك كثيرًا.
-    # القرار النهائي سيكون داخل analyze_symbol على الأطر الستة.
-    if reasons == 0 and score < 8.0:
-        score = 8.0
-
-    return {
-        "symbol": symbol,
-        "score": score,
-        "move": move_1,
-        "move_window": move_20,
-        "volume_ratio": volume_ratio,
-    }
-
-
-def build_fast_candidates(symbols, market):
-    """Run the light first pass and return only the strongest candidates."""
-    total = len(symbols)
-    limit = FAST_FILTER_LIMIT.get(market, 300)
-    candidates = []
-    completed = 0
-    batch_size = MAX_WORKERS * 10
-
-    print(f"[{market}] 🔎 FAST FILTER بدء | {total} رمز | limit={limit}")
-
-    for start in range(0, total, batch_size):
-        batch = symbols[start:start + batch_size]
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            jobs = {executor.submit(fast_filter_symbol, symbol, market): symbol for symbol in batch}
-            for job in as_completed(jobs):
-                completed += 1
-                try:
-                    item = job.result()
-                    if item:
-                        candidates.append(item)
-                except Exception as error:
-                    print(f"[{market}] FAST FILTER error: {error}")
-
-        if completed % 100 == 0 or completed == total:
-            print(f"[{market}] FAST FILTER progress {completed}/{total} | candidates={len(candidates)}")
-
-    candidates.sort(key=lambda x: x["score"], reverse=True)
-    selected = [x["symbol"] for x in candidates[:limit]]
-    if not selected:
-        print(f"[{market}] ⚠️ لا توجد بيانات صالحة في هذه الدورة")
-    print(f"[{market}] 🎯 FAST FILTER انتهى | {total} → {len(selected)} مرشح للفحص العميق")
-    return selected
-
-
-# ============================================================
 # MARKET SCANNER
 # ============================================================
 
@@ -1949,7 +1768,7 @@ def scan_market(symbols, market, token):
     total = len(symbols)
 
     print(
-        f"[{market}] 🧠 بدء الفحص العميق: {total} مرشح | "
+        f"[{market}] 🧠 بدء الفحص العميق: {total} رمز | "
         f"Workers={MAX_WORKERS}"
     )
 
@@ -2023,9 +1842,8 @@ def market_loop(market, token, loader):
                 f"{len(symbols)} رمز"
             )
 
-            candidates = build_fast_candidates(symbols, market)
             scan_market(
-                candidates,
+                symbols,
                 market,
                 token,
             )
