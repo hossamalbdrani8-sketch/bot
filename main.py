@@ -20,7 +20,6 @@ from PIL import Image, ImageDraw
 # ============================================================
 
 CHAT_ID = "1179354586"
-
 CRYPTO_TOKEN = "8727420383:AAEKSc7B_ZIb8EGRokpPdOlXE0KEgpmFdU4"
 TASI_TOKEN =   "7772382813:AAECvG18eOKpWWM8fdL3xU8tbSib_AaQUbw"
 TWELVEDATA_API_KEY = "53f6bc98e70a4ff3b18e008c11cd56ba"
