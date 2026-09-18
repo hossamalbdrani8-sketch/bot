@@ -2,7 +2,7 @@
 # TASI -> Twelve Data | US + Crypto -> SiftingIO
 # Railway: use environment variables, never hard-code secrets.
 
-import os, time, json, queue, threading
+import os, time, json, queue, threading, datetime as dt
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock, local
@@ -44,6 +44,7 @@ sf_last = [0.0]
 state_lock = Lock()
 last_signal = {}
 trend_state = {}
+SIGNAL_COOLDOWN = 900
 cache_lock = Lock()
 symbol_cache = {
     "TASI":{"symbols":[],"updated":0},
@@ -103,6 +104,20 @@ def td(path, params=None):
 
 def sf(path, params=None):
     return api_get(SF_BASE,path,SIFTING_API_KEY,params,sf_local,sf_lock,sf_last,SF_GAP)
+
+def current_price(symbol, market):
+    """Return the latest available trade/price, used only after a signal candidate."""
+    try:
+        if market == "US":
+            d = sf(f"/last/trade/stocks/{symbol}") or {}
+            return float(d.get("p")) if d.get("p") is not None else None
+        if market == "CRYPTO":
+            d = sf(f"/last/trade/crypto/{symbol}") or {}
+            return float(d.get("p")) if d.get("p") is not None else None
+        d = td("/price", {"symbol": symbol, "exchange": "XSAU"}) or {}
+        return float(d.get("price")) if d.get("price") is not None else None
+    except Exception:
+        return None
 
 # ---------- indicators ----------
 
@@ -211,7 +226,10 @@ def get_tasi(symbol,tf):
 
 def get_sf(asset,symbol,tf):
     native=SF_TF[tf]
-    c,n=sf_candles(sf(f"/hist/{asset}/{symbol}/bars",{"interval":native,"limit":2000}))
+    # SiftingIO historical bars require a start date. One month is enough
+    # for the warm-up periods used by this scanner and fits the free history window.
+    start=(dt.datetime.now(dt.timezone.utc)-dt.timedelta(days=31)).date().isoformat()
+    c,n=sf_candles(sf(f"/hist/{asset}/{symbol}/bars",{"start":start,"interval":native,"limit":2000}))
     if not c:return None,n
     if tf=="4h":
         out=[];bucket=None;cur=None
@@ -231,12 +249,28 @@ def symbols_td(data):
     rows=data.get("data",[]) if isinstance(data,dict) else data if isinstance(data,list) else []
     return sorted({str(x["symbol"]).strip() for x in rows if isinstance(x,dict) and x.get("symbol")},key=str.upper)
 
-def load_tasi(): return symbols_td(td("/stocks",{"exchange":"TADAWUL"}))[:375]
+def load_tasi():
+    # Twelve Data identifies the Saudi Exchange as XSAU.
+    x = symbols_td(td("/stocks", {"exchange":"XSAU"}))
+    return x[:375]
+
 def load_us():
-    x=symbols_td(td("/stocks",{"country":"United States"}))
+    x = symbols_td(td("/stocks", {"country":"United States"}))
     return x[:US_MAX_SYMBOLS] if x else ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AVGO","AMD","NFLX"]
+
+def normalize_crypto_symbol(symbol):
+    s = str(symbol or "").upper().strip()
+    s = s.replace("/", "").replace("-", "")
+    # SiftingIO uses canonical concatenated USD pairs such as BTCUSD.
+    if s and not s.endswith("USD") and not s.endswith("USDT") and not s.endswith("USDC"):
+        s += "USD"
+    return s
+
 def load_crypto():
-    x=symbols_td(td("/cryptocurrencies",{}))
+    # Build the candidate catalog from Twelve Data, then normalize it to
+    # SiftingIO's canonical form (BTCUSD, ETHUSD, ...).
+    x = symbols_td(td("/cryptocurrencies", {}))
+    x = sorted({normalize_crypto_symbol(v) for v in x if normalize_crypto_symbol(v)})
     return x if x else ["BTCUSD","ETHUSD","SOLUSD","XRPUSD","DOGEUSD"]
 
 def get_symbols(market,loader):
@@ -286,7 +320,7 @@ def analyze_candles(symbol,market,c,name,tf):
     with state_lock:
         if tr!="NEUTRAL":trend_state[f"{market}:{symbol}"]=tr
         tr=trend_state.get(f"{market}:{symbol}",tr)
-    return {"market":market,"symbol":symbol,"name":name or symbol,"price":price,"signal":sig,
+    return {"market":market,"symbol":symbol,"name":name or symbol,"price":price,"bar_price":price,"signal":sig,
             "signal_text":txt,"score":strength,"timeframe":tf,"trend":tr,"ema10":e10,
             "ema14":e14,"ema15":e15,"ema25":e25,"ema50":e50,"rsi":rv,"atr":a,"vwap":vw,
             "support":min(z["low"] for z in c[-50:]),"resistance":max(z["high"] for z in c[-50:]),
@@ -298,6 +332,15 @@ def analyze(symbol,market):
         c,n=get_tasi(symbol,tf) if market=="TASI" else get_sf("stocks" if market=="US" else "crypto",symbol,tf)
         r=analyze_candles(symbol,market,c,n,tf)
         if r:
+            live = current_price(symbol, market)
+            if live is not None and live > 0:
+                bar = r["bar_price"]
+                # Prevent a stale/wrong price series from producing a Telegram alert.
+                if bar > 0 and abs(live-bar)/bar > 0.25:
+                    print(f"[{market}] ⚠️ price mismatch {symbol}: bar={bar:.6f} live={live:.6f}")
+                    continue
+                r["price"] = live
+                r["targets"] = targets(live, r["atr"], r["signal"] == "BUY")
             if market=="US":r["news"]=news(symbol)
             return r
     return None
@@ -324,7 +367,7 @@ def fmt(x):
 def message(r):
     tr="🟢 استمرار صاعد" if r["trend"]=="UP" else "🔴 استمرار هابط" if r["trend"]=="DOWN" else "⚪ محايد"
     s=["💀🚀 <b>AI PRO MAX</b>","",f"🌐 <b>{r['market']}</b>",
-       f"📌 <b>{r['symbol']}</b> — {r['name']}",
+       f"📌 <b>{r['symbol']}</b>",
        f"🎯 <b>{r['signal_text']}</b> | القوة: <b>{r['score']}/100</b>",
        f"⏱️ الإطار: <b>{r['timeframe']}</b>","",
        f"💰 السعر: <b>{fmt(r['price'])}</b>",f"🧠 RSI 14: <b>{fmt(r['rsi'])}</b>",
@@ -347,10 +390,14 @@ def message(r):
     return "\n".join(s)
 
 def should_send(r):
-    k=f"{r['market']}:{r['symbol']}";st=(r["signal"],r["trend"])
+    k=f"{r['market']}:{r['symbol']}"
+    now=time.time()
+    st=(r["signal"],r["trend"],r["timeframe"])
     with state_lock:
-        if last_signal.get(k)==st:return False
-        last_signal[k]=st
+        prev=last_signal.get(k)
+        if prev and prev["state"]==st and now-prev["time"] < SIGNAL_COOLDOWN:
+            return False
+        last_signal[k]={"state":st,"time":now}
     return True
 
 def tg_worker():
