@@ -1,3 +1,6 @@
+import os, time, json, queue, threading, requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 # ============================================================
 # AI PRO MAX — FAST FULL-MARKET MODE
 # No US/crypto catalog download. Uses SiftingIO full-market snapshots.
