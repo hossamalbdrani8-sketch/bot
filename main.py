@@ -93,9 +93,17 @@ def api_get(base, path, key, params, local_obj, lock, holder, gap):
             if r.status_code in (500,502,503,504):
                 time.sleep(min(10,2**attempt)); continue
             if r.status_code != 200:
+                try:
+                    err = r.json()
+                    msg = err.get("message") or err.get("code") or err.get("status") if isinstance(err, dict) else None
+                except Exception:
+                    msg = None
+                print(f"[API] HTTP {r.status_code} {base}{path} | {msg or 'request failed'}")
                 return None
             data = r.json()
-            if isinstance(data,dict) and str(data.get("status","")).lower()=="error": return None
+            if isinstance(data,dict) and str(data.get("status","")).lower()=="error":
+                print(f"[API] ERROR {base}{path} | {data.get('message') or data.get('code') or 'provider error'}")
+                return None
             return data
         except (requests.Timeout,requests.ConnectionError):
             if attempt < MAX_RETRIES-1: time.sleep(min(10,2**attempt))
@@ -406,75 +414,133 @@ def load_tasi():
     print(f"[TASI] FULL OPEN catalog total={len(syms)} | randomized scan order")
     return syms
 
+def _catalog_request(path, params=None):
+    """Catalog request with safe diagnostics; never exposes API keys."""
+    data = td(path, params or {})
+    if data is None:
+        print(f"[TWELVE DATA] catalog request failed: {path} params={params or {}}")
+    return data
+
+
+def _catalog_rows(data):
+    if isinstance(data, dict):
+        rows = data.get("data")
+        if rows is None:
+            rows = data.get("values")
+        if isinstance(rows, list):
+            return rows
+        msg = data.get("message") or data.get("code")
+        if msg:
+            print(f"[TWELVE DATA] catalog response: {msg}")
+    return data if isinstance(data, list) else []
+
+
 def load_us():
-    # FULL US UNIVERSE: ask the provider for ALL US instruments in its catalog.
-    # Do not restrict by type and do not take the first N symbols.
-    # The dedicated ETF catalog is merged as a second safety net.
-    all_symbols=[]; seen=set(); page=1
+    # 🇺🇸 FULL US UNIVERSE.
+    # IMPORTANT: Twelve Data's /stocks catalog is paginated. Do NOT send
+    # outputsize=5000 here; the catalog uses its own page size. We keep
+    # requesting pages until the provider returns no new rows.
+    all_symbols=[]
+    seen=set()
+    page=1
+
     while True:
-        data=td("/stocks",{"country":"United States","page":page,"outputsize":5000})
-        part=data.get("data",[]) if isinstance(data,dict) else []
-        if not isinstance(part,list) or not part:
+        data=_catalog_request("/stocks", {
+            "country":"United States",
+            "page":page,
+        })
+        rows=_catalog_rows(data)
+        if not rows:
             break
+
         added=0
-        for row in part:
+        for row in rows:
             if not isinstance(row,dict):
                 continue
+            country=str(row.get("country","")).strip().lower()
             sym=str(row.get("symbol","")).strip().upper()
+            if country and country not in ("united states","us","usa"):
+                continue
             if sym and sym not in seen:
-                seen.add(sym); all_symbols.append(sym); added += 1
-        print(f"[US] stocks page={page} +{added} total={len(all_symbols)}")
-        if len(part)<5000:
+                seen.add(sym)
+                all_symbols.append(sym)
+                added += 1
+
+        print(f"[US] stocks page={page} rows={len(rows)} +{added} total={len(all_symbols)}")
+
+        # Stop if the provider ignores page or returns only duplicates.
+        if added == 0:
             break
         page += 1
-        if page>10000:
+        if page > 10000:
             break
 
-    # Dedicated ETF catalog.
-    page=1
-    while True:
-        data=td("/etfs",{"country":"United States","page":page,"outputsize":5000})
-        part=data.get("data",[]) if isinstance(data,dict) else []
-        if not isinstance(part,list) or not part:
-            break
-        added=0
-        for row in part:
-            if isinstance(row,dict) and row.get("symbol"):
-                sym=str(row["symbol"]).strip().upper()
+    # Twelve Data documents the ETF catalog as /etf (singular). Merge it
+    # separately so ETFs are never lost even if the stock catalog omits them.
+    etf_data=_catalog_request("/etf", {})
+    etf_rows=_catalog_rows(etf_data)
+    etf_added=0
+    for row in etf_rows:
+        if not isinstance(row,dict):
+            continue
+        sym=str(row.get("symbol","")).strip().upper()
+        if sym and sym not in seen:
+            seen.add(sym)
+            all_symbols.append(sym)
+            etf_added += 1
+    print(f"[US] ETF catalog +{etf_added} | total={len(all_symbols)}")
+
+    # If the country-filtered endpoint fails on the account, retry the stocks
+    # catalog without the country filter and filter locally. This is slower but
+    # prevents a provider-side country filter issue from producing US=0.
+    if not all_symbols:
+        print("[US] country-filtered catalog returned 0; retrying /stocks without country filter")
+        page=1
+        while True:
+            data=_catalog_request("/stocks", {"page":page})
+            rows=_catalog_rows(data)
+            if not rows:
+                break
+            added=0
+            for row in rows:
+                if not isinstance(row,dict):
+                    continue
+                country=str(row.get("country","")).strip().lower()
+                if country not in ("united states","us","usa"):
+                    continue
+                sym=str(row.get("symbol","")).strip().upper()
                 if sym and sym not in seen:
-                    seen.add(sym); all_symbols.append(sym); added += 1
-        print(f"[US] ETFs page={page} +{added} total={len(all_symbols)}")
-        if len(part)<5000:
-            break
-        page += 1
-        if page>10000:
-            break
+                    seen.add(sym)
+                    all_symbols.append(sym)
+                    added += 1
+            print(f"[US] fallback stocks page={page} +{added} total={len(all_symbols)}")
+            if added == 0:
+                break
+            page += 1
+            if page > 10000:
+                break
 
-    # IMPORTANT: do not scan A-Z in every cycle. Shuffle the complete universe
-    # so expensive/large-cap symbols cannot monopolize the beginning of every cycle.
     random.shuffle(all_symbols)
-    print(f"[US] FULL OPEN catalog total={len(all_symbols)} | price floor >= ${MIN_US_PRICE:.2f} | randomized scan order")
+    print(f"[US] FULL OPEN catalog total={len(all_symbols)} | price floor >= ${MIN_US_PRICE:.2f} | no numeric cap | randomized scan order")
     return all_symbols
 
+
 def load_crypto():
-    # OPEN CRYPTO UNIVERSE: paginate the entire provider catalog and do not
-    # restrict to USD pairs. Symbols are normalized only for the analysis API.
-    out=[]; seen=set(); page=1
-    while True:
-        data=td("/cryptocurrencies",{"page":page,"outputsize":5000})
-        rows=data.get("data",[]) if isinstance(data,dict) else []
-        if not isinstance(rows,list) or not rows: break
-        for row in rows:
-            if not isinstance(row,dict) or not row.get("symbol"): continue
-            sym=str(row["symbol"]).strip().upper().replace("/","")
-            if sym and sym not in seen:
-                seen.add(sym); out.append(sym)
-        print(f"[CRYPTO] page={page} total={len(out)}")
-        if len(rows)<5000: break
-        page += 1
-        if page>10000: break
+    # 🪙 FULL CRYPTO UNIVERSE. /cryptocurrencies returns the provider's
+    # complete list in one catalog response; it is NOT a paginated endpoint.
+    data=_catalog_request("/cryptocurrencies", {})
+    rows=_catalog_rows(data)
+    out=[]
+    seen=set()
+    for row in rows:
+        if not isinstance(row,dict):
+            continue
+        sym=str(row.get("symbol","")).strip().upper().replace("/","")
+        if sym and sym not in seen:
+            seen.add(sym)
+            out.append(sym)
     random.shuffle(out)
-    print(f"[CRYPTO] FULL OPEN catalog total={len(out)} | randomized scan order")
+    print(f"[CRYPTO] FULL OPEN catalog total={len(out)} | no numeric cap | randomized scan order")
     return out
 
 def get_symbols(market,loader):
