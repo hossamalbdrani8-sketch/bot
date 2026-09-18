@@ -3,7 +3,8 @@
 # Railway: use environment variables, never hard-code secrets.
 
 import os, time, json, queue, threading
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock, local
 import requests
@@ -14,9 +15,11 @@ US_TOKEN = os.getenv("US_TOKEN", "").strip()
 CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN", "").strip()
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "").strip()
 SIFTING_API_KEY = os.getenv("SIFTING_API_KEY", "").strip()
+SAHMK_API_KEY = os.getenv("SAHMK_API_KEY", "").strip()
 
 TD_BASE = "https://api.twelvedata.com"
 SF_BASE = "https://api.sifting.io/v1"
+SAHMK_BASE = "https://api.sahmk.sa/api/v1"
 
 MAX_WORKERS = 4
 TD_GAP = 0.35
@@ -38,10 +41,11 @@ POSITIVE = ("beat","beats","growth","profit","profits","upgrade","upgraded","buy
 NEGATIVE = ("loss","losses","downgrade","downgraded","sell","weak","negative","lawsuit",
             "decline","drop","warning","debt","offering","investigation","risk")
 
-td_local, sf_local = local(), local()
-td_lock, sf_lock = Lock(), Lock()
+td_local, sf_local, sahmk_local = local(), local(), local()
+td_lock, sf_lock, sahmk_lock = Lock(), Lock(), Lock()
 td_last = [0.0]
 sf_last = [0.0]
+sahmk_last = [0.0]
 state_lock = Lock()
 last_signal = {}
 trend_state = {}
@@ -105,6 +109,28 @@ def td(path, params=None):
 
 def sf(path, params=None):
     return api_get(SF_BASE,path,SIFTING_API_KEY,params,sf_local,sf_lock,sf_last,SF_GAP)
+
+def sahmk(path, params=None):
+    if not SAHMK_API_KEY: return None
+    s=session_for(sahmk_local)
+    p=dict(params or {})
+    for attempt in range(MAX_RETRIES):
+        try:
+            wait_rate(sahmk_lock,sahmk_last,0.75)
+            r=s.get(SAHMK_BASE+path,params=p,headers={"X-API-Key":SAHMK_API_KEY},timeout=(10,30))
+            if r.status_code==429:
+                time.sleep(min(30,2**attempt)); continue
+            if r.status_code in (500,502,503,504):
+                time.sleep(min(10,2**attempt)); continue
+            if r.status_code!=200: return None
+            d=r.json()
+            if isinstance(d,dict) and d.get("error"): return None
+            return d
+        except (requests.Timeout,requests.ConnectionError):
+            if attempt<MAX_RETRIES-1: time.sleep(min(10,2**attempt))
+            else: return None
+        except Exception: return None
+    return None
 
 # ---------- indicators ----------
 
@@ -256,10 +282,22 @@ def get_sf(asset,symbol,tf):
         c=out
     return c[-OUTPUTSIZE:],n
 
+TASI_QUOTE_CACHE={}
+TASI_QUOTE_TTL=900
+
 def current_price_tasi(symbol):
-    d=td("/price",{"symbol":symbol})
-    try:return float(d["price"]) if isinstance(d,dict) and d.get("price") is not None else None
-    except Exception:return None
+    now=time.time()
+    old=TASI_QUOTE_CACHE.get(symbol)
+    if old and now-old[0]<TASI_QUOTE_TTL:
+        return old[1]
+    d=sahmk(f"/quote/{symbol}/",{"data_mode":"delayed"})
+    try:
+        price=float(d["price"]) if isinstance(d,dict) and d.get("price") is not None else None
+    except Exception:
+        price=None
+    if price is not None:
+        TASI_QUOTE_CACHE[symbol]=(now,price)
+    return price
 
 def current_price_sf(asset,symbol):
     d=sf(f"/last/trade/{asset}/{symbol}")
@@ -272,19 +310,24 @@ def symbols_td(data):
     return sorted({str(x["symbol"]).strip() for x in rows if isinstance(x,dict) and x.get("symbol")},key=str.upper)
 
 def load_tasi():
-    # Twelve Data identifies Saudi Exchange by MIC XSAU (not TADAWUL).
-    data=td("/stocks",{"exchange":"XSAU"})
-    rows=data.get("data",[]) if isinstance(data,dict) else []
-    syms=sorted({str(x.get("symbol")).strip() for x in rows if isinstance(x,dict) and x.get("symbol")},key=str.upper)
-    if len(syms)<TASI_MAX_SYMBOLS:
-        # Fallback: retrieve Saudi symbols by country and keep only XSAU/Tadawul rows.
-        data=td("/stocks",{"country":"Saudi Arabia"})
+    # SAHMK is now the Saudi symbol directory. The free companies endpoint
+    # is used once to build the TASI universe; technical history remains on
+    # Twelve Data because SAHMK historical OHLCV is Starter+ only.
+    data=sahmk("/companies/",{"market":"TASI","limit":2000,"offset":0})
+    rows=data.get("results",[]) if isinstance(data,dict) else []
+    syms=sorted({str(x.get("symbol")).strip() for x in rows
+                 if isinstance(x,dict) and x.get("symbol") and
+                 str(x.get("market","" )).upper()=="TASI" and
+                 str(x.get("security_type","Equity"))=="Equity" and
+                 str(x.get("status","active")).lower()=="active"},key=str.upper)
+    # Fallback to Twelve Data only if SAHMK directory is temporarily unavailable.
+    if not syms:
+        data=td("/stocks",{"exchange":"XSAU"})
         rows=data.get("data",[]) if isinstance(data,dict) else []
         syms=sorted({str(x.get("symbol")).strip() for x in rows
-                     if isinstance(x,dict) and x.get("symbol") and
-                     (str(x.get("exchange","")).upper() in ("XSAU","TADAWUL") or
-                      str(x.get("mic_code","")).upper()=="XSAU")},key=str.upper)
+                     if isinstance(x,dict) and x.get("symbol")},key=str.upper)
     return syms[:TASI_MAX_SYMBOLS]
+
 def load_us():
     x=symbols_td(td("/stocks",{"country":"United States"}))
     return x[:US_MAX_SYMBOLS] if x else ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AVGO","AMD","NFLX"]
@@ -443,8 +486,12 @@ def analyze(symbol,market):
         asset="stocks" if market=="US" else "crypto"
         live=current_price_sf(asset,symbol)
     split=split_for_symbol(symbol) if market in ("TASI","US") else None
-    for tf in TIMEFRAMES:
+    tf_list=("15min",) if market=="TASI" else TIMEFRAMES
+    for tf in tf_list:
         c,n=get_tasi(symbol,tf) if market=="TASI" else get_sf(asset,symbol,tf)
+        # TASI uses Twelve Data for the technical candle series and SAHMK for the
+        # current/most recent quoted price. If SAHMK is delayed or temporarily
+        # unavailable, analyze the candle price instead of dropping the symbol.
         r=analyze_candles(symbol,market,c,n,tf,live)
         if r:
             r["split"]=split
@@ -637,9 +684,24 @@ def scan(symbols,market,token):
         if done%100==0 or done==total:print(f"[{market}] {done}/{total} | signals={signals}")
     print(f"[{market}] انتهى | {total} | signals={signals}")
 
+RIYADH=ZoneInfo("Asia/Riyadh")
+
+def tasi_market_open():
+    now=datetime.now(RIYADH)
+    # Saudi Exchange main session: Sunday-Thursday, 10:00-15:00 Riyadh time.
+    # Friday/Saturday are closed.
+    if now.weekday() not in (6,0,1,2,3):
+        return False
+    t=now.time()
+    return t >= datetime.strptime("10:00","%H:%M").time() and t < datetime.strptime("15:00","%H:%M").time()
+
 def market_loop(market,token,loader):
     while True:
         try:
+            if market=="TASI" and not tasi_market_open():
+                print("[TASI] ⏸️ السوق مغلق — الفحص الفني متوقف حتى افتتاح الجلسة")
+                time.sleep(60)
+                continue
             symbols=get_symbols(market,loader)
             print(f"💀 {market}: {len(symbols)} رمز")
             if symbols:
@@ -656,13 +718,14 @@ def heartbeat():
 def main():
     print("="*70)
     print("💀🚀 AI PRO MAX — FINAL HYBRID")
-    print("🇸🇦 تاسي -> Twelve Data | 🇺🇸 US -> SiftingIO | 🪙 Crypto -> SiftingIO")
+    print("🇸🇦 تاسي -> SAHMK + Twelve Data history | 🇺🇸 US -> SiftingIO | 🪙 Crypto -> SiftingIO")
     print("="*70)
-    required=("CHAT_ID","TASI_TOKEN","US_TOKEN","CRYPTO_TOKEN","TWELVEDATA_API_KEY","SIFTING_API_KEY")
+    required=("CHAT_ID","TASI_TOKEN","US_TOKEN","CRYPTO_TOKEN","TWELVEDATA_API_KEY","SIFTING_API_KEY","SAHMK_API_KEY")
     missing=[x for x in required if not os.getenv(x)]
     if missing:
         print("❌ متغيرات ناقصة: "+", ".join(missing));return
     print("🟢 Environment: OK")
+    print("🇸🇦 TASI: SAHMK symbol/quote + Twelve Data technical history")
     threading.Thread(target=tg_worker,daemon=True).start()
     threading.Thread(target=heartbeat,daemon=True).start()
     threading.Thread(target=market_loop,args=("TASI",TASI_TOKEN,load_tasi),daemon=True).start()
