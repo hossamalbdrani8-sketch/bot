@@ -28,8 +28,8 @@ MAX_RETRIES = 3
 SCAN_INTERVAL = 120
 CACHE_TTL = 21600
 MIN_US_PRICE = 0.15
-US_MAX_SYMBOLS = 0  # unlimited; kept only for backward compatibility
-TASI_MAX_SYMBOLS = 375
+US_MAX_SYMBOLS = None  # no numeric cap
+TASI_MAX_SYMBOLS = None  # no numeric cap
 OUTPUTSIZE = 220
 TIMEFRAMES = ("5min", "15min", "30min", "1h", "4h")
 SF_TF = {"5min":"5m", "15min":"15m", "30min":"30m", "1h":"1h", "4h":"1h"}
@@ -300,7 +300,11 @@ def get_sf(asset,symbol,tf):
     params={"interval":native,"start":start_date,"limit":2000}
     raw=sf(f"/hist/{asset}/{symbol}/bars",params)
     if not raw:
-        return None,""
+        # Provider fallback: keep the universe open and use Twelve Data if
+        # SiftingIO does not carry this particular ETF/ADR/security.
+        td_interval = {"5m":"5min","15m":"15min","30m":"30min","1h":"1h"}.get(native,native)
+        td_data=td("/time_series",{"symbol":symbol,"interval":td_interval,"outputsize":OUTPUTSIZE,"format":"JSON"})
+        return td_candles(td_data)
     c,n=sf_candles(raw)
     if not c:
         return None,n
@@ -340,48 +344,29 @@ def current_price_sf(asset,symbol):
     try:return float(d["p"]) if isinstance(d,dict) and d.get("p") is not None else None
     except Exception:return None
 
+def current_price_td(symbol):
+    d=td("/quote",{"symbol":symbol})
+    try:
+        return float(d["close"]) if isinstance(d,dict) and d.get("close") is not None else None
+    except Exception:
+        return None
+
 
 def symbols_td(data):
     rows=data.get("data",[]) if isinstance(data,dict) else data if isinstance(data,list) else []
-    return sorted({str(x["symbol"]).strip() for x in rows if isinstance(x,dict) and x.get("symbol")},key=str.upper)
+    return [str(x["symbol"]).strip() for x in rows
+            if isinstance(x,dict) and x.get("symbol")]
 
-def load_tasi():
-    # SAHMK is now the Saudi symbol directory. The free companies endpoint
-    # is used once to build the TASI universe; technical history remains on
-    # Twelve Data because SAHMK historical OHLCV is Starter+ only.
-    data=sahmk("/companies/",{"market":"TASI","limit":2000,"offset":0})
-    rows=data.get("results",[]) if isinstance(data,dict) else []
-    syms=sorted({str(x.get("symbol")).strip() for x in rows
-                 if isinstance(x,dict) and x.get("symbol") and
-                 str(x.get("market","" )).upper()=="TASI" and
-                 str(x.get("security_type","Equity"))=="Equity" and
-                 str(x.get("status","active")).lower()=="active"},key=str.upper)
-    # Fallback to Twelve Data only if SAHMK directory is temporarily unavailable.
-    if not syms:
-        data=td("/stocks",{"exchange":"XSAU"})
+def _paged_td_catalog(path, base_params=None, page_size=5000):
+    """Return the complete catalog available from Twelve Data, without sorting or slicing."""
+    base_params=dict(base_params or {})
+    out=[]; seen=set(); page=1
+    while True:
+        params=dict(base_params)
+        params["page"]=page
+        params["outputsize"]=page_size
+        data=td(path,params)
         rows=data.get("data",[]) if isinstance(data,dict) else []
-        syms=sorted({str(x.get("symbol")).strip() for x in rows
-                     if isinstance(x,dict) and x.get("symbol")},key=str.upper)
-    return syms[:TASI_MAX_SYMBOLS]
-
-def load_us():
-    # US universe: load the complete provider catalog without A-Z prioritization
-    # and without a numeric cap. The ONLY US eligibility floor is $0.15.
-    # Price is checked from the live SiftingIO trade BEFORE historical analysis,
-    # so cheap symbols are not lost because they appear late in the catalog.
-    all_symbols=[]
-    seen=set()
-    page=1
-    per_page=5000
-    while page<=1000:
-        data=td("/stocks",{
-            "country":"United States",
-            "page":page,
-            "outputsize":per_page
-        })
-        if not isinstance(data,dict):
-            break
-        rows=data.get("data",[])
         if not isinstance(rows,list) or not rows:
             break
         added=0
@@ -389,24 +374,103 @@ def load_us():
             if not isinstance(row,dict):
                 continue
             sym=str(row.get("symbol","")).strip().upper()
-            country=str(row.get("country","")).strip().lower()
-            if not sym or sym in seen or country not in ("united states","us","usa"):
+            if not sym or sym in seen:
                 continue
-            seen.add(sym)
-            all_symbols.append(sym)
-            added += 1
-        print(f"[US] catalog page {page}: +{added} | total={len(all_symbols)}")
-        if len(rows)<per_page:
+            seen.add(sym); out.append(sym); added += 1
+        print(f"[CATALOG {path}] page={page} +{added} total={len(out)}")
+        if len(rows) < page_size:
             break
         page += 1
-    # No slicing, no A-Z sorting, no 13,375 cap.
-    return all_symbols if all_symbols else ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA"]
+        if page > 10000:
+            break
+    return out
+
+def load_tasi():
+    data=sahmk("/companies/",{"market":"TASI","limit":2000,"offset":0})
+    rows=data.get("results",[]) if isinstance(data,dict) else []
+    syms=[]; seen=set()
+    for x in rows:
+        if not isinstance(x,dict): continue
+        sym=str(x.get("symbol","")).strip().upper()
+        if not sym or sym in seen: continue
+        if str(x.get("market","" )).upper()=="TASI" and str(x.get("status","active")).lower()=="active":
+            seen.add(sym); syms.append(sym)
+    if not syms:
+        data=td("/stocks",{"country":"Saudi Arabia"})
+        rows=data.get("data",[]) if isinstance(data,dict) else []
+        for x in rows:
+            if isinstance(x,dict) and x.get("symbol"):
+                sym=str(x["symbol"]).strip().upper()
+                if sym not in seen: seen.add(sym); syms.append(sym)
+    return syms
+
+def load_us():
+    # OPEN US UNIVERSE:
+    # No A-Z priority, no 13,375 cap, no market-cap filter, no price filter here.
+    # The only price floor is enforced during analysis: $0.15 and above.
+    # Pull all supported US instrument types from the provider catalog.
+    types = [
+        "American Depositary Receipt", "Bond", "Bond Fund", "Closed-end Fund",
+        "Common Stock", "Depositary Receipt", "ETF", "Exchange-Traded Note",
+        "Global Depositary Receipt", "Limited Partnership", "Mutual Fund",
+        "Preferred Stock", "REIT", "Right", "Structured Product", "Trust",
+        "Unit", "Warrant"
+    ]
+    all_symbols=[]; seen=set()
+    for typ in types:
+        rows=[]; page=1
+        while True:
+            data=td("/stocks",{"country":"United States","type":typ,"page":page,"outputsize":5000})
+            part=data.get("data",[]) if isinstance(data,dict) else []
+            if not isinstance(part,list) or not part: break
+            rows.extend(part)
+            if len(part)<5000: break
+            page += 1
+            if page>10000: break
+        for row in rows:
+            if not isinstance(row,dict): continue
+            sym=str(row.get("symbol","")).strip().upper()
+            if sym and sym not in seen:
+                seen.add(sym); all_symbols.append(sym)
+        print(f"[US] type={typ} total={len(all_symbols)}")
+
+    # ETFs have a dedicated catalog as well; merge it so ETFs are never lost
+    # because the generic stocks catalog happens to omit them.
+    page=1
+    while True:
+        data=td("/etfs",{"country":"United States","page":page,"outputsize":5000})
+        part=data.get("data",[]) if isinstance(data,dict) else []
+        if not isinstance(part,list) or not part: break
+        for row in part:
+            if isinstance(row,dict) and row.get("symbol"):
+                sym=str(row["symbol"]).strip().upper()
+                if sym and sym not in seen:
+                    seen.add(sym); all_symbols.append(sym)
+        if len(part)<5000: break
+        page += 1
+        if page>10000: break
+    print(f"[US] OPEN catalog total={len(all_symbols)} | price floor during analysis >= ${MIN_US_PRICE:.2f}")
+    return all_symbols
 
 def load_crypto():
-    x=symbols_td(td("/cryptocurrencies",{}))
-    # SiftingIO uses canonical USD crypto symbols (BTCUSD, ETHUSD...).
-    x=[z.upper() for z in x if z.upper().endswith("USD") and "/" not in z]
-    return x if x else ["BTCUSD","ETHUSD","SOLUSD","XRPUSD","DOGEUSD"]
+    # OPEN CRYPTO UNIVERSE: paginate the entire provider catalog and do not
+    # restrict to USD pairs. Symbols are normalized only for the analysis API.
+    out=[]; seen=set(); page=1
+    while True:
+        data=td("/cryptocurrencies",{"page":page,"outputsize":5000})
+        rows=data.get("data",[]) if isinstance(data,dict) else []
+        if not isinstance(rows,list) or not rows: break
+        for row in rows:
+            if not isinstance(row,dict) or not row.get("symbol"): continue
+            sym=str(row["symbol"]).strip().upper().replace("/","")
+            if sym and sym not in seen:
+                seen.add(sym); out.append(sym)
+        print(f"[CRYPTO] page={page} total={len(out)}")
+        if len(rows)<5000: break
+        page += 1
+        if page>10000: break
+    print(f"[CRYPTO] OPEN catalog total={len(out)}")
+    return out
 
 def get_symbols(market,loader):
     now=time.time()
@@ -512,7 +576,8 @@ def analyze_candles(symbol,market,c,name,tf,current_price=None):
     x=[z["close"] for z in c];h=[z["high"] for z in c];l=[z["low"] for z in c];v=[z["volume"] for z in c]
     bar_price=x[-1]
     price=current_price if current_price is not None and current_price>0 else bar_price
-    if market=="US" and price<MIN_US_PRICE:return None
+    if market=="US" and price < MIN_US_PRICE:
+        return None
     if bar_price>0 and abs(price-bar_price)/bar_price>0.35:
         # حماية من خلط سعر حي بسلسلة تاريخية مختلفة بعد split/corporate action.
         return None
@@ -558,6 +623,8 @@ def analyze(symbol,market):
     else:
         asset="stocks" if market=="US" else "crypto"
         live=current_price_sf(asset,symbol)
+        if live is None:
+            live=current_price_td(symbol)
     split=split_for_symbol(symbol) if market in ("TASI","US") else None
     tf_list=("15min",) if market=="TASI" else TIMEFRAMES
     for tf in tf_list:
@@ -750,7 +817,7 @@ def tg_worker():
 
 def scan(symbols,market,token):
     total=len(symbols);done=signals=0
-    print(f"[{market}] 🎯 شرط السعر الأمريكي: >= ${MIN_US_PRICE:.2f} | لا يوجد حد عددي للرموز")
+    print(f"[{market}] 🌐 OPEN UNIVERSE | لا يوجد حد عددي أو ترتيب A-Z | الأمريكي: ${MIN_US_PRICE:.2f} فأعلى")
     print(f"[{market}] 🧠 بدء الفحص: {total} رمز | Workers={MAX_WORKERS}")
     batch_size=MAX_WORKERS*8
     for start in range(0,total,batch_size):
