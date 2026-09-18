@@ -28,8 +28,8 @@ MIN_US_PRICE = 0.20
 US_MAX_SYMBOLS = 13375
 TASI_MAX_SYMBOLS = 375
 OUTPUTSIZE = 220
-TIMEFRAMES = ("3min", "5min", "15min", "30min", "1h", "4h")
-SF_TF = {"3min":"5m", "5min":"5m", "15min":"15m", "30min":"30m", "1h":"1h", "4h":"1h"}
+TIMEFRAMES = ("5min", "15min", "30min", "1h", "4h")
+SF_TF = {"5min":"5m", "15min":"15m", "30min":"30m", "1h":"1h", "4h":"1h"}
 ATR_MULT = [1, 1.5, 2, 2.5, 3, 3.5, 4, 5]
 MIN_SCORE = 70
 
@@ -88,7 +88,8 @@ def api_get(base, path, key, params, local_obj, lock, holder, gap):
                 time.sleep(delay); continue
             if r.status_code in (500,502,503,504):
                 time.sleep(min(10,2**attempt)); continue
-            if r.status_code != 200: return None
+            if r.status_code != 200:
+                return None
             data = r.json()
             if isinstance(data,dict) and str(data.get("status","")).lower()=="error": return None
             return data
@@ -197,28 +198,50 @@ def td_candles(data):
     return (out if len(out)>=60 else None),str((data.get("meta") or {}).get("name") or "")
 
 def sf_candles(data):
-    if not isinstance(data,dict):return None,""
+    if not isinstance(data,dict):
+        return None,""
+    rows=data.get("data",[])
+    if isinstance(rows,dict):
+        rows=rows.get("data",[]) if isinstance(rows.get("data",[]),list) else list(rows.values())
+    if not isinstance(rows,list):
+        return None,""
+    meta=data.get("meta") if isinstance(data.get("meta"),dict) else {}
+    name=str(meta.get("symbol") or "")
     out=[]
-    for x in data.get("data",[]):
-        try:out.append({"datetime":x["t"],"open":float(x["o"]),"high":float(x["h"]),
+    for x in rows:
+        if not isinstance(x,dict):
+            continue
+        try:
+            ts=x.get("t")
+            if ts is None:
+                continue
+            out.append({"datetime":int(float(ts)),"open":float(x["o"]),"high":float(x["h"]),
                         "low":float(x["l"]),"close":float(x["c"]),
                         "volume":float(x.get("v",0) or 0)})
-        except Exception:pass
+        except (TypeError,ValueError,KeyError):
+            continue
     out.sort(key=lambda z:z["datetime"])
-    return (out[-OUTPUTSIZE:] if len(out)>=60 else None),""
+    return (out[-OUTPUTSIZE:] if len(out)>=60 else None),name
 
 def get_tasi(symbol,tf):
     return td_candles(td("/time_series",{"symbol":symbol,"interval":tf,"outputsize":OUTPUTSIZE,"format":"JSON"}))
 
 def get_sf(asset,symbol,tf):
     native=SF_TF[tf]
-    # SiftingIO historical bars require a start date and gzip negotiation.
+    # SiftingIO historical bars require gzip and currently allow up to 2000 rows/page.
+    # Keep the requested window below that ceiling while still providing enough bars
+    # for RSI/ATR/hidden-divergence calculations.
     from datetime import timedelta
-    days = 45 if native in ("5m","15m","30m","1h") else 120
+    days_by_tf = {"5m": 6, "15m": 15, "30m": 30, "1h": 60}
+    days = days_by_tf.get(native, 120)
     start_date = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
-    params={"interval":native,"start":start_date,"limit":5000}
-    c,n=sf(f"/hist/{asset}/{symbol}/bars",params)
-    if not c:return None,n
+    params={"interval":native,"start":start_date,"limit":2000}
+    raw=sf(f"/hist/{asset}/{symbol}/bars",params)
+    if not raw:
+        return None,""
+    c,n=sf_candles(raw)
+    if not c:
+        return None,n
     if tf=="4h":
         out=[];bucket=None;cur=None
         for z in c:
@@ -248,7 +271,20 @@ def symbols_td(data):
     rows=data.get("data",[]) if isinstance(data,dict) else data if isinstance(data,list) else []
     return sorted({str(x["symbol"]).strip() for x in rows if isinstance(x,dict) and x.get("symbol")},key=str.upper)
 
-def load_tasi(): return symbols_td(td("/stocks",{"exchange":"TADAWUL"}))[:TASI_MAX_SYMBOLS]
+def load_tasi():
+    # Twelve Data identifies Saudi Exchange by MIC XSAU (not TADAWUL).
+    data=td("/stocks",{"exchange":"XSAU"})
+    rows=data.get("data",[]) if isinstance(data,dict) else []
+    syms=sorted({str(x.get("symbol")).strip() for x in rows if isinstance(x,dict) and x.get("symbol")},key=str.upper)
+    if len(syms)<TASI_MAX_SYMBOLS:
+        # Fallback: retrieve Saudi symbols by country and keep only XSAU/Tadawul rows.
+        data=td("/stocks",{"country":"Saudi Arabia"})
+        rows=data.get("data",[]) if isinstance(data,dict) else []
+        syms=sorted({str(x.get("symbol")).strip() for x in rows
+                     if isinstance(x,dict) and x.get("symbol") and
+                     (str(x.get("exchange","")).upper() in ("XSAU","TADAWUL") or
+                      str(x.get("mic_code","")).upper()=="XSAU")},key=str.upper)
+    return syms[:TASI_MAX_SYMBOLS]
 def load_us():
     x=symbols_td(td("/stocks",{"country":"United States"}))
     return x[:US_MAX_SYMBOLS] if x else ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AVGO","AMD","NFLX"]
