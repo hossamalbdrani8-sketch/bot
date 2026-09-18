@@ -31,7 +31,7 @@ OUTPUTSIZE = 220
 TIMEFRAMES = ("5min", "15min", "30min", "1h", "4h")
 SF_TF = {"5min":"5m", "15min":"15m", "30min":"30m", "1h":"1h", "4h":"1h"}
 ATR_MULT = [1, 1.5, 2, 2.5, 3, 3.5, 4, 5]
-MIN_SCORE = 70
+MIN_SCORE = 60
 
 POSITIVE = ("beat","beats","growth","profit","profits","upgrade","upgraded","buy",
             "strong","positive","partnership","contract","approval","revenue","surge","record")
@@ -290,6 +290,8 @@ def load_us():
     return x[:US_MAX_SYMBOLS] if x else ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AVGO","AMD","NFLX"]
 def load_crypto():
     x=symbols_td(td("/cryptocurrencies",{}))
+    # SiftingIO uses canonical USD crypto symbols (BTCUSD, ETHUSD...).
+    x=[z.upper() for z in x if z.upper().endswith("USD") and "/" not in z]
     return x if x else ["BTCUSD","ETHUSD","SOLUSD","XRPUSD","DOGEUSD"]
 
 def get_symbols(market,loader):
@@ -409,8 +411,16 @@ def analyze_candles(symbol,market,c,name,tf,current_price=None):
     score+=20 if rv and rv>50 else 0
     score+=15 if vw and price>vw else 0
     score+=15 if vol_ratio(v)>=1.10 else 0
-    buy=g or hb or (e10 and e25 and rv and vw and e10>e25 and rv>50 and price>vw)
-    sell=hs or (e10 and e25 and rv and vw and e10<e25 and rv<50 and price<vw)
+    # Signal logic is intentionally more tolerant so TASI and crypto can emit alerts
+    # even when VWAP/volume is missing or a market has thinner intraday history.
+    above_vwap = (vw is not None and price > vw)
+    below_vwap = (vw is not None and price < vw)
+    buy_core = bool(e10 and e25 and rv and e10>e25 and rv>50 and (vw is None or above_vwap))
+    sell_core = bool(e10 and e25 and rv and e10<e25 and rv<50 and (vw is None or below_vwap))
+    buy_confirm = bool(e50 and rv and price>e50 and rv>=55 and (vw is None or above_vwap))
+    sell_confirm = bool(e50 and rv and price<e50 and rv<=45 and (vw is None or below_vwap))
+    buy=g or hb or buy_core or buy_confirm
+    sell=hs or sell_core or sell_confirm
     if buy and score>=MIN_SCORE: sig="BUY";txt="🟢 شراء قوي";strength=score
     elif sell and 100-score>=MIN_SCORE: sig="SELL";txt="🔴 بيع قوي";strength=100-score
     else:return None
@@ -471,9 +481,9 @@ def fmt(x):
 def message(r):
     """Telegram alert layout — organized to match the approved visual mockup."""
     market_labels = {
-        "TASI": "🇸🇦 <b>السوق السعودي TASI</b>",
+        "TASI": "🇸🇦 <b>تاسي</b>",
         "US": "🇺🇸 <b>السوق الأمريكي US</b>",
-        "CRYPTO": "🪙 <b>سوق العملات الرقمية</b>",
+        "CRYPTO": "🪙 <b>العملات الرقمية</b>",
     }
     market = market_labels.get(r["market"], f"🌐 <b>{r['market']}</b>")
 
@@ -646,7 +656,7 @@ def heartbeat():
 def main():
     print("="*70)
     print("💀🚀 AI PRO MAX — FINAL HYBRID")
-    print("🇸🇦 TASI -> Twelve Data | 🇺🇸 US -> SiftingIO | 🪙 Crypto -> SiftingIO")
+    print("🇸🇦 تاسي -> Twelve Data | 🇺🇸 US -> SiftingIO | 🪙 Crypto -> SiftingIO")
     print("="*70)
     required=("CHAT_ID","TASI_TOKEN","US_TOKEN","CRYPTO_TOKEN","TWELVEDATA_API_KEY","SIFTING_API_KEY")
     missing=[x for x in required if not os.getenv(x)]
