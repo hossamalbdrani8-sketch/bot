@@ -2,7 +2,7 @@
 # TASI -> Twelve Data | US + Crypto -> SiftingIO
 # Railway: use environment variables, never hard-code secrets.
 
-import os, time, json, queue, threading, datetime as dt
+import os, time, json, queue, threading
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock, local
@@ -25,7 +25,8 @@ MAX_RETRIES = 3
 SCAN_INTERVAL = 120
 CACHE_TTL = 21600
 MIN_US_PRICE = 0.20
-US_MAX_SYMBOLS = 13402
+US_MAX_SYMBOLS = 13375
+TASI_MAX_SYMBOLS = 375
 OUTPUTSIZE = 220
 TIMEFRAMES = ("3min", "5min", "15min", "30min", "1h", "4h")
 SF_TF = {"3min":"5m", "5min":"5m", "15min":"15m", "30min":"30m", "1h":"1h", "4h":"1h"}
@@ -44,7 +45,6 @@ sf_last = [0.0]
 state_lock = Lock()
 last_signal = {}
 trend_state = {}
-SIGNAL_COOLDOWN = 900
 cache_lock = Lock()
 symbol_cache = {
     "TASI":{"symbols":[],"updated":0},
@@ -57,7 +57,7 @@ def session_for(obj):
     s = getattr(obj, "session", None)
     if s is None:
         s = requests.Session()
-        s.headers.update({"User-Agent":"AI-PRO-MAX/Final"})
+        s.headers.update({"User-Agent":"AI-PRO-MAX/Final","Accept-Encoding":"gzip"})
         a = requests.adapters.HTTPAdapter(pool_connections=6, pool_maxsize=6, max_retries=0)
         s.mount("https://", a)
         s.mount("http://", a)
@@ -104,20 +104,6 @@ def td(path, params=None):
 
 def sf(path, params=None):
     return api_get(SF_BASE,path,SIFTING_API_KEY,params,sf_local,sf_lock,sf_last,SF_GAP)
-
-def current_price(symbol, market):
-    """Return the latest available trade/price, used only after a signal candidate."""
-    try:
-        if market == "US":
-            d = sf(f"/last/trade/stocks/{symbol}") or {}
-            return float(d.get("p")) if d.get("p") is not None else None
-        if market == "CRYPTO":
-            d = sf(f"/last/trade/crypto/{symbol}") or {}
-            return float(d.get("p")) if d.get("p") is not None else None
-        d = td("/price", {"symbol": symbol, "exchange": "XSAU"}) or {}
-        return float(d.get("price")) if d.get("price") is not None else None
-    except Exception:
-        return None
 
 # ---------- indicators ----------
 
@@ -226,10 +212,12 @@ def get_tasi(symbol,tf):
 
 def get_sf(asset,symbol,tf):
     native=SF_TF[tf]
-    # SiftingIO historical bars require a start date. One month is enough
-    # for the warm-up periods used by this scanner and fits the free history window.
-    start=(dt.datetime.now(dt.timezone.utc)-dt.timedelta(days=31)).date().isoformat()
-    c,n=sf_candles(sf(f"/hist/{asset}/{symbol}/bars",{"start":start,"interval":native,"limit":2000}))
+    # SiftingIO historical bars require a start date and gzip negotiation.
+    from datetime import timedelta
+    days = 45 if native in ("5m","15m","30m","1h") else 120
+    start_date = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+    params={"interval":native,"start":start_date,"limit":5000}
+    c,n=sf(f"/hist/{asset}/{symbol}/bars",params)
     if not c:return None,n
     if tf=="4h":
         out=[];bucket=None;cur=None
@@ -245,32 +233,27 @@ def get_sf(asset,symbol,tf):
         c=out
     return c[-OUTPUTSIZE:],n
 
+def current_price_tasi(symbol):
+    d=td("/price",{"symbol":symbol})
+    try:return float(d["price"]) if isinstance(d,dict) and d.get("price") is not None else None
+    except Exception:return None
+
+def current_price_sf(asset,symbol):
+    d=sf(f"/last/trade/{asset}/{symbol}")
+    try:return float(d["p"]) if isinstance(d,dict) and d.get("p") is not None else None
+    except Exception:return None
+
+
 def symbols_td(data):
     rows=data.get("data",[]) if isinstance(data,dict) else data if isinstance(data,list) else []
     return sorted({str(x["symbol"]).strip() for x in rows if isinstance(x,dict) and x.get("symbol")},key=str.upper)
 
-def load_tasi():
-    # Twelve Data identifies the Saudi Exchange as XSAU.
-    x = symbols_td(td("/stocks", {"exchange":"XSAU"}))
-    return x[:375]
-
+def load_tasi(): return symbols_td(td("/stocks",{"exchange":"TADAWUL"}))[:TASI_MAX_SYMBOLS]
 def load_us():
-    x = symbols_td(td("/stocks", {"country":"United States"}))
+    x=symbols_td(td("/stocks",{"country":"United States"}))
     return x[:US_MAX_SYMBOLS] if x else ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AVGO","AMD","NFLX"]
-
-def normalize_crypto_symbol(symbol):
-    s = str(symbol or "").upper().strip()
-    s = s.replace("/", "").replace("-", "")
-    # SiftingIO uses canonical concatenated USD pairs such as BTCUSD.
-    if s and not s.endswith("USD") and not s.endswith("USDT") and not s.endswith("USDC"):
-        s += "USD"
-    return s
-
 def load_crypto():
-    # Build the candidate catalog from Twelve Data, then normalize it to
-    # SiftingIO's canonical form (BTCUSD, ETHUSD, ...).
-    x = symbols_td(td("/cryptocurrencies", {}))
-    x = sorted({normalize_crypto_symbol(v) for v in x if normalize_crypto_symbol(v)})
+    x=symbols_td(td("/cryptocurrencies",{}))
     return x if x else ["BTCUSD","ETHUSD","SOLUSD","XRPUSD","DOGEUSD"]
 
 def get_symbols(market,loader):
@@ -282,6 +265,65 @@ def get_symbols(market,loader):
     if x:
         with cache_lock:symbol_cache[market]={"symbols":list(x),"updated":now}
     return x
+
+# ---------- corporate actions / ownership ----------
+SPLIT_CACHE={"rows":[],"updated":0}
+OWNERSHIP_CACHE={}
+SPLIT_SENT=set()
+SPLIT_TTL=21600
+OWNERSHIP_TTL=86400
+
+def refresh_split_calendar():
+    now=time.time()
+    if now-SPLIT_CACHE["updated"]<SPLIT_TTL:
+        return SPLIT_CACHE["rows"]
+    today=datetime.utcnow().strftime("%Y-%m-%d")
+    end=(datetime.utcnow()+__import__('datetime').timedelta(days=7)).strftime("%Y-%m-%d")
+    d=td("/splits_calendar",{"start_date":today,"end_date":end,"outputsize":500})
+    rows=d if isinstance(d,list) else d.get("data",[]) if isinstance(d,dict) else []
+    SPLIT_CACHE.update({"rows":rows,"updated":now})
+    return rows
+
+def split_for_symbol(symbol):
+    for row in refresh_split_calendar():
+        if str(row.get("symbol","")).upper()==symbol.upper():
+            return row
+    return None
+
+def institutional_activity(symbol):
+    now=time.time(); old=OWNERSHIP_CACHE.get(symbol)
+    if old and now-old[0]<OWNERSHIP_TTL:
+        return old[1]
+    d=sf(f"/fnd/stocks/{symbol}/ownership",{"limit":25})
+    rows=d.get("data",[]) if isinstance(d,dict) else []
+    # 13D/13G is beneficial ownership, not live trading.
+    info="⚪ لا توجد حركة مؤسسية جديدة موثقة"
+    if rows:
+        latest=rows[0]
+        form=str(latest.get("form","")).upper()
+        filed=latest.get("filed_at") or latest.get("filing_date") or ""
+        info=f"🏦 آخر إفصاح ملكية: {form} {filed}".strip()
+    OWNERSHIP_CACHE[symbol]=(now,info)
+    return info
+
+def send_split_alerts(symbols,market,token):
+    if market not in ("TASI","US"): return 0
+    symbol_set={x.upper() for x in symbols}
+    sent=0
+    for row in refresh_split_calendar():
+        sym=str(row.get("symbol","")).upper()
+        if not sym or sym not in symbol_set: continue
+        date=str(row.get("date","") or "")
+        key=f"{market}:{sym}:{date}:{row.get('description','')}"
+        if key in SPLIT_SENT: continue
+        text=("⚠️ <b>تنبيه تقسيم السهم</b>\n\n"
+              f"🌐 {market}\n📌 <b>{sym}</b>\n"
+              f"🔄 {row.get('description','Split')}\n"
+              f"📅 التاريخ: {date}\n"
+              "ℹ️ تم فصل حدث التقسيم عن الإشارة الفنية حتى لا يختلط أثره السعري بالمؤشرات.")
+        if tg(token,text):
+            SPLIT_SENT.add(key); sent+=1
+    return sent
 
 # ---------- news ----------
 
@@ -297,11 +339,31 @@ def news(symbol):
 
 # ---------- analysis ----------
 
-def analyze_candles(symbol,market,c,name,tf):
+def flow_events(c):
+    if len(c)<25:
+        return {"breakout":False,"funds":False,"makers":False,"speculators":False,"accumulation":False,"unusual":False}
+    last=c[-1]; prev=c[-21:-1]
+    resistance=max(z["high"] for z in prev); support=min(z["low"] for z in prev)
+    avg_vol=sum(z["volume"] for z in prev)/20 if prev else 0
+    vr=(last["volume"]/avg_vol) if avg_vol>0 else 1.0
+    rng=max(last["high"]-last["low"],0); body=abs(last["close"]-last["open"])
+    breakout=last["close"]>resistance or last["close"]<support
+    unusual=vr>=2.0 or (avg_vol>0 and rng>0 and body/rng>=0.75 and vr>=1.5)
+    accumulation=vr>=1.5 and last["close"]>=last["open"] and last["close"]>sum(z["close"] for z in prev[-5:])/5
+    speculators=vr>=2.5 and abs(last["close"]-last["open"])/(last["open"] or 1)>=0.01
+    makers=vr>=3.0 and body/rng>=0.65 if rng>0 else False
+    funds=vr>=2.0 and last["close"]>=last["open"] and last["close"]>=sum(z["close"] for z in prev[-10:])/10
+    return {"breakout":breakout,"funds":funds,"makers":makers,"speculators":speculators,"accumulation":accumulation,"unusual":unusual}
+
+def analyze_candles(symbol,market,c,name,tf,current_price=None):
     if not c:return None
     x=[z["close"] for z in c];h=[z["high"] for z in c];l=[z["low"] for z in c];v=[z["volume"] for z in c]
-    price=x[-1]
+    bar_price=x[-1]
+    price=current_price if current_price is not None and current_price>0 else bar_price
     if market=="US" and price<MIN_US_PRICE:return None
+    if bar_price>0 and abs(price-bar_price)/bar_price>0.35:
+        # حماية من خلط سعر حي بسلسلة تاريخية مختلفة بعد split/corporate action.
+        return None
     e10,e14,e15,e25,e50=[ema(x,n) for n in (10,14,15,25,50)]
     rv=rsi(x);a=atr(h,l,x);vw=vwap(h,l,x,v);hb,hs=hidden_div(c);g=golden(c)
     score=0
@@ -320,28 +382,28 @@ def analyze_candles(symbol,market,c,name,tf):
     with state_lock:
         if tr!="NEUTRAL":trend_state[f"{market}:{symbol}"]=tr
         tr=trend_state.get(f"{market}:{symbol}",tr)
-    return {"market":market,"symbol":symbol,"name":name or symbol,"price":price,"bar_price":price,"signal":sig,
+    return {"market":market,"symbol":symbol,"name":name or symbol,"price":price,"signal":sig,
             "signal_text":txt,"score":strength,"timeframe":tf,"trend":tr,"ema10":e10,
             "ema14":e14,"ema15":e15,"ema25":e25,"ema50":e50,"rsi":rv,"atr":a,"vwap":vw,
             "support":min(z["low"] for z in c[-50:]),"resistance":max(z["high"] for z in c[-50:]),
-            "volume_ratio":vol_ratio(v),"ars":ars(c),"golden":g,"targets":targets(price,a,sig=="BUY"),
+            "volume_ratio":vol_ratio(v),"ars":ars(c),"golden":g,"flow":flow_events(c),"targets":targets(price,a,sig=="BUY"),
             "news":"⚪ غير متاح"}
 
 def analyze(symbol,market):
+    if market=="TASI":
+        live=current_price_tasi(symbol)
+        asset=None
+    else:
+        asset="stocks" if market=="US" else "crypto"
+        live=current_price_sf(asset,symbol)
+    split=split_for_symbol(symbol) if market in ("TASI","US") else None
     for tf in TIMEFRAMES:
-        c,n=get_tasi(symbol,tf) if market=="TASI" else get_sf("stocks" if market=="US" else "crypto",symbol,tf)
-        r=analyze_candles(symbol,market,c,n,tf)
+        c,n=get_tasi(symbol,tf) if market=="TASI" else get_sf(asset,symbol,tf)
+        r=analyze_candles(symbol,market,c,n,tf,live)
         if r:
-            live = current_price(symbol, market)
-            if live is not None and live > 0:
-                bar = r["bar_price"]
-                # Prevent a stale/wrong price series from producing a Telegram alert.
-                if bar > 0 and abs(live-bar)/bar > 0.25:
-                    print(f"[{market}] ⚠️ price mismatch {symbol}: bar={bar:.6f} live={live:.6f}")
-                    continue
-                r["price"] = live
-                r["targets"] = targets(live, r["atr"], r["signal"] == "BUY")
-            if market=="US":r["news"]=news(symbol)
+            r["split"]=split
+            r["institutional"] = ""
+            r["news"] = "⚪ محايد"
             return r
     return None
 
@@ -362,43 +424,141 @@ def fmt(x):
     if abs(x)>=1e9:return f"{x/1e9:.2f}B"
     if abs(x)>=1e6:return f"{x/1e6:.2f}M"
     if abs(x)>=1e3:return f"{x/1e3:.2f}K"
-    return f"{x:.4f}"
+    ax=abs(x)
+    if ax>=100:return f"{x:.2f}"
+    if ax>=1:return f"{x:.4f}"
+    if ax>=0.01:return f"{x:.6f}"
+    if ax>=0.0001:return f"{x:.8f}"
+    if ax>=0.000001:return f"{x:.10f}"
+    return f"{x:.12f}"
 
 def message(r):
-    tr="🟢 استمرار صاعد" if r["trend"]=="UP" else "🔴 استمرار هابط" if r["trend"]=="DOWN" else "⚪ محايد"
-    s=["💀🚀 <b>AI PRO MAX</b>","",f"🌐 <b>{r['market']}</b>",
-       f"📌 <b>{r['symbol']}</b>",
-       f"🎯 <b>{r['signal_text']}</b> | القوة: <b>{r['score']}/100</b>",
-       f"⏱️ الإطار: <b>{r['timeframe']}</b>","",
-       f"💰 السعر: <b>{fmt(r['price'])}</b>",f"🧠 RSI 14: <b>{fmt(r['rsi'])}</b>",
-       f"📊 VWAP: <b>{fmt(r['vwap'])}</b>",f"📐 ATR 14: <b>{fmt(r['atr'])}</b>",
-       f"📦 الحجم: <b>{r['volume_ratio']:.2f}x</b>","",
-       f"EMA10: <b>{fmt(r['ema10'])}</b> | EMA14: <b>{fmt(r['ema14'])}</b>",
-       f"EMA15: <b>{fmt(r['ema15'])}</b> | EMA25: <b>{fmt(r['ema25'])}</b>",
-       f"EMA50: <b>{fmt(r['ema50'])}</b>","",
-       f"🛡️ الدعم: <b>{fmt(r['support'])}</b>",f"🚧 المقاومة: <b>{fmt(r['resistance'])}</b>",
-       f"📈 الاتجاه: <b>{tr}</b>",f"🧮 ARS: <b>{r['ars']}</b>",
-       f"🟡 Golden Candle: <b>{'نعم' if r['golden'] else 'لا'}</b>"]
-    if r["market"]=="US":s.append(f"📰 الأخبار: <b>{r['news']}</b>")
-    if r["targets"]:
-        s+=["","🎯 <b>8 أهداف ATR</b>"]
-        for i,t in enumerate(r["targets"],1):
-            ch=(t-r["price"])/r["price"]*100 if r["price"] else 0
-            s.append(f"TP{i}: <b>{fmt(t)}</b> ({ch:+.2f}%)")
-    s+=["", "🔄 الاتجاه يستمر حتى ظهور انعكاس مؤكد",
-        f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"]
+    """Telegram alert layout — organized to match the approved visual mockup."""
+    market_labels = {
+        "TASI": "🇸🇦 <b>السوق السعودي TASI</b>",
+        "US": "🇺🇸 <b>السوق الأمريكي US</b>",
+        "CRYPTO": "🪙 <b>سوق العملات الرقمية</b>",
+    }
+    market = market_labels.get(r["market"], f"🌐 <b>{r['market']}</b>")
+
+    if r["signal"] == "BUY":
+        signal_badge = "🟢 <b>شراء قوي</b>"
+    elif r["signal"] == "SELL":
+        signal_badge = "🔴 <b>بيع قوي</b>"
+    else:
+        signal_badge = "⚪ <b>انتظار</b>"
+
+    if r["trend"] == "UP":
+        trend_text = "🟢 اتجاه صاعد ↗️"
+    elif r["trend"] == "DOWN":
+        trend_text = "🔴 اتجاه هابط ↘️"
+    else:
+        trend_text = "⚪ اتجاه محايد"
+
+    # Momentum is descriptive only; it is derived from the existing score/volume/RSI data.
+    if r["score"] >= 80:
+        momentum = "قوي"
+    elif r["score"] >= 60:
+        momentum = "جيد"
+    else:
+        momentum = "ضعيف"
+
+    vwap_state = "🟢 فوق VWAP" if r.get("vwap") is not None and r["price"] > r["vwap"] else \
+                 "🔴 تحت VWAP" if r.get("vwap") is not None else "⚪ غير متاح"
+
+    s = [
+        "💀🚀 <b>AI PRO MAX</b>",
+        f"🌐 {market}",
+        "",
+        f"📌 <b>{r['symbol']}</b>",
+        f"{signal_badge}    <b>{r['score']}/100</b>",
+        f"⏱️ الإطار: <b>{r['timeframe']}</b>",
+        "",
+        f"💰 السعر الحالي: <b>{fmt(r['price'])}</b>",
+        f"📊 الزخم: <b>{momentum}</b>",
+        f"📈 الاتجاه: <b>{trend_text}</b>",
+        f"🧠 RSI 14: <b>{fmt(r['rsi'])}</b>",
+        f"📊 VWAP: <b>{fmt(r['vwap'])}</b>  {vwap_state}",
+        f"📐 ATR 14: <b>{fmt(r['atr'])}</b>",
+        f"📦 الحجم: <b>{r['volume_ratio']:.2f}x</b>",
+        "",
+        "📐 <b>المتوسطات EMA</b>",
+        f"EMA10: <b>{fmt(r['ema10'])}</b>   |   EMA14: <b>{fmt(r['ema14'])}</b>",
+        f"EMA15: <b>{fmt(r['ema15'])}</b>   |   EMA25: <b>{fmt(r['ema25'])}</b>",
+        f"EMA50: <b>{fmt(r['ema50'])}</b>",
+        "",
+        "🛡️ <b>الدعم والمقاومة</b>",
+        f"🛡️ الدعم: <b>{fmt(r['support'])}</b>",
+        f"🚧 المقاومة: <b>{fmt(r['resistance'])}</b>",
+        "",
+        f"🧮 <b>ARS: {r['ars']}</b>",
+        f"🟡 Golden Candle: <b>{'نعم' if r['golden'] else 'لا'}</b>",
+    ]
+
+    f = r.get("flow", {})
+    flow_lines = []
+    if f.get("breakout"):
+        flow_lines.append("📈 الاختراقات: <b>تم رصد اختراق</b>")
+    if f.get("funds"):
+        flow_lines.append("🏦 تحركات الصناديق: <b>نشاط محتمل من الحجم</b>")
+    if f.get("makers"):
+        flow_lines.append("🐋 صنّاع السهم: <b>حركة كبيرة محتملة</b> <i>(Proxy)</i>")
+    if f.get("speculators"):
+        flow_lines.append("⚡ حركة المضاربين: <b>قوية</b>")
+    if f.get("accumulation"):
+        flow_lines.append("💰 عمليات التجميع: <b>محتملة</b>")
+    if f.get("unusual"):
+        flow_lines.append("🔎 تحركات غير اعتيادية: <b>تم رصدها</b>")
+
+    if flow_lines:
+        s += ["", "🐋 <b>تحليل الحركة</b>"] + flow_lines
+
+    if r.get("institutional"):
+        s += ["", r["institutional"]]
+
+    if r["market"] == "US":
+        s += ["", f"📰 <b>آخر الأخبار:</b> {r['news']}"]
+
+    if r.get("split"):
+        sp = r["split"]
+        s += [
+            "",
+            "⚠️ <b>تنبيه تقسيم السهم</b>",
+            f"🔄 {sp.get('description', 'Split')}",
+            f"📅 {sp.get('date', '-')}",
+        ]
+
+    if r.get("targets"):
+        s += ["", "🎯 <b>أهداف ATR (8)</b>"]
+        for i, t in enumerate(r["targets"], 1):
+            ch = (t - r["price"]) / r["price"] * 100 if r["price"] else 0
+            s.append(f"TP{i}: <b>{fmt(t)}</b>   ({ch:+.2f}%)")
+
+    s += [
+        "",
+        "🔄 <b>استمرار الاتجاه</b>: حتى ظهور انعكاس مؤكد",
+        f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+        "⚠️ <i>إشارة تحليلية آلية وليست توصية استثمارية.</i>",
+    ]
     return "\n".join(s)
 
 def should_send(r):
-    k=f"{r['market']}:{r['symbol']}"
-    now=time.time()
-    st=(r["signal"],r["trend"],r["timeframe"])
+    k=f"{r['market']}:{r['symbol']}";st=(r["signal"],r["trend"])
     with state_lock:
-        prev=last_signal.get(k)
-        if prev and prev["state"]==st and now-prev["time"] < SIGNAL_COOLDOWN:
-            return False
-        last_signal[k]={"state":st,"time":now}
+        if last_signal.get(k)==st:return False
+        last_signal[k]=st
     return True
+
+def enrich_alert(r):
+    if r["market"]=="US":
+        r["news"]=news(r["symbol"])
+        r["institutional"]=institutional_activity(r["symbol"])
+    elif r["market"]=="TASI":
+        r["institutional"]="⚪ تتبع الصناديق: غير متاح من مزود البيانات الحالي"
+    else:
+        r["institutional"]="⚪ تتبع الصناديق: غير منطبق على السوق الفوري للعملات الرقمية"
+    return r
 
 def tg_worker():
     while True:
@@ -424,6 +584,7 @@ def scan(symbols,market,token):
                 try:
                     r=job.result()
                     if r and should_send(r):
+                        r=enrich_alert(r)
                         TG_QUEUE.put_nowait((token,r));signals+=1
                 except queue.Full:pass
                 except Exception as e:print(f"[{market}] analysis error: {e}")
@@ -435,7 +596,9 @@ def market_loop(market,token,loader):
         try:
             symbols=get_symbols(market,loader)
             print(f"💀 {market}: {len(symbols)} رمز")
-            if symbols:scan(symbols,market,token)
+            if symbols:
+                send_split_alerts(symbols,market,token)
+                scan(symbols,market,token)
         except Exception as e:print(f"[{market}] loop error: {e}")
         time.sleep(SCAN_INTERVAL)
 
