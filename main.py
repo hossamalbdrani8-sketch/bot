@@ -2,7 +2,7 @@
 # TASI -> Twelve Data | US + Crypto -> SiftingIO
 # Railway: use environment variables, never hard-code secrets.
 
-import os, time, json, queue, threading
+import os, time, json, queue, threading, random
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -402,54 +402,58 @@ def load_tasi():
             if isinstance(x,dict) and x.get("symbol"):
                 sym=str(x["symbol"]).strip().upper()
                 if sym not in seen: seen.add(sym); syms.append(sym)
+    random.shuffle(syms)
+    print(f"[TASI] FULL OPEN catalog total={len(syms)} | randomized scan order")
     return syms
 
 def load_us():
-    # OPEN US UNIVERSE:
-    # No A-Z priority, no 13,375 cap, no market-cap filter, no price filter here.
-    # The only price floor is enforced during analysis: $0.15 and above.
-    # Pull all supported US instrument types from the provider catalog.
-    types = [
-        "American Depositary Receipt", "Bond", "Bond Fund", "Closed-end Fund",
-        "Common Stock", "Depositary Receipt", "ETF", "Exchange-Traded Note",
-        "Global Depositary Receipt", "Limited Partnership", "Mutual Fund",
-        "Preferred Stock", "REIT", "Right", "Structured Product", "Trust",
-        "Unit", "Warrant"
-    ]
-    all_symbols=[]; seen=set()
-    for typ in types:
-        rows=[]; page=1
-        while True:
-            data=td("/stocks",{"country":"United States","type":typ,"page":page,"outputsize":5000})
-            part=data.get("data",[]) if isinstance(data,dict) else []
-            if not isinstance(part,list) or not part: break
-            rows.extend(part)
-            if len(part)<5000: break
-            page += 1
-            if page>10000: break
-        for row in rows:
-            if not isinstance(row,dict): continue
+    # FULL US UNIVERSE: ask the provider for ALL US instruments in its catalog.
+    # Do not restrict by type and do not take the first N symbols.
+    # The dedicated ETF catalog is merged as a second safety net.
+    all_symbols=[]; seen=set(); page=1
+    while True:
+        data=td("/stocks",{"country":"United States","page":page,"outputsize":5000})
+        part=data.get("data",[]) if isinstance(data,dict) else []
+        if not isinstance(part,list) or not part:
+            break
+        added=0
+        for row in part:
+            if not isinstance(row,dict):
+                continue
             sym=str(row.get("symbol","")).strip().upper()
             if sym and sym not in seen:
-                seen.add(sym); all_symbols.append(sym)
-        print(f"[US] type={typ} total={len(all_symbols)}")
+                seen.add(sym); all_symbols.append(sym); added += 1
+        print(f"[US] stocks page={page} +{added} total={len(all_symbols)}")
+        if len(part)<5000:
+            break
+        page += 1
+        if page>10000:
+            break
 
-    # ETFs have a dedicated catalog as well; merge it so ETFs are never lost
-    # because the generic stocks catalog happens to omit them.
+    # Dedicated ETF catalog.
     page=1
     while True:
         data=td("/etfs",{"country":"United States","page":page,"outputsize":5000})
         part=data.get("data",[]) if isinstance(data,dict) else []
-        if not isinstance(part,list) or not part: break
+        if not isinstance(part,list) or not part:
+            break
+        added=0
         for row in part:
             if isinstance(row,dict) and row.get("symbol"):
                 sym=str(row["symbol"]).strip().upper()
                 if sym and sym not in seen:
-                    seen.add(sym); all_symbols.append(sym)
-        if len(part)<5000: break
+                    seen.add(sym); all_symbols.append(sym); added += 1
+        print(f"[US] ETFs page={page} +{added} total={len(all_symbols)}")
+        if len(part)<5000:
+            break
         page += 1
-        if page>10000: break
-    print(f"[US] OPEN catalog total={len(all_symbols)} | price floor during analysis >= ${MIN_US_PRICE:.2f}")
+        if page>10000:
+            break
+
+    # IMPORTANT: do not scan A-Z in every cycle. Shuffle the complete universe
+    # so expensive/large-cap symbols cannot monopolize the beginning of every cycle.
+    random.shuffle(all_symbols)
+    print(f"[US] FULL OPEN catalog total={len(all_symbols)} | price floor >= ${MIN_US_PRICE:.2f} | randomized scan order")
     return all_symbols
 
 def load_crypto():
@@ -469,7 +473,8 @@ def load_crypto():
         if len(rows)<5000: break
         page += 1
         if page>10000: break
-    print(f"[CRYPTO] OPEN catalog total={len(out)}")
+    random.shuffle(out)
+    print(f"[CRYPTO] FULL OPEN catalog total={len(out)} | randomized scan order")
     return out
 
 def get_symbols(market,loader):
@@ -577,9 +582,6 @@ def analyze_candles(symbol,market,c,name,tf,current_price=None):
     bar_price=x[-1]
     price=current_price if current_price is not None and current_price>0 else bar_price
     if market=="US" and price < MIN_US_PRICE:
-        return None
-    if bar_price>0 and abs(price-bar_price)/bar_price>0.35:
-        # حماية من خلط سعر حي بسلسلة تاريخية مختلفة بعد split/corporate action.
         return None
     e10,e14,e15,e25,e50=[ema(x,n) for n in (10,14,15,25,50)]
     rv=rsi(x);a=atr(h,l,x);vw=vwap(h,l,x,v);hb,hs=hidden_div(c);g=golden(c)
@@ -818,7 +820,11 @@ def tg_worker():
 def scan(symbols,market,token):
     total=len(symbols);done=signals=0
     print(f"[{market}] 🌐 OPEN UNIVERSE | لا يوجد حد عددي أو ترتيب A-Z | الأمريكي: ${MIN_US_PRICE:.2f} فأعلى")
-    print(f"[{market}] 🧠 بدء الفحص: {total} رمز | Workers={MAX_WORKERS}")
+    print(f"[{market}] 🧠 بدء الفحص الكامل: {total} رمز | Workers={MAX_WORKERS}")
+    if market=="US":
+        print(f"[{market}] 💵 شرط السعر الوحيد: >= ${MIN_US_PRICE:.2f} | لا يوجد حد عددي ولا ترتيب A-Z")
+    else:
+        print(f"[{market}] 🔓 لا يوجد حد عددي | فحص كامل 24/7")
     batch_size=MAX_WORKERS*8
     for start in range(0,total,batch_size):
         batch=symbols[start:start+batch_size]
