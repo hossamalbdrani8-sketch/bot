@@ -329,8 +329,69 @@ def load_tasi():
     return syms[:TASI_MAX_SYMBOLS]
 
 def load_us():
-    x=symbols_td(td("/stocks",{"country":"United States"}))
-    return x[:US_MAX_SYMBOLS] if x else ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AVGO","AMD","NFLX"]
+    """
+    🇺🇸 السوق الأمريكي — تحميل القائمة كاملة عبر صفحات Twelve Data.
+    الإصدار القديم كان يقرأ الصفحة الأولى فقط، لذلك كانت الرموز تبدأ غالباً
+    من A مثل ACON و AEO. هنا نمر على جميع الصفحات، ثم نرتب الرموز A → Z
+    ونأخذ حتى US_MAX_SYMBOLS.
+    """
+    all_symbols = []
+    seen = set()
+    page = 1
+    per_page = 5000
+    total = None
+
+    while len(all_symbols) < US_MAX_SYMBOLS and page <= 20:
+        data = td("/stocks", {
+            "country": "United States",
+            "type": "Common Stock",
+            "page": page,
+            "outputsize": per_page,
+        })
+
+        if not isinstance(data, dict):
+            break
+
+        rows = data.get("data", [])
+        if not isinstance(rows, list) or not rows:
+            break
+
+        if total is None:
+            try:
+                total = int(data.get("count", 0) or 0)
+            except Exception:
+                total = 0
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+
+            sym = str(row.get("symbol", "")).strip().upper()
+            country = str(row.get("country", "")).strip().lower()
+
+            if not sym or sym in seen:
+                continue
+
+            if country not in ("united states", "us", "usa"):
+                continue
+
+            seen.add(sym)
+            all_symbols.append(sym)
+
+            if len(all_symbols) >= US_MAX_SYMBOLS:
+                break
+
+        if len(rows) < per_page or (total and page * per_page >= total):
+            break
+
+        page += 1
+
+    all_symbols = sorted(all_symbols, key=str.upper)
+
+    return all_symbols[:US_MAX_SYMBOLS] if all_symbols else [
+        "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL",
+        "META", "TSLA", "AVGO", "AMD", "NFLX"
+    ]
 def load_crypto():
     x=symbols_td(td("/cryptocurrencies",{}))
     # SiftingIO uses canonical USD crypto symbols (BTCUSD, ETHUSD...).
