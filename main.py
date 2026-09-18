@@ -27,8 +27,8 @@ SF_GAP = 0.05
 MAX_RETRIES = 3
 SCAN_INTERVAL = 120
 CACHE_TTL = 21600
-MIN_US_PRICE = 0.20
-US_MAX_SYMBOLS = 13375
+MIN_US_PRICE = 0.15
+US_MAX_SYMBOLS = 0  # 0 = all supported US securities
 TASI_MAX_SYMBOLS = 375
 OUTPUTSIZE = 220
 TIMEFRAMES = ("5min", "15min", "30min", "1h", "4h")
@@ -207,9 +207,45 @@ def hidden_div(c):
         a,b=hi[-2],hi[-1];hs=c[b]["high"]<c[a]["high"] and rr[b]>rr[a]
     return hb,hs
 
-def targets(price,a,up):
+def surge_info(c, a, up):
+    """Detect an unusually fast move and adapt the 8 ATR targets.
+    This is a technical proxy only; it does not identify a market maker/fund.
+    """
+    if not c or len(c)<30 or not a or a<=0:
+        return {"active":False,"score":0,"factor":1.0,"volume_ratio":1.0,"atr_ratio":1.0,"body_pct":0.0,"breakout":False}
+    z=c[-1]; prev=c[-2]; rng=max(z["high"]-z["low"],0.0)
+    body=abs(z["close"]-z["open"])
+    body_pct=(body/z["open"]*100) if z["open"] else 0.0
+    vr=vol_ratio([x["volume"] for x in c])
+    # Compare current ATR with recent ATR values.
+    atrs=[]
+    h=[x["high"] for x in c]; l=[x["low"] for x in c]; cl=[x["close"] for x in c]
+    for i in range(max(15,len(c)-30),len(c)+1):
+        if i<=len(c) and i>=15:
+            aa=atr(h[:i],l[:i],cl[:i],14)
+            if aa and aa>0: atrs.append(aa)
+    avg_atr=sum(atrs[:-1])/len(atrs[:-1]) if len(atrs)>1 else a
+    atr_ratio=a/avg_atr if avg_atr>0 else 1.0
+    recent_high=max(x["high"] for x in c[-21:-1])
+    recent_low=min(x["low"] for x in c[-21:-1])
+    breakout=(z["close"]>recent_high) if up else (z["close"]<recent_low)
+    score=0
+    score += min(35, max(0,(vr-1.0)*14))
+    score += min(30, max(0,(atr_ratio-1.0)*30))
+    score += min(25, max(0,(body_pct-0.75)*12))
+    score += 10 if breakout else 0
+    score=int(max(0,min(100,round(score))))
+    active=bool(score>=65 and vr>=1.8 and atr_ratio>=1.10 and body_pct>=0.75 and breakout)
+    # Expand target spacing progressively, capped to avoid absurd targets.
+    factor=1.0
+    if active:
+        factor=min(2.50,1.0+(score-65)/35*1.50)
+    return {"active":active,"score":score,"factor":factor,"volume_ratio":vr,
+            "atr_ratio":atr_ratio,"body_pct":body_pct,"breakout":breakout}
+
+def targets(price,a,up,surge_factor=1.0):
     if not a or a<=0:return []
-    return [price+(a*m if up else -a*m) for m in ATR_MULT]
+    return [price+(a*m*surge_factor if up else -a*m*surge_factor) for m in ATR_MULT]
 
 # ---------- data ----------
 
@@ -329,69 +365,51 @@ def load_tasi():
     return syms[:TASI_MAX_SYMBOLS]
 
 def load_us():
-    """
-    🇺🇸 السوق الأمريكي — تحميل القائمة كاملة عبر صفحات Twelve Data.
-    الإصدار القديم كان يقرأ الصفحة الأولى فقط، لذلك كانت الرموز تبدأ غالباً
-    من A مثل ACON و AEO. هنا نمر على جميع الصفحات، ثم نرتب الرموز A → Z
-    ونأخذ حتى US_MAX_SYMBOLS.
-    """
-    all_symbols = []
-    seen = set()
-    page = 1
-    per_page = 5000
-    total = None
-
-    while len(all_symbols) < US_MAX_SYMBOLS and page <= 20:
-        data = td("/stocks", {
-            "country": "United States",
-            "type": "Common Stock",
-            "page": page,
-            "outputsize": per_page,
+    # US universe: all security types returned by Twelve Data for the
+    # United States (stocks, ETFs, ADRs and other supported listed
+    # securities). No Common Stock-only filter. Price filtering is applied
+    # later in analyze() at MIN_US_PRICE = $0.15.
+    all_symbols=[]
+    seen=set()
+    page=1
+    per_page=5000
+    while page<=100:
+        data=td("/stocks",{
+            "country":"United States",
+            "page":page,
+            "outputsize":per_page
         })
-
-        if not isinstance(data, dict):
+        if not isinstance(data,dict):
             break
-
-        rows = data.get("data", [])
-        if not isinstance(rows, list) or not rows:
+        rows=data.get("data",[])
+        if not isinstance(rows,list) or not rows:
             break
-
-        if total is None:
-            try:
-                total = int(data.get("count", 0) or 0)
-            except Exception:
-                total = 0
-
+        added=0
         for row in rows:
-            if not isinstance(row, dict):
+            if not isinstance(row,dict):
                 continue
-
-            sym = str(row.get("symbol", "")).strip().upper()
-            country = str(row.get("country", "")).strip().lower()
-
+            sym=str(row.get("symbol","" )).strip().upper()
+            country=str(row.get("country","" )).strip().lower()
             if not sym or sym in seen:
                 continue
-
-            if country not in ("united states", "us", "usa"):
+            if country not in ("united states","us","usa"):
                 continue
-
             seen.add(sym)
             all_symbols.append(sym)
-
-            if len(all_symbols) >= US_MAX_SYMBOLS:
+            added += 1
+            if US_MAX_SYMBOLS and len(all_symbols)>=US_MAX_SYMBOLS:
                 break
-
-        if len(rows) < per_page or (total and page * per_page >= total):
+        print(f"[US] symbol page {page}: +{added} | total={len(all_symbols)}")
+        if US_MAX_SYMBOLS and len(all_symbols)>=US_MAX_SYMBOLS:
             break
-
+        # Stop when the provider has no more pages.
+        if len(rows)<per_page:
+            break
         page += 1
-
-    all_symbols = sorted(all_symbols, key=str.upper)
-
-    return all_symbols[:US_MAX_SYMBOLS] if all_symbols else [
-        "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL",
-        "META", "TSLA", "AVGO", "AMD", "NFLX"
-    ]
+    all_symbols=sorted(all_symbols,key=str.upper)
+    if US_MAX_SYMBOLS:
+        all_symbols=all_symbols[:US_MAX_SYMBOLS]
+    return all_symbols if all_symbols else ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA"]
 def load_crypto():
     x=symbols_td(td("/cryptocurrencies",{}))
     # SiftingIO uses canonical USD crypto symbols (BTCUSD, ETHUSD...).
@@ -528,6 +546,7 @@ def analyze_candles(symbol,market,c,name,tf,current_price=None):
     if buy and score>=MIN_SCORE: sig="BUY";txt="🟢 شراء قوي";strength=score
     elif sell and 100-score>=MIN_SCORE: sig="SELL";txt="🔴 بيع قوي";strength=100-score
     else:return None
+    surge=surge_info(c,a,sig=="BUY")
     tr=trend(c)
     with state_lock:
         if tr!="NEUTRAL":trend_state[f"{market}:{symbol}"]=tr
@@ -536,7 +555,8 @@ def analyze_candles(symbol,market,c,name,tf,current_price=None):
             "signal_text":txt,"score":strength,"timeframe":tf,"trend":tr,"ema10":e10,
             "ema14":e14,"ema15":e15,"ema25":e25,"ema50":e50,"rsi":rv,"atr":a,"vwap":vw,
             "support":min(z["low"] for z in c[-50:]),"resistance":max(z["high"] for z in c[-50:]),
-            "volume_ratio":vol_ratio(v),"ars":ars(c),"golden":g,"flow":flow_events(c),"targets":targets(price,a,sig=="BUY"),
+            "volume_ratio":vol_ratio(v),"ars":ars(c),"golden":g,"flow":flow_events(c),
+            "surge":surge,"targets":targets(price,a,sig=="BUY",surge["factor"]),
             "news":"⚪ غير متاح"}
 
 def analyze(symbol,market):
@@ -682,8 +702,19 @@ def message(r):
             f"📅 {sp.get('date', '-')}",
         ]
 
+    surge=r.get("surge") or {}
+    if surge.get("active"):
+        s += [
+            "",
+            "🚀 <b>حركة انفجارية — SURGE MODE</b>",
+            f"🔥 قوة القفزة: <b>{surge.get('score',0)}/100</b>",
+            f"📊 الحجم: <b>{surge.get('volume_ratio',1):.1f}x</b>",
+            f"📐 توسع ATR: <b>{surge.get('atr_ratio',1):.2f}x</b>",
+            f"⚡ اتساع الأهداف: <b>{surge.get('factor',1):.2f}x</b>",
+        ]
+
     if r.get("targets"):
-        s += ["", "🎯 <b>أهداف ATR (8)</b>"]
+        s += ["", "🎯 <b>أهداف ATR (8)</b>" + (" 🚀" if surge.get("active") else "")]
         for i, t in enumerate(r["targets"], 1):
             ch = (t - r["price"]) / r["price"] * 100 if r["price"] else 0
             s.append(f"TP{i}: <b>{fmt(t)}</b>   ({ch:+.2f}%)")
@@ -748,21 +779,15 @@ def scan(symbols,market,token):
 RIYADH=ZoneInfo("Asia/Riyadh")
 
 def tasi_market_open():
-    now=datetime.now(RIYADH)
-    # Saudi Exchange main session: Sunday-Thursday, 10:00-15:00 Riyadh time.
-    # Friday/Saturday are closed.
-    if now.weekday() not in (6,0,1,2,3):
-        return False
-    t=now.time()
-    return t >= datetime.strptime("10:00","%H:%M").time() and t < datetime.strptime("15:00","%H:%M").time()
+    # 24/7 mode requested by the user: do not stop the Saudi scanner
+    # based on the official TASI session calendar. The provider may return
+    # the latest available/delayed data outside market hours.
+    return True
 
 def market_loop(market,token,loader):
     while True:
         try:
-            if market=="TASI" and not tasi_market_open():
-                print("[TASI] ⏸️ السوق مغلق — الفحص الفني متوقف حتى افتتاح الجلسة")
-                time.sleep(60)
-                continue
+            # TASI scanner is configured for 24/7 operation.
             symbols=get_symbols(market,loader)
             print(f"💀 {market}: {len(symbols)} رمز")
             if symbols:
