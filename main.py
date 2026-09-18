@@ -1,4 +1,4 @@
-# AI PRO MAX — FINAL HYBRID
+ AI PRO MAX — FINAL HYBRID
 # TASI -> Twelve Data | US + Crypto -> SiftingIO
 # Railway: use environment variables, never hard-code secrets.
 
@@ -28,7 +28,7 @@ MAX_RETRIES = 3
 SCAN_INTERVAL = 120
 CACHE_TTL = 21600
 MIN_US_PRICE = 0.15
-US_MAX_SYMBOLS = 0  # 0 = scan all supported US securities; no numeric cap
+US_MAX_SYMBOLS = 0  # unlimited; kept only for backward compatibility
 TASI_MAX_SYMBOLS = 375
 OUTPUTSIZE = 220
 TIMEFRAMES = ("5min", "15min", "30min", "1h", "4h")
@@ -365,15 +365,15 @@ def load_tasi():
     return syms[:TASI_MAX_SYMBOLS]
 
 def load_us():
-    # US universe: all security types returned by Twelve Data for the
-    # United States (stocks, ETFs, ADRs and other supported listed
-    # securities). No Common Stock-only filter. Price filtering is applied
-    # later in analyze() at MIN_US_PRICE = $0.15.
+    # US universe: load the complete provider catalog without A-Z prioritization
+    # and without a numeric cap. The ONLY US eligibility floor is $0.15.
+    # Price is checked from the live SiftingIO trade BEFORE historical analysis,
+    # so cheap symbols are not lost because they appear late in the catalog.
     all_symbols=[]
     seen=set()
     page=1
     per_page=5000
-    while page<=100:
+    while page<=1000:
         data=td("/stocks",{
             "country":"United States",
             "page":page,
@@ -388,29 +388,20 @@ def load_us():
         for row in rows:
             if not isinstance(row,dict):
                 continue
-            sym=str(row.get("symbol","" )).strip().upper()
-            country=str(row.get("country","" )).strip().lower()
-            if not sym or sym in seen:
-                continue
-            if country not in ("united states","us","usa"):
+            sym=str(row.get("symbol","")).strip().upper()
+            country=str(row.get("country","")).strip().lower()
+            if not sym or sym in seen or country not in ("united states","us","usa"):
                 continue
             seen.add(sym)
             all_symbols.append(sym)
             added += 1
-            if US_MAX_SYMBOLS and len(all_symbols)>=US_MAX_SYMBOLS:
-                break
-        print(f"[US] symbol page {page}: +{added} | total={len(all_symbols)}")
-        if US_MAX_SYMBOLS and len(all_symbols)>=US_MAX_SYMBOLS:
-            break
-        # Stop when the provider has no more pages.
+        print(f"[US] catalog page {page}: +{added} | total={len(all_symbols)}")
         if len(rows)<per_page:
             break
         page += 1
-    # Preserve provider order: no A-Z prioritization and no truncation.
-    # The only US price floor is MIN_US_PRICE ($0.15), enforced in analyze().
-    if US_MAX_SYMBOLS:
-        all_symbols=all_symbols[:US_MAX_SYMBOLS]
+    # No slicing, no A-Z sorting, no 13,375 cap.
     return all_symbols if all_symbols else ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA"]
+
 def load_crypto():
     x=symbols_td(td("/cryptocurrencies",{}))
     # SiftingIO uses canonical USD crypto symbols (BTCUSD, ETHUSD...).
@@ -759,6 +750,7 @@ def tg_worker():
 
 def scan(symbols,market,token):
     total=len(symbols);done=signals=0
+    print(f"[{market}] 🎯 شرط السعر الأمريكي: >= ${MIN_US_PRICE:.2f} | لا يوجد حد عددي للرموز")
     print(f"[{market}] 🧠 بدء الفحص: {total} رمز | Workers={MAX_WORKERS}")
     batch_size=MAX_WORKERS*8
     for start in range(0,total,batch_size):
