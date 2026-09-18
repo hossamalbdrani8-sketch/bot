@@ -28,7 +28,7 @@ MAX_RETRIES = 3
 SCAN_INTERVAL = 120
 CACHE_TTL = 21600
 MIN_US_PRICE = 0.15
-US_MAX_SYMBOLS = 0  # 0 = all supported US securities
+US_MAX_SYMBOLS = 0  # 0 = scan all supported US securities; no numeric cap
 TASI_MAX_SYMBOLS = 375
 OUTPUTSIZE = 220
 TIMEFRAMES = ("5min", "15min", "30min", "1h", "4h")
@@ -406,7 +406,8 @@ def load_us():
         if len(rows)<per_page:
             break
         page += 1
-    all_symbols=sorted(all_symbols,key=str.upper)
+    # Preserve provider order: no A-Z prioritization and no truncation.
+    # The only US price floor is MIN_US_PRICE ($0.15), enforced in analyze().
     if US_MAX_SYMBOLS:
         all_symbols=all_symbols[:US_MAX_SYMBOLS]
     return all_symbols if all_symbols else ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA"]
