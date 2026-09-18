@@ -93,12 +93,15 @@ def api_get(base, path, key, params, local_obj, lock, holder, gap):
             if r.status_code in (500,502,503,504):
                 time.sleep(min(10,2**attempt)); continue
             if r.status_code != 200:
-                try:
-                    err = r.json()
-                    msg = err.get("message") or err.get("code") or err.get("status") if isinstance(err, dict) else None
-                except Exception:
-                    msg = None
-                print(f"[API] HTTP {r.status_code} {base}{path} | {msg or 'request failed'}")
+                # 400/404 from SiftingIO can simply mean that a symbol in the
+                # broad Twelve Data catalog is outside SiftingIO coverage.
+                if not (base == SF_BASE and r.status_code in (400, 404)):
+                    try:
+                        err = r.json()
+                        msg = err.get("message") or err.get("code") or err.get("status") if isinstance(err, dict) else None
+                    except Exception:
+                        msg = None
+                    print(f"[API] HTTP {r.status_code} {base}{path} | {msg or 'request failed'}")
                 return None
             data = r.json()
             if isinstance(data,dict) and str(data.get("status","")).lower()=="error":
@@ -294,6 +297,11 @@ def sf_candles(data):
     return (out[-OUTPUTSIZE:] if len(out)>=60 else None),name
 
 def get_tasi(symbol,tf):
+    return td_candles(td("/time_series",{"symbol":symbol,"interval":tf,"outputsize":OUTPUTSIZE,"format":"JSON"}))
+
+def get_crypto_td(symbol,tf):
+    # Full crypto coverage uses Twelve Data directly so non-USD pairs are not
+    # forced into SiftingIO's USD-only crypto identifier format.
     return td_candles(td("/time_series",{"symbol":symbol,"interval":tf,"outputsize":OUTPUTSIZE,"format":"JSON"}))
 
 def get_sf(asset,symbol,tf):
@@ -535,7 +543,7 @@ def load_crypto():
     for row in rows:
         if not isinstance(row,dict):
             continue
-        sym=str(row.get("symbol","")).strip().upper().replace("/","")
+        sym=str(row.get("symbol","")).strip().upper()
         if sym and sym not in seen:
             seen.add(sym)
             out.append(sym)
@@ -688,15 +696,27 @@ def analyze(symbol,market):
     if market=="TASI":
         live=current_price_tasi(symbol)
         asset=None
-    else:
-        asset="stocks" if market=="US" else "crypto"
+        tf_list=("15min",)
+    elif market=="US":
+        asset="stocks"
         live=current_price_sf(asset,symbol)
         if live is None:
             live=current_price_td(symbol)
+        tf_list=TIMEFRAMES
+    else:
+        # ALL crypto pairs: use Twelve Data for the complete catalog, including
+        # non-USD pairs such as VET/ZAR and EGLD/INR.
+        asset="crypto"
+        live=current_price_td(symbol)
+        tf_list=TIMEFRAMES
     split=split_for_symbol(symbol) if market in ("TASI","US") else None
-    tf_list=("15min",) if market=="TASI" else TIMEFRAMES
     for tf in tf_list:
-        c,n=get_tasi(symbol,tf) if market=="TASI" else get_sf(asset,symbol,tf)
+        if market=="TASI":
+            c,n=get_tasi(symbol,tf)
+        elif market=="US":
+            c,n=get_sf(asset,symbol,tf)
+        else:
+            c,n=get_crypto_td(symbol,tf)
         # TASI uses Twelve Data for the technical candle series and SAHMK for the
         # current/most recent quoted price. If SAHMK is delayed or temporarily
         # unavailable, analyze the candle price instead of dropping the symbol.
