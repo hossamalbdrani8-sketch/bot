@@ -238,8 +238,10 @@ def last_price(data):
 # ============================================================
 
 def load_tasi():
-    # SAHMK is used only to discover the Saudi universe.
-    data = sahmk("/companies/")
+    # Never let the Saudi directory block the whole bot.
+    # SAHMK is primary; Twelve Data XSAU is an independent fallback.
+    print("[TASI] loading catalog...")
+    data = sahmk("/companies/", {"market": "TASI", "limit": 2000, "offset": 0})
     rows = rows_from_catalog(data)
 
     found = []
@@ -269,6 +271,20 @@ def load_tasi():
     catalog_cache["TASI"] = {"symbols": found, "at": time.time()}
 
     print(f"[TASI] catalog={len(found)} | expected current universe≈{TASI_EXPECTED} | no numeric cap")
+    if not found:
+        print("[TASI] SAHMK catalog unavailable -> trying Twelve Data XSAU fallback...")
+        fallback = td("/stocks", {"exchange": "XSAU"})
+        frows = rows_from_catalog(fallback)
+        for row in frows:
+            if not isinstance(row, dict):
+                continue
+            symbol = str(row.get("symbol") or "").strip().upper()
+            if symbol and symbol not in seen:
+                seen.add(symbol)
+                found.append(symbol)
+        random.shuffle(found)
+        catalog_cache["TASI"] = {"symbols": found, "at": time.time()}
+
     if len(found) != TASI_EXPECTED:
         print(f"[TASI] WARNING: provider returned {len(found)} symbols; code did NOT truncate or invent symbols.")
 
@@ -276,75 +292,53 @@ def load_tasi():
 
 
 def load_us():
-    # Twelve Data catalog is the discovery source.
-    # We filter by US listing/country/exchange metadata, not by a fixed count.
+    # US universe: stocks endpoint only. No ETF merge and no numeric cap.
+    print("[US] loading full stock catalog...")
     all_rows = []
-    seen_pages = set()
 
-    for page in range(1, 100):
-        data = td("/stocks", {"country": "United States", "page": page})
+    # Primary: provider's US country catalog, paged.
+    for page in range(1, 101):
+        data = td("/stocks", {"country": "United States", "page": page, "outputsize": 5000})
         rows = rows_from_catalog(data)
-
         if not rows:
             break
-
-        marker = json.dumps(rows[:3], sort_keys=True, default=str)
-        if marker in seen_pages:
-            break
-        seen_pages.add(marker)
-
         all_rows.extend(rows)
-
-        # Most catalog responses stop naturally when the page is empty/short.
+        print(f"[US] page {page}: +{len(rows)}")
         if len(rows) < 5000:
             break
 
+    # Fallback: exchange-level stock catalog if country filtering failed.
+    if not all_rows:
+        print("[US] country catalog unavailable -> trying exchange fallbacks...")
+        for exchange in ("NASDAQ", "NYSE", "AMEX", "ARCA", "OTC"):
+            data = td("/stocks", {"exchange": exchange, "outputsize": 5000})
+            rows = rows_from_catalog(data)
+            if rows:
+                all_rows.extend(rows)
+                print(f"[US] {exchange}: +{len(rows)}")
+
     symbols = []
     seen = set()
-
     for row in all_rows:
         if not isinstance(row, dict):
             continue
-
         symbol = str(row.get("symbol") or "").strip().upper()
         if not symbol or symbol in seen:
             continue
-
         country = str(row.get("country") or "").strip().lower()
         exchange = str(row.get("exchange") or "").strip().upper()
-        exchange_name = str(row.get("exchange_name") or "").strip().lower()
-
-        # Keep the provider's US stock listing universe.
-        # No arbitrary "top N" filter.
-        is_us = (
-            "united states" in country
-            or country in ("us", "usa", "united states of america")
-            or exchange in {"NASDAQ", "NYSE", "AMEX", "ARCA", "OTC", "BATS", "CBOE"}
-            or any(x in exchange_name for x in (
-                "nasdaq", "new york stock", "american stock",
-                "nyse", "nasdaq capital", "nasdaq global"
-            ))
-        )
-
-        if not is_us:
-            continue
-
+        if country and country not in ("united states", "us", "usa", "united states of america"):
+            if exchange not in {"NASDAQ", "NYSE", "AMEX", "ARCA", "OTC", "BATS", "CBOE"}:
+                continue
         seen.add(symbol)
         symbols.append(symbol)
 
     random.shuffle(symbols)
-
     catalog_cache["US"] = {"symbols": symbols, "at": time.time()}
-
-    print(
-        f"[US] catalog={len(symbols)} | target universe≈{US_EXPECTED} | "
-        f"price floor=${MIN_US_PRICE:.2f} | NO NUMERIC CAP"
-    )
+    print(f"[US] catalog={len(symbols)} | price >= ${MIN_US_PRICE:.2f} | NO NUMERIC CAP")
     if len(symbols) != US_EXPECTED:
-        print(f"[US] NOTE: provider returned {len(symbols)} symbols. Nothing was truncated.")
-
+        print(f"[US] NOTE: provider returned {len(symbols)} symbols; nothing was truncated.")
     return symbols
-
 
 def load_crypto():
     data = td("/cryptocurrencies", {})
@@ -883,7 +877,7 @@ def message(r):
         "━━━━━━━━━━━━━━━━━━━━\n"
         + (f"📰 الخبر: {r['news']}\n" if r["news"] else "")
         + f"🕒 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
-        "⚠️ <iإشارة فنية آلية وليست توصية مالية.</i>\n"
+        "⚠️ <i>إشارة فنية آلية وليست توصية مالية.</i>\n"
         "━━━━━━━━━━━━━━━━━━━━"
     )
 
@@ -962,17 +956,31 @@ def scan_market(market, symbols):
 
 
 def ensure_catalogs():
-    # Refresh only when empty or older than 6 hours.
+    # Load the three universes in parallel so one slow provider cannot
+    # prevent the other markets from starting.
     now = time.time()
+    jobs = []
 
     if not catalog_cache["TASI"]["symbols"] or now - catalog_cache["TASI"]["at"] > 21600:
-        load_tasi()
-
+        jobs.append(("TASI", load_tasi))
     if not catalog_cache["US"]["symbols"] or now - catalog_cache["US"]["at"] > 21600:
-        load_us()
-
+        jobs.append(("US", load_us))
     if not catalog_cache["CRYPTO"]["symbols"] or now - catalog_cache["CRYPTO"]["at"] > 21600:
-        load_crypto()
+        jobs.append(("CRYPTO", load_crypto))
+
+    if not jobs:
+        return
+
+    print(f"[CATALOG] starting {len(jobs)} market catalogs in parallel...")
+    with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        futures = {pool.submit(fn): name for name, fn in jobs}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                result = future.result()
+                print(f"[CATALOG] {name} ready: {len(result or [])} symbols")
+            except Exception as exc:
+                print(f"[CATALOG] {name} failed safely: {exc}")
 
 
 def market_loop():
@@ -997,6 +1005,10 @@ def market_loop():
                 ("TASI", list(catalog_cache["TASI"]["symbols"])),
                 ("US", list(catalog_cache["US"]["symbols"])),
                 ("CRYPTO", list(catalog_cache["CRYPTO"]["symbols"])),
+            )
+            print(
+                f"[CATALOG] READY | TASI={len(markets[0][1])} | "
+                f"US={len(markets[1][1])} | CRYPTO={len(markets[2][1])}"
             )
 
             # Randomize every cycle so the same symbols do not always wait
