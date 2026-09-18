@@ -132,15 +132,17 @@ def get_json(base, path, params, key, holder, lock, last, gap):
                 continue
 
             if r.status_code != 200:
+                if base == TD_BASE:
+                    print(f"[TWELVE DATA] HTTP {r.status_code} {path} params={p}")
                 return None
 
             data = r.json()
 
             if isinstance(data, dict):
                 status = str(data.get("status", "")).lower()
-                if status == "error":
-                    return None
-                if data.get("error"):
+                if status == "error" or data.get("error"):
+                    if base == TD_BASE:
+                        print(f"[TWELVE DATA] API error {path}: {data.get('message') or data.get('error') or data}")
                     return None
 
             return data
@@ -292,49 +294,87 @@ def load_tasi():
 
 
 def load_us():
-    # US universe: stocks endpoint only. No ETF merge and no numeric cap.
-    print("[US] loading full stock catalog...")
+    # US universe: Common Stock only. No ETF merge and no numeric cap.
+    # The country-filtered catalog can fail on some plans/requests, so the
+    # scanner has a second path: exchange-by-exchange, still using the
+    # provider's own catalog and filtering locally.
+    print("[US] loading full US Common Stock catalog...")
+
     all_rows = []
 
-    # Primary: provider's US country catalog, paged.
-    for page in range(1, 101):
-        data = td("/stocks", {"country": "United States", "page": page, "outputsize": 5000})
-        rows = rows_from_catalog(data)
-        if not rows:
-            break
-        all_rows.extend(rows)
-        print(f"[US] page {page}: +{len(rows)}")
-        if len(rows) < 5000:
-            break
-
-    # Fallback: exchange-level stock catalog if country filtering failed.
-    if not all_rows:
-        print("[US] country catalog unavailable -> trying exchange fallbacks...")
-        for exchange in ("NASDAQ", "NYSE", "AMEX", "ARCA", "OTC"):
-            data = td("/stocks", {"exchange": exchange, "outputsize": 5000})
+    def collect(params, label):
+        collected = 0
+        last_page_marker = None
+        for page in range(1, 1001):
+            q = dict(params)
+            q["page"] = page
+            data = td("/stocks", q)
             rows = rows_from_catalog(data)
-            if rows:
-                all_rows.extend(rows)
-                print(f"[US] {exchange}: +{len(rows)}")
+            if not rows:
+                break
+
+            marker = json.dumps(rows[:3], sort_keys=True, default=str)
+            if marker == last_page_marker:
+                break
+            last_page_marker = marker
+
+            all_rows.extend(rows)
+            collected += len(rows)
+            print(f"[US] {label} page {page}: +{len(rows)} | raw={collected}")
+
+            # Twelve Data's catalog pages normally return a short final page.
+            if len(rows) < 100:
+                break
+        return collected
+
+    # First path: exact US + Common Stock filter.
+    collect({"country": "United States", "type": "Common Stock"}, "US")
+
+    # Second path if the filtered request is unavailable.
+    if not all_rows:
+        print("[US] country/type catalog unavailable -> trying US exchanges...")
+        for exchange in ("NASDAQ", "NYSE", "AMEX", "ARCA", "OTC"):
+            collect({"exchange": exchange, "type": "Common Stock"}, exchange)
+
+    # Final safety path: fetch the unfiltered stock catalog and keep only US
+    # Common Stock records. This is intentionally a provider-catalog fallback,
+    # not a fixed symbol list and not an external code/list.
+    if not all_rows:
+        print("[US] exchange catalog unavailable -> trying complete /stocks catalog...")
+        collect({}, "ALL-STOCKS")
 
     symbols = []
     seen = set()
+    allowed_exchanges = {"NASDAQ", "NYSE", "AMEX", "ARCA", "OTC", "BATS", "CBOE"}
+    allowed_types = {"common stock", "common shares"}
+
     for row in all_rows:
         if not isinstance(row, dict):
             continue
+
         symbol = str(row.get("symbol") or "").strip().upper()
         if not symbol or symbol in seen:
             continue
+
         country = str(row.get("country") or "").strip().lower()
         exchange = str(row.get("exchange") or "").strip().upper()
-        if country and country not in ("united states", "us", "usa", "united states of america"):
-            if exchange not in {"NASDAQ", "NYSE", "AMEX", "ARCA", "OTC", "BATS", "CBOE"}:
-                continue
+        kind = str(row.get("type") or "").strip().lower()
+
+        is_us = (
+            country in {"united states", "us", "usa", "united states of america"}
+            or exchange in allowed_exchanges
+        )
+        is_common_stock = (not kind) or (kind in allowed_types)
+
+        if not is_us or not is_common_stock:
+            continue
+
         seen.add(symbol)
         symbols.append(symbol)
 
     random.shuffle(symbols)
     catalog_cache["US"] = {"symbols": symbols, "at": time.time()}
+
     print(f"[US] catalog={len(symbols)} | price >= ${MIN_US_PRICE:.2f} | NO NUMERIC CAP")
     if len(symbols) != US_EXPECTED:
         print(f"[US] NOTE: provider returned {len(symbols)} symbols; nothing was truncated.")
