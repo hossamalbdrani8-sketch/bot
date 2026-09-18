@@ -1,4 +1,4 @@
- AI PRO MAX — FINAL HYBRID
+# AI PRO MAX — FINAL HYBRID
 # TASI -> Twelve Data | US + Crypto -> SiftingIO
 # Railway: use environment variables, never hard-code secrets.
 
