@@ -44,7 +44,10 @@ from datetime import datetime, timezone
 # -----------------------------
 # Configuration
 # -----------------------------
-TWELVE_KEY = os.getenv("TWELVE_DATA_API_KEY", "").strip()
+TWELVE_KEY = (
+    os.getenv("TWELVE_DATA_API_KEY", "").strip()
+    or os.getenv("TWELVEDATA_API_KEY", "").strip()
+)
 
 TASI_TOKEN = os.getenv("TASI_TOKEN", "").strip()
 US_TOKEN = os.getenv("US_TOKEN", "").strip()
@@ -1043,3 +1046,6 @@ if __name__ == "__main__":
         target=http_server,
         daemon=True,
     ).start()
+
+    load_state()
+    main_loop()
