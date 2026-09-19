@@ -1043,6 +1043,3 @@ if __name__ == "__main__":
         target=http_server,
         daemon=True,
     ).start()
-
-    load_state()
-    main_loop()
