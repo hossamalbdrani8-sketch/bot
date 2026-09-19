@@ -1,1051 +1,817 @@
-# ============================================================
-# AI PRO MAX — QUOTA SAFE / STANDARD LIBRARY EDITION
-# ============================================================
-# Designed from scratch for the user's Railway project.
-# No third-party Python package is required.
-#
-# Existing Railway variables used:
-# TWELVE_DATA_API_KEY
-# TASI_TOKEN
-# US_TOKEN
-# CRYPTO_TOKEN
-# PORT
-#
-# Optional existing variables are accepted if already present:
-# MIN_US_PRICE, SIGNAL_COOLDOWN, SCAN_SECONDS
-#
-# Main goals:
-# - Never hammer an exhausted API with repeated 429 requests.
-# - Cache symbol catalog locally.
-# - Cache historical data for long periods.
-# - Request current quotes only when a symbol is due.
-# - Never start overlapping scan cycles.
-# - Send Telegram signals only when a new signal appears.
-# - Keep running 24/7 without crashing when a provider is unavailable.
-#
-# Important provider reality:
-# No program can bypass a provider's quota. "Full market" scanning
-# means scanning every symbol available from the provider, but the
-# frequency is automatically paced so the API quota is protected.
-# ============================================================
+# AI PRO MAX — FINAL HYBRID
+# TASI -> Twelve Data | US + Crypto -> SiftingIO
+# Railway: use environment variables, never hard-code secrets.
 
-import os
-import json
-import time
-import math
-import random
-import threading
-import urllib.parse
-import urllib.request
-import urllib.error
-from pathlib import Path
-from datetime import datetime, timezone
+import os, time, json, queue, threading
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock, local
+import requests
 
-# -----------------------------
-# Configuration
-# -----------------------------
-TWELVE_KEY = (
-    os.getenv("TWELVE_DATA_API_KEY", "").strip()
-    or os.getenv("TWELVEDATA_API_KEY", "").strip()
-)
-
+CHAT_ID = os.getenv("CHAT_ID", "").strip()
 TASI_TOKEN = os.getenv("TASI_TOKEN", "").strip()
 US_TOKEN = os.getenv("US_TOKEN", "").strip()
 CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN", "").strip()
+TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "").strip()
+SIFTING_API_KEY = os.getenv("SIFTING_API_KEY", "").strip()
+SAHMK_API_KEY = os.getenv("SAHMK_API_KEY", "").strip()
 
-PORT = int(os.getenv("PORT", "8080"))
-MIN_US_PRICE = float(os.getenv("MIN_US_PRICE", "0.15"))
-SIGNAL_COOLDOWN = int(os.getenv("SIGNAL_COOLDOWN", "1800"))
+TD_BASE = "https://api.twelvedata.com"
+SF_BASE = "https://api.sifting.io/v1"
+SAHMK_BASE = "https://api.sahmk.sa/api/v1"
 
-# These are safety defaults, not market-size caps.
-# The scanner calculates its own pacing from the provider budget.
-SCAN_SECONDS = int(os.getenv("SCAN_SECONDS", "300"))
+MAX_WORKERS = 4
+TD_GAP = 0.35
+SF_GAP = 0.05
+MAX_RETRIES = 3
+SCAN_INTERVAL = 300
+CACHE_TTL = 21600
+MIN_US_PRICE = 0.15
+US_MAX_SYMBOLS = 0  # unlimited; kept only for backward compatibility
+TASI_MAX_SYMBOLS = 374
+OUTPUTSIZE = 220
+TIMEFRAMES = ("5min", "15min", "30min", "1h", "4h")
+SF_TF = {"5min":"5m", "15min":"15m", "30min":"30m", "1h":"1h", "4h":"1h"}
+ATR_MULT = [1, 1.5, 2, 2.5, 3, 3.5, 4, 5]
+MIN_SCORE = 60
 
-DATA_DIR = Path(os.getenv("DATA_DIR", "/tmp/ai_pro_max"))
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+POSITIVE = ("beat","beats","growth","profit","profits","upgrade","upgraded","buy",
+            "strong","positive","partnership","contract","approval","revenue","surge","record")
+NEGATIVE = ("loss","losses","downgrade","downgraded","sell","weak","negative","lawsuit",
+            "decline","drop","warning","debt","offering","investigation","risk")
 
-CATALOG_FILE = DATA_DIR / "symbols.json"
-STATE_FILE = DATA_DIR / "state.json"
-
-# Refresh catalog rarely. Repeated catalog calls are wasteful.
-CATALOG_TTL = 24 * 60 * 60
-
-# History is expensive, so keep it for 12 hours.
-HISTORY_TTL = 12 * 60 * 60
-
-# Do not hammer the provider after 429/limit responses.
-BACKOFF_MIN = 60
-BACKOFF_MAX = 6 * 60 * 60
-
-# In-memory caches
-symbols = {"TASI": [], "US": [], "CRYPTO": []}
-symbol_index = {"TASI": 0, "US": 0, "CRYPTO": 0}
-
-history_cache = {}
-quote_cache = {}
+td_local, sf_local, sahmk_local = local(), local(), local()
+td_lock, sf_lock, sahmk_lock = Lock(), Lock(), Lock()
+td_last = [0.0]
+sf_last = [0.0]
+sahmk_last = [0.0]
+state_lock = Lock()
 last_signal = {}
-telegram_chats = {"TASI": set(), "US": set(), "CRYPTO": set()}
+trend_state = {}
+cache_lock = Lock()
+symbol_cache = {
+    "TASI":{"symbols":[],"updated":0},
+    "US":{"symbols":[],"updated":0},
+    "CRYPTO":{"symbols":[],"updated":0},
+}
+TG_QUEUE = queue.Queue(maxsize=5000)
 
-provider_block_until = 0.0
-provider_backoff = BACKOFF_MIN
-state_lock = threading.Lock()
+def session_for(obj):
+    s = getattr(obj, "session", None)
+    if s is None:
+        s = requests.Session()
+        s.headers.update({"User-Agent":"AI-PRO-MAX/Final","Accept-Encoding":"gzip"})
+        a = requests.adapters.HTTPAdapter(pool_connections=6, pool_maxsize=6, max_retries=0)
+        s.mount("https://", a)
+        s.mount("http://", a)
+        obj.session = s
+    return s
 
+def wait_rate(lock, holder, gap):
+    with lock:
+        now = time.monotonic()
+        wait = gap - (now - holder[0])
+        if wait > 0: time.sleep(wait)
+        holder[0] = time.monotonic()
 
-# ============================================================
-# Logging
-# ============================================================
-
-def log(msg):
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"{stamp} UTC | {msg}", flush=True)
-
-
-# ============================================================
-# Persistent state
-# ============================================================
-
-def load_json(path, default):
-    try:
-        if path.exists():
-            with path.open("r", encoding="utf-8") as f:
-                return json.load(f)
-    except Exception as exc:
-        log(f"state read warning: {exc}")
-    return default
-
-
-def save_json(path, value):
-    tmp = path.with_suffix(".tmp")
-    try:
-        with tmp.open("w", encoding="utf-8") as f:
-            json.dump(value, f, ensure_ascii=False)
-        tmp.replace(path)
-    except Exception as exc:
-        log(f"state write warning: {exc}")
-
-
-def load_state():
-    global symbols
-    data = load_json(STATE_FILE, {})
-    saved_symbols = data.get("symbols", {})
-    if isinstance(saved_symbols, dict):
-        for market in symbols:
-            rows = saved_symbols.get(market, [])
-            if isinstance(rows, list):
-                symbols[market] = rows
-
-    saved_last = data.get("last_signal", {})
-    if isinstance(saved_last, dict):
-        last_signal.update(saved_last)
-
-
-def save_state():
-    with state_lock:
-        save_json(
-            STATE_FILE,
-            {
-                "symbols": symbols,
-                "last_signal": last_signal,
-            },
-        )
-
-
-# ============================================================
-# HTTP — standard library only
-# ============================================================
-
-def api_get(endpoint, params=None, timeout=20):
-    """
-    Single HTTP function.
-    It deliberately stops making requests when a provider quota/rate
-    limit is detected, preventing a tight 429 loop.
-    """
-    global provider_block_until, provider_backoff
-
-    if not TWELVE_KEY:
-        raise RuntimeError("TWELVE_DATA_API_KEY غير موجود")
-
-    now = time.time()
-    if now < provider_block_until:
-        return None
-
-    query = dict(params or {})
-    query["apikey"] = TWELVE_KEY
-
-    url = "https://api.twelvedata.com/" + endpoint.lstrip("/")
-    full_url = url + "?" + urllib.parse.urlencode(query)
-
-    request = urllib.request.Request(
-        full_url,
-        headers={"User-Agent": "AI-PRO-MAX/1.0"},
-        method="GET",
-    )
-
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8", errors="replace")
-            data = json.loads(raw)
-
-        if isinstance(data, dict) and data.get("status") == "error":
-            message = str(data.get("message", "unknown error"))
-            lower = message.lower()
-
-            if (
-                "429" in lower
-                or "rate" in lower
-                or "limit" in lower
-                or "quota" in lower
-                or "credits" in lower
-            ):
-                provider_block_until = time.time() + provider_backoff
-                provider_backoff = min(
-                    BACKOFF_MAX,
-                    max(BACKOFF_MIN, provider_backoff * 2),
-                )
-                log(
-                    f"⛔ API limit detected — pause "
-                    f"{int(provider_block_until-time.time())}s"
-                )
+def api_get(base, path, key, params, local_obj, lock, holder, gap):
+    if not key: return None
+    s = session_for(local_obj)
+    headers = {"X-API-Key":key,"Accept-Encoding":"gzip"} if base == SF_BASE else {}
+    p = dict(params or {})
+    if base == TD_BASE: p["apikey"] = key
+    for attempt in range(MAX_RETRIES):
+        try:
+            wait_rate(lock, holder, gap)
+            r = s.get(base + path, params=p, headers=headers, timeout=(10,30))
+            if r.status_code == 429:
+                ra = r.headers.get("Retry-After")
+                try: delay = float(ra)
+                except Exception: delay = min(10,2**attempt)
+                time.sleep(delay); continue
+            if r.status_code in (500,502,503,504):
+                time.sleep(min(10,2**attempt)); continue
+            if r.status_code != 200:
                 return None
-
-            raise RuntimeError(message)
-
-        provider_backoff = BACKOFF_MIN
-        return data
-
-    except urllib.error.HTTPError as exc:
-        body = ""
-        try:
-            body = exc.read().decode("utf-8", errors="replace")
+            data = r.json()
+            if isinstance(data,dict) and str(data.get("status","")).lower()=="error": return None
+            return data
+        except (requests.Timeout,requests.ConnectionError):
+            if attempt < MAX_RETRIES-1: time.sleep(min(10,2**attempt))
+            else: return None
         except Exception:
-            pass
-
-        text = f"HTTP {exc.code} {body[:300]}"
-        if exc.code in (429, 402, 403):
-            provider_block_until = time.time() + provider_backoff
-            provider_backoff = min(
-                BACKOFF_MAX,
-                max(BACKOFF_MIN, provider_backoff * 2),
-            )
-            log(
-                f"⛔ {text} | API paused "
-                f"{int(provider_block_until-time.time())}s"
-            )
             return None
+    return None
 
-        raise RuntimeError(text)
+def td(path, params=None):
+    return api_get(TD_BASE,path,TWELVEDATA_API_KEY,params,td_local,td_lock,td_last,TD_GAP)
 
-    except Exception as exc:
-        raise RuntimeError(str(exc))
+def sf(path, params=None):
+    return api_get(SF_BASE,path,SIFTING_API_KEY,params,sf_local,sf_lock,sf_last,SF_GAP)
 
+def sahmk(path, params=None):
+    if not SAHMK_API_KEY: return None
+    s=session_for(sahmk_local)
+    p=dict(params or {})
+    for attempt in range(MAX_RETRIES):
+        try:
+            wait_rate(sahmk_lock,sahmk_last,0.75)
+            r=s.get(SAHMK_BASE+path,params=p,headers={"X-API-Key":SAHMK_API_KEY},timeout=(10,30))
+            if r.status_code==429:
+                time.sleep(min(30,2**attempt)); continue
+            if r.status_code in (500,502,503,504):
+                time.sleep(min(10,2**attempt)); continue
+            if r.status_code!=200: return None
+            d=r.json()
+            if isinstance(d,dict) and d.get("error"): return None
+            return d
+        except (requests.Timeout,requests.ConnectionError):
+            if attempt<MAX_RETRIES-1: time.sleep(min(10,2**attempt))
+            else: return None
+        except Exception: return None
+    return None
 
-# ============================================================
-# Catalog
-# ============================================================
+# ---------- indicators ----------
 
-def rows_from(data):
-    if not isinstance(data, dict):
-        return []
-    for key in ("data", "values"):
-        rows = data.get(key)
-        if isinstance(rows, list):
-            return rows
-    return []
+def ema(v,n):
+    if len(v)<n:return None
+    x=sum(v[:n])/n; a=2/(n+1)
+    for z in v[n:]: x=(z-x)*a+x
+    return x
 
+def rsi(v,n=14):
+    if len(v)<n+1:return None
+    g=[];l=[]
+    for i in range(1,len(v)):
+        d=v[i]-v[i-1];g.append(max(d,0));l.append(max(-d,0))
+    ag=sum(g[:n])/n; al=sum(l[:n])/n
+    for i in range(n,len(g)):
+        ag=((ag*(n-1))+g[i])/n; al=((al*(n-1))+l[i])/n
+    return 100 if al==0 else 100-(100/(1+ag/al))
 
-def catalog_is_fresh():
+def atr(h,l,c,n=14):
+    if len(c)<n+1:return None
+    tr=[max(h[i]-l[i],abs(h[i]-c[i-1]),abs(l[i]-c[i-1])) for i in range(1,len(c))]
+    x=sum(tr[:n])/n
+    for z in tr[n:]:x=((x*(n-1))+z)/n
+    return x
+
+def vwap(h,l,c,v):
+    pv=vv=0
+    for a,b,x,z in zip(h,l,c,v):
+        if z>0: pv+=((a+b+x)/3)*z;vv+=z
+    return pv/vv if vv else None
+
+def vol_ratio(v):
+    if len(v)<21:return 1
+    a=sum(v[-21:-1])/20
+    return v[-1]/a if a>0 else 1
+
+def trend(c):
+    x=[z["close"] for z in c]
+    e10,e14,e15,e25,e50=[ema(x,n) for n in (10,14,15,25,50)]
+    if None in (e10,e14,e15,e25,e50):return "NEUTRAL"
+    bull=sum((e10>e14,e14>e15,e15>e25,e25>e50,x[-1]>e50))
+    bear=sum((e10<e14,e14<e15,e15<e25,e25<e50,x[-1]<e50))
+    return "UP" if bull>=3 else "DOWN" if bear>=3 else "NEUTRAL"
+
+def ars(c):
+    x=[z["close"] for z in c]
+    e10,e14,e25,e50=[ema(x,n) for n in (10,14,25,50)]
+    if None in (e10,e14,e25,e50):return 50
+    s=50+(15 if e10>e14 else -15)+(15 if e14>e25 else -15)+(10 if x[-1]>e50 else -10)
+    return max(20,min(100,s))
+
+def golden(c):
+    if len(c)<30:return False
+    x=[z["close"] for z in c];v=[z["volume"] for z in c]
+    z=c[-1];p=c[-2];e10,e25=ema(x,10),ema(x,25);rv=rsi(x)
+    av=sum(v[-21:-1])/20 if len(v)>=21 else 0
+    rng=z["high"]-z["low"];body=abs(z["close"]-z["open"])
+    return (z["close"]>z["open"] and rng>0 and body/rng>=.45 and e10 and e25 and
+            e10>e25 and z["close"]>e10 and rv is not None and rv>=50 and
+            (av<=0 or z["volume"]>=av*1.10) and z["close"]>p["high"])
+
+def hidden_div(c):
+    if len(c)<60:return False,False
+    x=[z["close"] for z in c];rr=[rsi(x[:i+1]) for i in range(len(x))]
+    lo=[];hi=[]
+    for i in range(5,len(c)-5):
+        if c[i]["low"]==min(z["low"] for z in c[i-5:i+6]):lo.append(i)
+        if c[i]["high"]==max(z["high"] for z in c[i-5:i+6]):hi.append(i)
+    hb=hs=False
+    if len(lo)>=2 and rr[lo[-1]] is not None and rr[lo[-2]] is not None:
+        a,b=lo[-2],lo[-1];hb=c[b]["low"]>c[a]["low"] and rr[b]<rr[a]
+    if len(hi)>=2 and rr[hi[-1]] is not None and rr[hi[-2]] is not None:
+        a,b=hi[-2],hi[-1];hs=c[b]["high"]<c[a]["high"] and rr[b]>rr[a]
+    return hb,hs
+
+def surge_info(c, a, up):
+    """Detect an unusually fast move and adapt the 8 ATR targets.
+    This is a technical proxy only; it does not identify a market maker/fund.
+    """
+    if not c or len(c)<30 or not a or a<=0:
+        return {"active":False,"score":0,"factor":1.0,"volume_ratio":1.0,"atr_ratio":1.0,"body_pct":0.0,"breakout":False}
+    z=c[-1]; prev=c[-2]; rng=max(z["high"]-z["low"],0.0)
+    body=abs(z["close"]-z["open"])
+    body_pct=(body/z["open"]*100) if z["open"] else 0.0
+    vr=vol_ratio([x["volume"] for x in c])
+    # Compare current ATR with recent ATR values.
+    atrs=[]
+    h=[x["high"] for x in c]; l=[x["low"] for x in c]; cl=[x["close"] for x in c]
+    for i in range(max(15,len(c)-30),len(c)+1):
+        if i<=len(c) and i>=15:
+            aa=atr(h[:i],l[:i],cl[:i],14)
+            if aa and aa>0: atrs.append(aa)
+    avg_atr=sum(atrs[:-1])/len(atrs[:-1]) if len(atrs)>1 else a
+    atr_ratio=a/avg_atr if avg_atr>0 else 1.0
+    recent_high=max(x["high"] for x in c[-21:-1])
+    recent_low=min(x["low"] for x in c[-21:-1])
+    breakout=(z["close"]>recent_high) if up else (z["close"]<recent_low)
+    score=0
+    score += min(35, max(0,(vr-1.0)*14))
+    score += min(30, max(0,(atr_ratio-1.0)*30))
+    score += min(25, max(0,(body_pct-0.75)*12))
+    score += 10 if breakout else 0
+    score=int(max(0,min(100,round(score))))
+    active=bool(score>=65 and vr>=1.8 and atr_ratio>=1.10 and body_pct>=0.75 and breakout)
+    # Expand target spacing progressively, capped to avoid absurd targets.
+    factor=1.0
+    if active:
+        factor=min(2.50,1.0+(score-65)/35*1.50)
+    return {"active":active,"score":score,"factor":factor,"volume_ratio":vr,
+            "atr_ratio":atr_ratio,"body_pct":body_pct,"breakout":breakout}
+
+def targets(price,a,up,surge_factor=1.0):
+    if not a or a<=0:return []
+    return [price+(a*m*surge_factor if up else -a*m*surge_factor) for m in ATR_MULT]
+
+# ---------- data ----------
+
+def td_candles(data):
+    if not isinstance(data,dict) or not data.get("values"):return None,""
+    out=[]
+    for x in reversed(data["values"]):
+        try:out.append({"datetime":x.get("datetime"),"open":float(x["open"]),"high":float(x["high"]),
+                        "low":float(x["low"]),"close":float(x["close"]),
+                        "volume":float(x.get("volume",0) or 0)})
+        except Exception:pass
+    return (out if len(out)>=60 else None),str((data.get("meta") or {}).get("name") or "")
+
+def sf_candles(data):
+    if not isinstance(data,dict):
+        return None,""
+    rows=data.get("data",[])
+    if isinstance(rows,dict):
+        rows=rows.get("data",[]) if isinstance(rows.get("data",[]),list) else list(rows.values())
+    if not isinstance(rows,list):
+        return None,""
+    meta=data.get("meta") if isinstance(data.get("meta"),dict) else {}
+    name=str(meta.get("symbol") or "")
+    out=[]
+    for x in rows:
+        if not isinstance(x,dict):
+            continue
+        try:
+            ts=x.get("t")
+            if ts is None:
+                continue
+            out.append({"datetime":int(float(ts)),"open":float(x["o"]),"high":float(x["h"]),
+                        "low":float(x["l"]),"close":float(x["c"]),
+                        "volume":float(x.get("v",0) or 0)})
+        except (TypeError,ValueError,KeyError):
+            continue
+    out.sort(key=lambda z:z["datetime"])
+    return (out[-OUTPUTSIZE:] if len(out)>=60 else None),name
+
+def get_tasi(symbol,tf):
+    return td_candles(td("/time_series",{"symbol":symbol,"interval":tf,"outputsize":OUTPUTSIZE,"format":"JSON"}))
+
+def get_sf(asset,symbol,tf):
+    native=SF_TF[tf]
+    # SiftingIO historical bars require gzip and currently allow up to 2000 rows/page.
+    # Keep the requested window below that ceiling while still providing enough bars
+    # for RSI/ATR/hidden-divergence calculations.
+    from datetime import timedelta
+    days_by_tf = {"5m": 6, "15m": 15, "30m": 30, "1h": 60}
+    days = days_by_tf.get(native, 120)
+    start_date = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+    params={"interval":native,"start":start_date,"limit":2000}
+    raw=sf(f"/hist/{asset}/{symbol}/bars",params)
+    if not raw:
+        return None,""
+    c,n=sf_candles(raw)
+    if not c:
+        return None,n
+    if tf=="4h":
+        out=[];bucket=None;cur=None
+        for z in c:
+            b=int(z["datetime"])//3600000//4
+            if b!=bucket:
+                if cur:out.append(cur)
+                bucket=b;cur=dict(z)
+            else:
+                cur["high"]=max(cur["high"],z["high"]);cur["low"]=min(cur["low"],z["low"])
+                cur["close"]=z["close"];cur["volume"]+=z["volume"]
+        if cur:out.append(cur)
+        c=out
+    return c[-OUTPUTSIZE:],n
+
+TASI_QUOTE_CACHE={}
+TASI_QUOTE_TTL=900
+
+def current_price_tasi(symbol):
+    now=time.time()
+    old=TASI_QUOTE_CACHE.get(symbol)
+    if old and now-old[0]<TASI_QUOTE_TTL:
+        return old[1]
+    d=sahmk(f"/quote/{symbol}/",{"data_mode":"delayed"})
     try:
-        return (
-            CATALOG_FILE.exists()
-            and time.time() - CATALOG_FILE.stat().st_mtime < CATALOG_TTL
-        )
+        price=float(d["price"]) if isinstance(d,dict) and d.get("price") is not None else None
     except Exception:
-        return False
+        price=None
+    if price is not None:
+        TASI_QUOTE_CACHE[symbol]=(now,price)
+    return price
+
+def current_price_sf(asset,symbol):
+    d=sf(f"/last/trade/{asset}/{symbol}")
+    try:return float(d["p"]) if isinstance(d,dict) and d.get("p") is not None else None
+    except Exception:return None
 
 
-def load_catalog_file():
-    data = load_json(CATALOG_FILE, {})
-    if not isinstance(data, dict):
-        return
-    for market in symbols:
-        rows = data.get(market)
-        if isinstance(rows, list):
-            symbols[market] = rows
+def symbols_td(data):
+    rows=data.get("data",[]) if isinstance(data,dict) else data if isinstance(data,list) else []
+    return sorted({str(x["symbol"]).strip() for x in rows if isinstance(x,dict) and x.get("symbol")},key=str.upper)
 
+def load_tasi():
+    # SAHMK is now the Saudi symbol directory. The free companies endpoint
+    # is used once to build the TASI universe; technical history remains on
+    # Twelve Data because SAHMK historical OHLCV is Starter+ only.
+    data=sahmk("/companies/",{"market":"TASI","limit":2000,"offset":0})
+    rows=data.get("results",[]) if isinstance(data,dict) else []
+    syms=sorted({str(x.get("symbol")).strip() for x in rows
+                 if isinstance(x,dict) and x.get("symbol") and
+                 str(x.get("market","" )).upper()=="TASI" and
+                 str(x.get("security_type","Equity"))=="Equity" and
+                 str(x.get("status","active")).lower()=="active"},key=str.upper)
+    # Fallback to Twelve Data only if SAHMK directory is temporarily unavailable.
+    if not syms:
+        data=td("/stocks",{"exchange":"XSAU"})
+        rows=data.get("data",[]) if isinstance(data,dict) else []
+        syms=sorted({str(x.get("symbol")).strip() for x in rows
+                     if isinstance(x,dict) and x.get("symbol")},key=str.upper)
+    return syms[:TASI_MAX_SYMBOLS]
 
-def save_catalog_file():
-    save_json(CATALOG_FILE, symbols)
-
-
-def fetch_catalog(market):
-    if market == "CRYPTO":
-        data = api_get(
-            "cryptocurrencies",
-            {"page": 1},
-        )
-    elif market == "US":
-        data = api_get(
-            "stocks",
-            {
-                "country": "United States",
-                "type": "Common Stock",
-                "page": 1,
-            },
-        )
-    else:
-        data = api_get(
-            "stocks",
-            {
-                "exchange": "Saudi Exchange",
-                "page": 1,
-            },
-        )
-
-    if data is None:
-        return []
-
-    rows = rows_from(data)
-    out = []
-    seen = set()
-
-    for item in rows:
-        if not isinstance(item, dict):
-            continue
-
-        sym = str(item.get("symbol", "")).strip()
-        if not sym or sym in seen:
-            continue
-
-        seen.add(sym)
-
-        exchange = str(item.get("exchange", "")).strip()
-        name = str(
-            item.get("name")
-            or item.get("currency_base")
-            or sym
-        ).strip()
-
-        out.append(
-            {
-                "symbol": sym,
-                "name": name,
-                "exchange": exchange,
-            }
-        )
-
-    return out
-
-
-def ensure_catalog():
-    load_catalog_file()
-
-    if catalog_is_fresh() and all(symbols[m] for m in symbols):
-        log(
-            "📚 catalog cache loaded: "
-            + ", ".join(f"{m}={len(symbols[m])}" for m in symbols)
-        )
-        return
-
-    for market in ("TASI", "US", "CRYPTO"):
-        if time.time() < provider_block_until:
+def load_us():
+    # US universe: load the complete provider catalog without A-Z prioritization
+    # and without a numeric cap. The ONLY US eligibility floor is $0.15.
+    # Price is checked from the live SiftingIO trade BEFORE historical analysis,
+    # so cheap symbols are not lost because they appear late in the catalog.
+    all_symbols=[]
+    seen=set()
+    page=1
+    per_page=5000
+    while page<=1000:
+        data=td("/stocks",{
+            "country":"United States",
+            "page":page,
+            "outputsize":per_page
+        })
+        if not isinstance(data,dict):
             break
+        rows=data.get("data",[])
+        if not isinstance(rows,list) or not rows:
+            break
+        added=0
+        for row in rows:
+            if not isinstance(row,dict):
+                continue
+            sym=str(row.get("symbol","")).strip().upper()
+            country=str(row.get("country","")).strip().lower()
+            if not sym or sym in seen or country not in ("united states","us","usa"):
+                continue
+            seen.add(sym)
+            all_symbols.append(sym)
+            added += 1
+        print(f"[US] catalog page {page}: +{added} | total={len(all_symbols)}")
+        if len(rows)<per_page:
+            break
+        page += 1
+    # No slicing, no A-Z sorting, no 13,375 cap.
+    return all_symbols if all_symbols else ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA"]
 
-        try:
-            fresh = fetch_catalog(market)
-            if fresh:
-                symbols[market] = fresh
-                log(f"📚 {market}: {len(fresh)} symbols")
-                save_catalog_file()
-        except Exception as exc:
-            log(f"catalog {market}: {exc}")
+def load_crypto():
+    x=symbols_td(td("/cryptocurrencies",{}))
+    # جميع العملات الرقمية من الدليل بدون حصرها على USD.
+    # نحتفظ بالرموز كما يعيدها المزود، مع إزالة التكرار فقط.
+    x=[z.upper().strip() for z in x if z and z.strip()]
+    x=sorted(set(x), key=str.upper)
+    return x if x else ["BTCUSD","ETHUSD","SOLUSD","XRPUSD","DOGEUSD"]
 
-    save_state()
+def get_symbols(market,loader):
+    now=time.time()
+    with cache_lock:
+        c=symbol_cache[market]
+        if c["symbols"] and now-c["updated"]<CACHE_TTL:return list(c["symbols"])
+    x=loader()
+    if x:
+        with cache_lock:symbol_cache[market]={"symbols":list(x),"updated":now}
+    return x
 
+# ---------- corporate actions / ownership ----------
+SPLIT_CACHE={"rows":[],"updated":0}
+OWNERSHIP_CACHE={}
+SPLIT_SENT=set()
+SPLIT_TTL=21600
+OWNERSHIP_TTL=86400
 
-# ============================================================
-# Technical calculations
-# ============================================================
+def refresh_split_calendar():
+    now=time.time()
+    if now-SPLIT_CACHE["updated"]<SPLIT_TTL:
+        return SPLIT_CACHE["rows"]
+    today=datetime.utcnow().strftime("%Y-%m-%d")
+    end=(datetime.utcnow()+__import__('datetime').timedelta(days=7)).strftime("%Y-%m-%d")
+    d=td("/splits_calendar",{"start_date":today,"end_date":end,"outputsize":500})
+    rows=d if isinstance(d,list) else d.get("data",[]) if isinstance(d,dict) else []
+    SPLIT_CACHE.update({"rows":rows,"updated":now})
+    return rows
 
-def closes(data):
-    out = []
-    for r in data:
-        try:
-            v = float(r["close"])
-            if v > 0:
-                out.append(v)
-        except Exception:
-            pass
-    return out
+def split_for_symbol(symbol):
+    for row in refresh_split_calendar():
+        if str(row.get("symbol","")).upper()==symbol.upper():
+            return row
+    return None
 
+def institutional_activity(symbol):
+    now=time.time(); old=OWNERSHIP_CACHE.get(symbol)
+    if old and now-old[0]<OWNERSHIP_TTL:
+        return old[1]
+    d=sf(f"/fnd/stocks/{symbol}/ownership",{"limit":25})
+    rows=d.get("data",[]) if isinstance(d,dict) else []
+    # 13D/13G is beneficial ownership, not live trading.
+    info="⚪ لا توجد حركة مؤسسية جديدة موثقة"
+    if rows:
+        latest=rows[0]
+        form=str(latest.get("form","")).upper()
+        filed=latest.get("filed_at") or latest.get("filing_date") or ""
+        info=f"🏦 آخر إفصاح ملكية: {form} {filed}".strip()
+    OWNERSHIP_CACHE[symbol]=(now,info)
+    return info
 
-def ema(values, period):
-    if len(values) < period:
+def send_split_alerts(symbols,market,token):
+    if market not in ("TASI","US"): return 0
+    symbol_set={x.upper() for x in symbols}
+    sent=0
+    for row in refresh_split_calendar():
+        sym=str(row.get("symbol","")).upper()
+        if not sym or sym not in symbol_set: continue
+        date=str(row.get("date","") or "")
+        key=f"{market}:{sym}:{date}:{row.get('description','')}"
+        if key in SPLIT_SENT: continue
+        text=("⚠️ <b>تنبيه تقسيم السهم</b>\n\n"
+              f"🌐 {market}\n📌 <b>{sym}</b>\n"
+              f"🔄 {row.get('description','Split')}\n"
+              f"📅 التاريخ: {date}\n"
+              "ℹ️ تم فصل حدث التقسيم عن الإشارة الفنية حتى لا يختلط أثره السعري بالمؤشرات.")
+        if tg(token,text):
+            SPLIT_SENT.add(key); sent+=1
+    return sent
+
+# ---------- news ----------
+
+def news(symbol):
+    data=td("/news",{"symbol":symbol,"limit":10})
+    rows=data.get("news",[]) if isinstance(data,dict) else data if isinstance(data,list) else []
+    p=n=0
+    for a in rows:
+        if isinstance(a,dict):
+            t=(str(a.get("title",""))+" "+str(a.get("description",""))).lower()
+            p+=sum(w in t for w in POSITIVE);n+=sum(w in t for w in NEGATIVE)
+    return "🟢 إيجابي" if p>n else "🔴 سلبي" if n>p else "⚪ محايد"
+
+# ---------- analysis ----------
+
+def flow_events(c):
+    if len(c)<25:
+        return {"breakout":False,"funds":False,"makers":False,"speculators":False,"accumulation":False,"unusual":False}
+    last=c[-1]; prev=c[-21:-1]
+    resistance=max(z["high"] for z in prev); support=min(z["low"] for z in prev)
+    avg_vol=sum(z["volume"] for z in prev)/20 if prev else 0
+    vr=(last["volume"]/avg_vol) if avg_vol>0 else 1.0
+    rng=max(last["high"]-last["low"],0); body=abs(last["close"]-last["open"])
+    breakout=last["close"]>resistance or last["close"]<support
+    unusual=vr>=2.0 or (avg_vol>0 and rng>0 and body/rng>=0.75 and vr>=1.5)
+    accumulation=vr>=1.5 and last["close"]>=last["open"] and last["close"]>sum(z["close"] for z in prev[-5:])/5
+    speculators=vr>=2.5 and abs(last["close"]-last["open"])/(last["open"] or 1)>=0.01
+    makers=vr>=3.0 and body/rng>=0.65 if rng>0 else False
+    funds=vr>=2.0 and last["close"]>=last["open"] and last["close"]>=sum(z["close"] for z in prev[-10:])/10
+    return {"breakout":breakout,"funds":funds,"makers":makers,"speculators":speculators,"accumulation":accumulation,"unusual":unusual}
+
+def analyze_candles(symbol,market,c,name,tf,current_price=None):
+    if not c:return None
+    x=[z["close"] for z in c];h=[z["high"] for z in c];l=[z["low"] for z in c];v=[z["volume"] for z in c]
+    bar_price=x[-1]
+    price=current_price if current_price is not None and current_price>0 else bar_price
+    if market=="US" and price<MIN_US_PRICE:return None
+    if bar_price>0 and abs(price-bar_price)/bar_price>0.35:
+        # حماية من خلط سعر حي بسلسلة تاريخية مختلفة بعد split/corporate action.
         return None
-    value = sum(values[:period]) / period
-    k = 2.0 / (period + 1)
-    for x in values[period:]:
-        value = value + k * (x - value)
-    return value
+    e10,e14,e15,e25,e50=[ema(x,n) for n in (10,14,15,25,50)]
+    rv=rsi(x);a=atr(h,l,x);vw=vwap(h,l,x,v);hb,hs=hidden_div(c);g=golden(c)
+    score=0
+    score+=20 if e50 and price>e50 else 0
+    score+=15 if e10 and e14 and e10>e14 else 0
+    score+=15 if e14 and e25 and e14>e25 else 0
+    score+=20 if rv and rv>50 else 0
+    score+=15 if vw and price>vw else 0
+    score+=15 if vol_ratio(v)>=1.10 else 0
+    # Signal logic is intentionally more tolerant so TASI and crypto can emit alerts
+    # even when VWAP/volume is missing or a market has thinner intraday history.
+    above_vwap = (vw is not None and price > vw)
+    below_vwap = (vw is not None and price < vw)
+    buy_core = bool(e10 and e25 and rv and e10>e25 and rv>50 and (vw is None or above_vwap))
+    sell_core = bool(e10 and e25 and rv and e10<e25 and rv<50 and (vw is None or below_vwap))
+    buy_confirm = bool(e50 and rv and price>e50 and rv>=55 and (vw is None or above_vwap))
+    sell_confirm = bool(e50 and rv and price<e50 and rv<=45 and (vw is None or below_vwap))
+    buy=g or hb or buy_core or buy_confirm
+    sell=hs or sell_core or sell_confirm
+    if buy and score>=MIN_SCORE: sig="BUY";txt="🟢 شراء قوي";strength=score
+    elif sell and 100-score>=MIN_SCORE: sig="SELL";txt="🔴 بيع قوي";strength=100-score
+    else:return None
+    surge=surge_info(c,a,sig=="BUY")
+    tr=trend(c)
+    with state_lock:
+        if tr!="NEUTRAL":trend_state[f"{market}:{symbol}"]=tr
+        tr=trend_state.get(f"{market}:{symbol}",tr)
+    return {"market":market,"symbol":symbol,"name":name or symbol,"price":price,"signal":sig,
+            "signal_text":txt,"score":strength,"timeframe":tf,"trend":tr,"ema10":e10,
+            "ema14":e14,"ema15":e15,"ema25":e25,"ema50":e50,"rsi":rv,"atr":a,"vwap":vw,
+            "support":min(z["low"] for z in c[-50:]),"resistance":max(z["high"] for z in c[-50:]),
+            "volume_ratio":vol_ratio(v),"ars":ars(c),"golden":g,"flow":flow_events(c),
+            "surge":surge,"targets":targets(price,a,sig=="BUY",surge["factor"]),
+            "news":"⚪ غير متاح"}
 
+def analyze(symbol,market):
+    if market=="TASI":
+        live=current_price_tasi(symbol)
+        asset=None
+    else:
+        asset="stocks" if market=="US" else "crypto"
+        live=current_price_sf(asset,symbol)
+    split=split_for_symbol(symbol) if market in ("TASI","US") else None
+    tf_list=("15min",) if market=="TASI" else TIMEFRAMES
+    for tf in tf_list:
+        c,n=get_tasi(symbol,tf) if market=="TASI" else get_sf(asset,symbol,tf)
+        # TASI uses Twelve Data for the technical candle series and SAHMK for the
+        # current/most recent quoted price. If SAHMK is delayed or temporarily
+        # unavailable, analyze the candle price instead of dropping the symbol.
+        r=analyze_candles(symbol,market,c,n,tf,live)
+        if r:
+            r["split"]=split
+            r["institutional"] = ""
+            r["news"] = "⚪ محايد"
+            return r
+    return None
 
-def rsi(values, period=14):
-    if len(values) <= period:
-        return None
+# ---------- Telegram ----------
 
-    gains = []
-    losses = []
-
-    for i in range(1, len(values)):
-        d = values[i] - values[i - 1]
-        gains.append(max(d, 0))
-        losses.append(max(-d, 0))
-
-    gain = sum(gains[:period]) / period
-    loss = sum(losses[:period]) / period
-
-    for i in range(period, len(gains)):
-        gain = ((gain * (period - 1)) + gains[i]) / period
-        loss = ((loss * (period - 1)) + losses[i]) / period
-
-    if loss == 0:
-        return 100.0
-
-    return 100.0 - 100.0 / (1.0 + gain / loss)
-
-
-def atr(data, period=14):
-    if len(data) < period + 1:
-        return None
-
-    trs = []
-    previous = None
-
-    for row in data:
-        try:
-            high = float(row["high"])
-            low = float(row["low"])
-            close = float(row["close"])
-        except Exception:
-            continue
-
-        if previous is None:
-            tr = high - low
-        else:
-            tr = max(
-                high - low,
-                abs(high - previous),
-                abs(low - previous),
-            )
-
-        trs.append(tr)
-        previous = close
-
-    if len(trs) < period:
-        return None
-
-    value = sum(trs[:period]) / period
-    for tr in trs[period:]:
-        value = ((value * (period - 1)) + tr) / period
-    return value
-
-
-def vwap(data):
-    total_pv = 0.0
-    total_volume = 0.0
-
-    for row in data:
-        try:
-            high = float(row["high"])
-            low = float(row["low"])
-            close = float(row["close"])
-            volume = float(row.get("volume", 0))
-        except Exception:
-            continue
-
-        if volume <= 0:
-            continue
-
-        typical = (high + low + close) / 3.0
-        total_pv += typical * volume
-        total_volume += volume
-
-    if total_volume <= 0:
-        return None
-
-    return total_pv / total_volume
-
-
-def support_resistance(data, length=30):
-    recent = data[-length:]
-    highs, lows = [], []
-
-    for row in recent:
-        try:
-            highs.append(float(row["high"]))
-            lows.append(float(row["low"]))
-        except Exception:
-            pass
-
-    if not highs or not lows:
-        return None, None
-
-    return min(lows), max(highs)
-
-
-def volume_ratio(data):
-    if len(data) < 21:
-        return 1.0
-
-    vals = []
-    for row in data[-21:-1]:
-        try:
-            v = float(row.get("volume", 0))
-            if v > 0:
-                vals.append(v)
-        except Exception:
-            pass
-
-    if not vals:
-        return 1.0
-
-    avg = sum(vals) / len(vals)
-
+def tg(token,text):
+    if not token or not CHAT_ID:return False
     try:
-        current = float(data[-1].get("volume", 0))
-    except Exception:
-        return 1.0
+        r=requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                        data={"chat_id":CHAT_ID,"text":text,"parse_mode":"HTML"},timeout=30)
+        return r.ok
+    except Exception:return False
 
-    return current / avg if avg else 1.0
+def fmt(x):
+    if x is None:return "-"
+    try:x=float(x)
+    except Exception:return "-"
+    if abs(x)>=1e9:return f"{x/1e9:.2f}B"
+    if abs(x)>=1e6:return f"{x/1e6:.2f}M"
+    if abs(x)>=1e3:return f"{x/1e3:.2f}K"
+    ax=abs(x)
+    if ax>=100:return f"{x:.2f}"
+    if ax>=1:return f"{x:.4f}"
+    if ax>=0.01:return f"{x:.6f}"
+    if ax>=0.0001:return f"{x:.8f}"
+    if ax>=0.000001:return f"{x:.10f}"
+    return f"{x:.12f}"
 
-
-def format_price(x):
-    if x is None:
-        return "—"
-    x = float(x)
-    if abs(x) >= 1000:
-        return f"{x:,.2f}"
-    if abs(x) >= 1:
-        return f"{x:.2f}"
-    return f"{x:.6f}"
-
-
-# ============================================================
-# Data cache
-# ============================================================
-
-def history_key(market, item):
-    return (
-        market,
-        item.get("symbol", ""),
-        item.get("exchange", ""),
-    )
-
-
-def get_history(market, item):
-    key = history_key(market, item)
-    now = time.time()
-
-    cached = history_cache.get(key)
-    if cached and now - cached["time"] < HISTORY_TTL:
-        return cached["data"]
-
-    if now < provider_block_until:
-        return cached["data"] if cached else []
-
-    params = {
-        "symbol": item["symbol"],
-        "interval": "1day",
-        "outputsize": 100,
+def message(r):
+    """Telegram alert layout — organized to match the approved visual mockup."""
+    market_labels = {
+        "TASI": "🇸🇦 <b>تاسي</b>",
+        "US": "🇺🇸 <b>السوق الأمريكي US</b>",
+        "CRYPTO": "🪙 <b>العملات الرقمية</b>",
     }
+    market = market_labels.get(r["market"], f"🌐 <b>{r['market']}</b>")
 
-    if item.get("exchange"):
-        params["exchange"] = item["exchange"]
-
-    data = api_get("time_series", params)
-    if data is None:
-        return cached["data"] if cached else []
-
-    values = data.get("values", []) if isinstance(data, dict) else []
-    if not isinstance(values, list) or len(values) < 60:
-        return cached["data"] if cached else []
-
-    values = list(reversed(values))
-    history_cache[key] = {"time": now, "data": values}
-    return values
-
-
-def get_quote(market, item):
-    key = history_key(market, item)
-    now = time.time()
-
-    # Quote cache prevents accidental duplicate requests inside a cycle.
-    cached = quote_cache.get(key)
-    if cached and now - cached["time"] < 60:
-        return cached["data"]
-
-    if now < provider_block_until:
-        return cached["data"] if cached else None
-
-    params = {"symbol": item["symbol"]}
-    if item.get("exchange"):
-        params["exchange"] = item["exchange"]
-
-    data = api_get("quote", params)
-    if data is None:
-        return cached["data"] if cached else None
-
-    quote_cache[key] = {"time": now, "data": data}
-    return data
-
-
-# ============================================================
-# Analysis
-# ============================================================
-
-def analyze(market, item, quote, history):
-    try:
-        price = float(quote.get("close", 0))
-        change = float(quote.get("percent_change", 0))
-    except Exception:
-        return None
-
-    if price <= 0:
-        return None
-
-    if market == "US" and price < MIN_US_PRICE:
-        return None
-
-    c = closes(history)
-    if len(c) < 60:
-        return None
-
-    e10 = ema(c, 10)
-    e14 = ema(c, 14)
-    e15 = ema(c, 15)
-    e25 = ema(c, 25)
-    e50 = ema(c, 50)
-    r = rsi(c, 14)
-    a = atr(history, 14)
-    w = vwap(history)
-    support, resistance = support_resistance(history)
-    vr = volume_ratio(history)
-
-    if any(x is None for x in (e10, e14, e15, e25, e50, r, a)):
-        return None
-
-    buy = 0
-    sell = 0
-
-    if price > e10:
-        buy += 1
+    if r["signal"] == "BUY":
+        signal_badge = "🟢 <b>شراء قوي</b>"
+    elif r["signal"] == "SELL":
+        signal_badge = "🔴 <b>بيع قوي</b>"
     else:
-        sell += 1
+        signal_badge = "⚪ <b>انتظار</b>"
 
-    if e10 > e14:
-        buy += 1
+    if r["trend"] == "UP":
+        trend_text = "🟢 اتجاه صاعد ↗️"
+    elif r["trend"] == "DOWN":
+        trend_text = "🔴 اتجاه هابط ↘️"
     else:
-        sell += 1
+        trend_text = "⚪ اتجاه محايد"
 
-    if e14 > e15:
-        buy += 1
+    # Momentum is descriptive only; it is derived from the existing score/volume/RSI data.
+    if r["score"] >= 80:
+        momentum = "قوي"
+    elif r["score"] >= 60:
+        momentum = "جيد"
     else:
-        sell += 1
+        momentum = "ضعيف"
 
-    if e15 > e25:
-        buy += 1
-    else:
-        sell += 1
+    vwap_state = "🟢 فوق VWAP" if r.get("vwap") is not None and r["price"] > r["vwap"] else \
+                 "🔴 تحت VWAP" if r.get("vwap") is not None else "⚪ غير متاح"
 
-    if e25 > e50:
-        buy += 1
-    else:
-        sell += 1
+    s = [
+        "💀🚀 <b>AI PRO MAX</b>",
+        f"🌐 {market}",
+        "",
+        f"📌 <b>{r['symbol']}</b>",
+        f"{signal_badge}    <b>{r['score']}/100</b>",
+        f"⏱️ الإطار: <b>{r['timeframe']}</b>",
+        "",
+        f"💰 السعر الحالي: <b>{fmt(r['price'])}</b>",
+        f"📊 الزخم: <b>{momentum}</b>",
+        f"📈 الاتجاه: <b>{trend_text}</b>",
+        f"🧠 RSI 14: <b>{fmt(r['rsi'])}</b>",
+        f"📊 VWAP: <b>{fmt(r['vwap'])}</b>  {vwap_state}",
+        f"📐 ATR 14: <b>{fmt(r['atr'])}</b>",
+        f"📦 الحجم: <b>{r['volume_ratio']:.2f}x</b>",
+        "",
+        "📐 <b>المتوسطات EMA</b>",
+        f"EMA10: <b>{fmt(r['ema10'])}</b>   |   EMA14: <b>{fmt(r['ema14'])}</b>",
+        f"EMA15: <b>{fmt(r['ema15'])}</b>   |   EMA25: <b>{fmt(r['ema25'])}</b>",
+        f"EMA50: <b>{fmt(r['ema50'])}</b>",
+        "",
+        "🛡️ <b>الدعم والمقاومة</b>",
+        f"🛡️ الدعم: <b>{fmt(r['support'])}</b>",
+        f"🚧 المقاومة: <b>{fmt(r['resistance'])}</b>",
+        "",
+        f"🧮 <b>ARS: {r['ars']}</b>",
+        f"🟡 Golden Candle: <b>{'نعم' if r['golden'] else 'لا'}</b>",
+    ]
 
-    if r >= 55:
-        buy += 2
-    elif r <= 45:
-        sell += 2
+    f = r.get("flow", {})
+    flow_lines = []
+    if f.get("breakout"):
+        flow_lines.append("📈 الاختراقات: <b>تم رصد اختراق</b>")
+    if f.get("funds"):
+        flow_lines.append("🏦 تحركات الصناديق: <b>نشاط محتمل من الحجم</b>")
+    if f.get("makers"):
+        flow_lines.append("🐋 صنّاع السهم: <b>حركة كبيرة محتملة</b> <i>(Proxy)</i>")
+    if f.get("speculators"):
+        flow_lines.append("⚡ حركة المضاربين: <b>قوية</b>")
+    if f.get("accumulation"):
+        flow_lines.append("💰 عمليات التجميع: <b>محتملة</b>")
+    if f.get("unusual"):
+        flow_lines.append("🔎 تحركات غير اعتيادية: <b>تم رصدها</b>")
 
-    if w is not None:
-        if price > w:
-            buy += 1
-        else:
-            sell += 1
+    if flow_lines:
+        s += ["", "🐋 <b>تحليل الحركة</b>"] + flow_lines
 
-    if vr >= 1.5:
-        if price >= c[-1]:
-            buy += 1
-        else:
-            sell += 1
+    if r.get("institutional"):
+        s += ["", r["institutional"]]
 
-    total = max(buy + sell, 1)
-    buy_power = round(100 * buy / total)
-    sell_power = round(100 * sell / total)
+    if r["market"] == "US":
+        s += ["", f"📰 <b>آخر الأخبار:</b> {r['news']}"]
 
-    if buy_power >= 70 and buy > sell:
-        signal = "BUY"
-        strength = buy_power
-        trend = "🟢 UP"
-    elif sell_power >= 70 and sell > buy:
-        signal = "SELL"
-        strength = sell_power
-        trend = "🔴 DOWN"
-    else:
-        return None
+    if r.get("split"):
+        sp = r["split"]
+        s += [
+            "",
+            "⚠️ <b>تنبيه تقسيم السهم</b>",
+            f"🔄 {sp.get('description', 'Split')}",
+            f"📅 {sp.get('date', '-')}",
+        ]
 
-    targets = []
-    for mult in (1, 1.5, 2, 2.5, 3, 3.5, 4, 5):
-        targets.append(
-            price + a * mult
-            if signal == "BUY"
-            else price - a * mult
-        )
+    surge=r.get("surge") or {}
+    if surge.get("active"):
+        s += [
+            "",
+            "🚀 <b>حركة انفجارية — SURGE MODE</b>",
+            f"🔥 قوة القفزة: <b>{surge.get('score',0)}/100</b>",
+            f"📊 الحجم: <b>{surge.get('volume_ratio',1):.1f}x</b>",
+            f"📐 توسع ATR: <b>{surge.get('atr_ratio',1):.2f}x</b>",
+            f"⚡ اتساع الأهداف: <b>{surge.get('factor',1):.2f}x</b>",
+        ]
 
-    # Golden candle / unusual activity are technical proxies.
-    golden = False
-    try:
-        last = history[-1]
-        op = float(last.get("open", last["close"]))
-        hi = float(last["high"])
-        lo = float(last["low"])
-        cl = float(last["close"])
-        rng = hi - lo
-        body = abs(cl - op)
-        golden = (
-            rng > 0
-            and cl > op
-            and body / rng >= 0.65
-            and vr >= 1.5
-        )
-    except Exception:
-        pass
+    if r.get("targets"):
+        s += ["", "🎯 <b>أهداف ATR (8)</b>" + (" 🚀" if surge.get("active") else "")]
+        for i, t in enumerate(r["targets"], 1):
+            ch = (t - r["price"]) / r["price"] * 100 if r["price"] else 0
+            s.append(f"TP{i}: <b>{fmt(t)}</b>   ({ch:+.2f}%)")
 
-    return {
-        "market": market,
-        "symbol": item["symbol"],
-        "price": price,
-        "change": change,
-        "signal": signal,
-        "strength": strength,
-        "buy_power": buy_power,
-        "sell_power": sell_power,
-        "trend": trend,
-        "rsi": r,
-        "atr": a,
-        "vwap": w,
-        "volume_ratio": vr,
-        "ema10": e10,
-        "ema14": e14,
-        "ema15": e15,
-        "ema25": e25,
-        "ema50": e50,
-        "support": support,
-        "resistance": resistance,
-        "golden": golden,
-        "targets": targets,
-    }
+    s += [
+        "",
+        "🔄 <b>استمرار الاتجاه</b>: حتى ظهور انعكاس مؤكد",
+        f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+        "⚠️ <i>إشارة تحليلية آلية وليست توصية استثمارية.</i>",
+    ]
+    return "\n".join(s)
 
-
-# ============================================================
-# Telegram — standard library only
-# ============================================================
-
-def token_for(market):
-    return {
-        "TASI": TASI_TOKEN,
-        "US": US_TOKEN,
-        "CRYPTO": CRYPTO_TOKEN,
-    }.get(market, "")
-
-
-def telegram_send(market, chat_id, message):
-    token = token_for(market)
-    if not token:
-        return False
-
-    url = (
-        "https://api.telegram.org/"
-        f"bot{token}/sendMessage"
-    )
-
-    payload = urllib.parse.urlencode(
-        {
-            "chat_id": str(chat_id),
-            "text": message,
-            "disable_web_page_preview": "true",
-        }
-    ).encode()
-
-    request = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"User-Agent": "AI-PRO-MAX/1.0"},
-        method="POST",
-    )
-
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            return response.status == 200
-    except Exception as exc:
-        log(f"Telegram warning: {exc}")
-        return False
-
-
-def signal_text(s):
-    title = "🟢⬆️ شراء قوي" if s["signal"] == "BUY" else "🔴⬇️ بيع قوي"
-
-    tps = []
-    for i, target in enumerate(s["targets"], 1):
-        if s["signal"] == "BUY":
-            pct = (target / s["price"] - 1) * 100
-        else:
-            pct = (1 - target / s["price"]) * 100
-        tps.append(f"TP{i}: {format_price(target)} ({pct:+.1f}%)")
-
-    market_name = {
-        "TASI": "🇸🇦 تاسي",
-        "US": "🇺🇸 السوق الأمريكي",
-        "CRYPTO": "🪙 العملات الرقمية",
-    }[s["market"]]
-
-    return (
-        "💀🚀 AI PRO MAX\n\n"
-        f"{market_name}\n"
-        f"#{s['symbol']}\n\n"
-        f"{title}\n"
-        f"🎯 القوة: {s['strength']}/100\n"
-        f"💰 السعر: {format_price(s['price'])}\n"
-        f"📈 التغير: {s['change']:+.2f}%\n"
-        f"📊 الاتجاه: {s['trend']}\n"
-        f"RSI 14: {s['rsi']:.1f}\n"
-        f"VWAP: {format_price(s['vwap'])}\n"
-        f"ATR 14: {format_price(s['atr'])}\n"
-        f"📊 الحجم: {s['volume_ratio']:.2f}x\n\n"
-        f"EMA10: {format_price(s['ema10'])}\n"
-        f"EMA14: {format_price(s['ema14'])}\n"
-        f"EMA15: {format_price(s['ema15'])}\n"
-        f"EMA25: {format_price(s['ema25'])}\n"
-        f"EMA50: {format_price(s['ema50'])}\n\n"
-        f"🛡️ الدعم: {format_price(s['support'])}\n"
-        f"🔺 المقاومة: {format_price(s['resistance'])}\n"
-        f"✨ Golden Candle: {'نعم' if s['golden'] else 'لا'}\n\n"
-        "🎯 أهداف ATR:\n"
-        + "\n".join(tps)
-        + "\n\n"
-        "⚠️ المؤشرات حسابات فنية وليست ضمانًا للنتيجة."
-    )
-
-
-def can_send(s):
-    key = f"{s['market']}|{s['symbol']}|{s['signal']}"
-    now = time.time()
-
-    previous = float(last_signal.get(key, 0))
-    if now - previous < SIGNAL_COOLDOWN:
-        return False
-
-    last_signal[key] = now
-    save_state()
+def should_send(r):
+    k=f"{r['market']}:{r['symbol']}";st=(r["signal"],r["trend"])
+    with state_lock:
+        if last_signal.get(k)==st:return False
+        last_signal[k]=st
     return True
 
+def enrich_alert(r):
+    if r["market"]=="US":
+        r["news"]=news(r["symbol"])
+        r["institutional"]=institutional_activity(r["symbol"])
+    elif r["market"]=="TASI":
+        r["institutional"]="⚪ تتبع الصناديق: غير متاح من مزود البيانات الحالي"
+    else:
+        r["institutional"]="⚪ تتبع الصناديق: غير منطبق على السوق الفوري للعملات الرقمية"
+    return r
 
-def send_signal(s):
-    if not can_send(s):
-        return
-
-    message = signal_text(s)
-    chats = list(telegram_chats[s["market"]])
-
-    for chat_id in chats:
-        telegram_send(s["market"], chat_id, message)
-
-
-# ============================================================
-# Telegram webhook / lightweight server
-# ============================================================
-
-def http_server():
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *_):
-            return
-
-        def do_GET(self):
-            body = json.dumps(
-                {
-                    "status": "ok",
-                    "system": "AI PRO MAX",
-                    "markets": {
-                        k: len(v) for k, v in symbols.items()
-                    },
-                    "provider_paused": max(
-                        0, int(provider_block_until - time.time())
-                    ),
-                },
-                ensure_ascii=False,
-            ).encode()
-
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def do_POST(self):
-            length = int(self.headers.get("Content-Length", "0"))
-            raw = self.rfile.read(length) if length else b"{}"
-
-            try:
-                data = json.loads(raw.decode("utf-8"))
-            except Exception:
-                data = {}
-
-            path = self.path.lower()
-            market = None
-
-            if path.endswith("/telegram/tasi"):
-                market = "TASI"
-            elif path.endswith("/telegram/us"):
-                market = "US"
-            elif path.endswith("/telegram/crypto"):
-                market = "CRYPTO"
-
-            if market:
-                message = data.get("message", {})
-                chat = message.get("chat", {})
-                chat_id = chat.get("id")
-
-                if chat_id is not None:
-                    telegram_chats[market].add(int(chat_id))
-
-                    text = str(message.get("text", ""))
-                    if text.startswith("/start"):
-                        telegram_send(
-                            market,
-                            chat_id,
-                            (
-                                "💀🚀 AI PRO MAX\n\n"
-                                "✅ البوت متصل\n"
-                                f"📊 {market}\n"
-                                "🔄 الفحص تلقائي\n"
-                                "🛡️ حماية الحصة مفعلة"
-                            ),
-                        )
-
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    log(f"🌐 health server :{PORT}")
-    server.serve_forever()
-
-
-# ============================================================
-# Scan engine
-# ============================================================
-
-def process_one(market, item):
-    quote = get_quote(market, item)
-    if not quote:
-        return
-
-    history = get_history(market, item)
-    if not history:
-        return
-
-    result = analyze(market, item, quote, history)
-    if result:
-        send_signal(result)
-
-
-def scan_market_slice(market):
-    rows = symbols.get(market, [])
-    if not rows:
-        return
-
-    total = len(rows)
-
-    # One symbol at a time keeps the provider connection quiet.
-    # The index moves forward, so the entire catalog is eventually covered.
-    start = symbol_index[market]
-    item = rows[start % total]
-    symbol_index[market] = (start + 1) % total
-
-    log(
-        f"🔎 {market}: "
-        f"{item['symbol']} "
-        f"({symbol_index[market]}/{total})"
-    )
-
-    try:
-        process_one(market, item)
-    except Exception as exc:
-        log(f"scan {market} {item.get('symbol')}: {exc}")
-
-
-def main_loop():
-    ensure_catalog()
-
-    # Stagger markets. No huge burst at startup.
-    market_order = ("TASI", "US", "CRYPTO")
-    cursor = 0
-
+def tg_worker():
     while True:
-        if time.time() < provider_block_until:
-            wait = max(5, int(provider_block_until - time.time()))
-            log(f"🛡️ الحصة محمية — انتظار {wait} ثانية")
-            time.sleep(min(wait, 300))
-            continue
+        item=TG_QUEUE.get()
+        if item is None:TG_QUEUE.task_done();return
+        token,r=item
+        try:
+            if tg(token,message(r)):print(f"[{r['market']}] 📲 {r['symbol']} {r['signal']} {r['score']}/100")
+        finally:TG_QUEUE.task_done()
 
-        market = market_order[cursor % len(market_order)]
-        cursor += 1
+# ---------- scanning ----------
 
-        scan_market_slice(market)
+def scan(symbols,market,token):
+    total=len(symbols);done=signals=0
+    print(f"[{market}] 🎯 شرط السعر الأمريكي: >= ${MIN_US_PRICE:.2f} | لا يوجد حد عددي للرموز")
+    print(f"[{market}] 🧠 بدء الفحص: {total} رمز | Workers={MAX_WORKERS}")
+    batch_size=MAX_WORKERS*8
+    for start in range(0,total,batch_size):
+        batch=symbols[start:start+batch_size]
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+            jobs={ex.submit(analyze,s,market):s for s in batch}
+            for job in as_completed(jobs):
+                done+=1
+                try:
+                    r=job.result()
+                    if r and should_send(r):
+                        r=enrich_alert(r)
+                        TG_QUEUE.put_nowait((token,r));signals+=1
+                except queue.Full:pass
+                except Exception as e:print(f"[{market}] analysis error: {e}")
+        if done%100==0 or done==total:print(f"[{market}] {done}/{total} | signals={signals}")
+    print(f"[{market}] انتهى | {total} | signals={signals}")
 
-        # Catalog is refreshed only once per day.
-        if not catalog_is_fresh():
-            ensure_catalog()
+RIYADH=ZoneInfo("Asia/Riyadh")
 
-        # No overlapping cycles and no burst.
-        time.sleep(max(5, SCAN_SECONDS))
+def tasi_market_open():
+    # 24/7 mode requested by the user: do not stop the Saudi scanner
+    # based on the official TASI session calendar. The provider may return
+    # the latest available/delayed data outside market hours.
+    return True
 
+def market_loop(market,token,loader):
+    while True:
+        try:
+            # TASI scanner is configured for 24/7 operation.
+            symbols=get_symbols(market,loader)
+            print(f"💀 {market}: {len(symbols)} رمز")
+            if symbols:
+                send_split_alerts(symbols,market,token)
+                scan(symbols,market,token)
+        except Exception as e:print(f"[{market}] loop error: {e}")
+        time.sleep(SCAN_INTERVAL)
 
-# ============================================================
-# Startup
-# ============================================================
+def heartbeat():
+    while True:
+        print("💀🚀 AI PRO MAX يعمل 24/7 | "+datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        time.sleep(300)
 
-if __name__ == "__main__":
-    log("=" * 60)
-    log("💀🚀 AI PRO MAX — QUOTA SAFE")
-    log("=" * 60)
-    log("🧠 Engine: custom Python / standard library")
-    log("🛡️ quota protection: ON")
-    log("📚 local catalog cache: ON")
-    log("💾 local state cache: ON")
-    log("🚫 overlapping scans: OFF")
-    log(
-        "🤖 TASI: "
-        + ("ON" if TASI_TOKEN else "OFF")
-    )
-    log(
-        "🤖 US: "
-        + ("ON" if US_TOKEN else "OFF")
-    )
-    log(
-        "🤖 CRYPTO: "
-        + ("ON" if CRYPTO_TOKEN else "OFF")
-    )
+def main():
+    print("="*70)
+    print("💀🚀 AI PRO MAX — FINAL HYBRID")
+    print("🇸🇦 تاسي -> SAHMK + Twelve Data history | 🇺🇸 US -> SiftingIO | 🪙 Crypto -> SiftingIO")
+    print("="*70)
+    required=("CHAT_ID","TASI_TOKEN","US_TOKEN","CRYPTO_TOKEN","TWELVEDATA_API_KEY","SIFTING_API_KEY","SAHMK_API_KEY")
+    missing=[x for x in required if not os.getenv(x)]
+    if missing:
+        print("❌ متغيرات ناقصة: "+", ".join(missing));return
+    print("🟢 Environment: OK")
+    print("🇸🇦 TASI: SAHMK symbol/quote + Twelve Data technical history")
+    threading.Thread(target=tg_worker,daemon=True).start()
+    threading.Thread(target=heartbeat,daemon=True).start()
+    threading.Thread(target=market_loop,args=("TASI",TASI_TOKEN,load_tasi),daemon=True).start()
+    threading.Thread(target=market_loop,args=("US",US_TOKEN,load_us),daemon=True).start()
+    threading.Thread(target=market_loop,args=("CRYPTO",CRYPTO_TOKEN,load_crypto),daemon=True).start()
+    while True:time.sleep(60)
 
-    if not TWELVE_KEY:
-        log("⛔ TWELVE_DATA_API_KEY غير موجود")
-
-    # Server in background.
-    threading.Thread(
-        target=http_server,
-        daemon=True,
-    ).start()
-
-    load_state()
-    main_loop()
+if __name__=="__main__":main()
