@@ -1,83 +1,113 @@
 # ============================================================
-#AI PRO MAX — US + CRYPTO #
-# Stable / Low-Connection Edition
+# AI PRO MAX — ONE FILE / TASI + US + CRYPTO
+# Stable / Quota-Protected Edition
+# ============================================================
+#
+# Railway Variables:
+# CHAT_ID
+# TASI_TOKEN
+# US_TOKEN
+# CRYPTO_TOKEN
+# SAHMK_API_KEY
+# TWELVE_DATA_API_KEY
+#
+# TASI  -> SAHMK only
+# US    -> Twelve Data
+# CRYPTO-> Twelve Data
+#
+# IMPORTANT:
+# Twelve Data US/CRYPTO requests necessarily consume Twelve Data credits.
+# This file minimizes requests, caches data, blocks duplicate requests,
+# and uses a hard daily budget below the 800-credit Basic daily limit.
+# It does NOT call /api_usage and does NOT request news for every symbol.
 # ============================================================
 
 import os
 import time
-import threading
 import queue
-import random
-from datetime import datetime, timezone
+import threading
+from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from urllib.parse import quote
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock, local
 
 import requests
 from PIL import Image, ImageDraw
 
 # ============================================================
-# 🔐 RAILWAY VARIABLES — لا توجد أسرار داخل الكود
+# ENVIRONMENT
 # ============================================================
 
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
-CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN", "").strip()
+TASI_TOKEN = os.getenv("TASI_TOKEN", "").strip()
 US_TOKEN = os.getenv("US_TOKEN", "").strip()
+CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN", "").strip()
+SAHMK_API_KEY = os.getenv("SAHMK_API_KEY", "").strip()
 
 TWELVEDATA_API_KEY = (
     os.getenv("TWELVE_DATA_API_KEY", "").strip()
     or os.getenv("TWELVEDATA_API_KEY", "").strip()
 )
 
-# المتغيران موجودان في Railway ونبقيهما كما هما حتى لو كان المحرك
-# الحالي يعتمد Twelve Data للفحص الفني الموحد.
-
 # ============================================================
-# TELEGRAM DIRECTION ANIMATION
-# ============================================================
-DIRECTION_GIF_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "telegram_gifs")
-UP_GIF = os.path.join(DIRECTION_GIF_DIR, "green_up.gif")
-DOWN_GIF = os.path.join(DIRECTION_GIF_DIR, "red_down.gif")
-
-
-# ============================================================
-# SETTINGS
+# SERVICES / LIMITS
 # ============================================================
 
-BASE_URL = "https://api.twelvedata.com"
+TWELVE_BASE = "https://api.twelvedata.com"
+SAHMK_BASE = "https://api.sahmk.sa/api/v1"
+RIYADH = ZoneInfo("Asia/Riyadh")
 
-# لا نفتح آلاف الاتصالات معًا
-MAX_WORKERS = 4
+# Keep a safety margin below the 800/day Basic quota.
+TD_DAILY_LIMIT = 700
+TD_PER_MINUTE_LIMIT = 8
 
-# الحد الأدنى بين طلبات TwelveData
-REQUEST_GAP = 0.25
+# Do not use /api_usage: it consumes quota.
+# The response headers are used when Twelve Data returns them.
+TD_CREDITS_LEFT = None
+TD_CREDITS_LEFT_AT = 0.0
+TD_RESERVED_TODAY = 0
+TD_DAY = None
 
-# إعادة المحاولة عند 429 / أخطاء مؤقتة
-MAX_RETRIES = 3
+td_budget_lock = Lock()
+td_request_lock = Lock()
+td_last_request = 0.0
 
-# بعد انتهاء دفعة الفحص، يبدأ التالي
-SCAN_INTERVAL = 300  # دورة 5 دقائق
+# Minimum spacing between Twelve Data HTTP requests.
+TD_REQUEST_GAP = 0.30
 
-# تحديث قوائم الرموز كل 6 ساعات بدل طلبها كل دورتين
-SYMBOL_REFRESH_SECONDS = 21600
+# TASI: 3 calls / 15 minutes during the session.
+TASI_SCAN_SECONDS = 15 * 60
 
+# US/CRYPTO scanner cadence.
+SCAN_INTERVAL = 60
+
+# 5-minute technical scan.
 PRIMARY_TIMEFRAME = "5min"
-# الفحص الكامل يبدأ بـ 5 دقائق. الأطر الأعلى تُستخدم للتأكيد فقط عند ظهور إشارة.
-SIGNAL_TIMEFRAMES = ("5min", "15min", "30min", "1h", "4h")
 OUTPUTSIZE = 220
 
-# 🇺🇸 لا ترسل/تعتمد إشارات للأسهم الأمريكية الأقل من 0.20$
-# جميع الأسهم من 0.20$ فأعلى تبقى ضمن الفحص.
-MIN_US_PRICE = 0.15
+# US universe.
+# Keep $0.20+ as requested.
+MIN_US_PRICE = 0.20
 US_MAX_SYMBOLS = 13414
 
-# Batch: يقلل عدد الاتصالات، ولا يلغي احتساب رصيد كل رمز.
+# Batch size is 8, matching the per-minute credit allowance.
 BATCH_SYMBOLS = 8
-# Twelve Data Basic: 8 API credits/minute. لا نحجز رصيداً من الدفعة؛
-# البوابة الزمنية تنتظر الدقيقة التالية تلقائياً عند وصول الرصيد إلى الصفر.
-CREDIT_RESERVE = 0
 
-# 🔎 FAST FILTER — يقلل الفحص العميق قبل تشغيل الأطر الستة
+# We rotate through the whole universe rather than restarting at A.
+US_PER_PASS = 8
+CRYPTO_PER_PASS = 8
+
+# Cache a symbol's candles for a little longer than the scan interval.
+SERIES_CACHE_TTL = 75
+SYMBOL_REFRESH_SECONDS = 6 * 60 * 60
+
+# News is expensive compared with candle-only scanning.
+NEWS_SCORE_MIN = 80
+NEWS_CACHE_TTL = 30 * 60
+
+# ============================================================
+# INDICATOR SETTINGS
+# ============================================================
 
 EMA_FAST = 10
 EMA_MID = 14
@@ -92,261 +122,252 @@ VOLUME_LENGTH = 20
 
 MIN_SIGNAL_SCORE = 70
 
-# ثمانية أهداف متدرجة تسمح للأسهم ذات القفزات الكبيرة بالاستمرار.
-ATR_TARGETS = [
-    1.0, 1.5, 2.0, 3.0,
-    4.0, 5.0, 6.5, 8.0
-]
+ATR_TARGETS = [1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.5, 8.0]
 STOP_ATR_MULTIPLIER = 1.5
 
-# الأخبار لا تُطلب لكل الأسهم.
-# تطلب فقط عندما تكون إشارة فنية قوية.
-NEWS_ON_STRONG_SIGNAL_ONLY = True
-
 POSITIVE_WORDS = [
-    "beat", "beats", "growth", "profit", "profits",
-    "upgrade", "upgraded", "buy", "strong", "positive",
-    "partnership", "contract", "approval", "revenue",
-    "surge", "record", "raises guidance", "guidance"
+    "beat", "beats", "growth", "profit", "profits", "upgrade",
+    "upgraded", "buy", "strong", "positive", "partnership",
+    "contract", "approval", "revenue", "surge", "record",
+    "raises guidance", "guidance"
 ]
 
 NEGATIVE_WORDS = [
-    "loss", "losses", "downgrade", "downgraded", "sell",
-    "weak", "negative", "lawsuit", "decline", "drop",
-    "warning", "debt", "offering", "investigation",
-    "risk", "cuts guidance", "guidance cut"
+    "loss", "losses", "downgrade", "downgraded", "sell", "weak",
+    "negative", "lawsuit", "decline", "drop", "warning", "debt",
+    "offering", "investigation", "risk", "cuts guidance", "guidance cut"
 ]
 
 # ============================================================
-# GLOBAL STATE
+# STATE
 # ============================================================
 
 _thread_local = local()
 
-request_lock = Lock()
-last_request_time = 0.0
-
 state_lock = Lock()
+
 LAST_SIGNAL = {}
 TREND_STATE = {}
 REVERSAL_COUNT = {}
+ARS_STATE = {}
 
+# Target continuation state:
+# key -> {"last_target": float, "next_index": int, "direction": "UP/DOWN"}
+TARGET_STATE = {}
+
+NEWS_CACHE = {}
+
+# Symbol universe cache.
 symbol_cache_lock = Lock()
 SYMBOL_CACHE = {
-    "US": {"symbols": [], "updated": 0},
-    "CRYPTO": {"symbols": [], "updated": 0},
+    "US": {"symbols": [], "updated": 0.0},
+    "CRYPTO": {"symbols": [], "updated": 0.0},
 }
 
-# نتيجة /time_series المحملة بالـ Batch.
-SERIES_CACHE = {}
+# Candle cache.
 series_cache_lock = Lock()
+SERIES_CACHE = {}
 
-# آخر رصيد Credits معروف من رؤوس Twelve Data. لا يتم استدعاء /api_usage
-# حتى لا نستهلك رصيدًا إضافيًا.
-API_CREDITS_LEFT = None
-API_CREDITS_LOCK = Lock()
-TD_CREDIT_GATE_LOCK = Lock()
-TD_NEXT_SLOT = 0.0
-TD_DAILY_RESERVED = 0
-TD_DAILY_LIMIT = 800
-# يوم UTC الذي ينتمي إليه الرصيد المعروف. عند دخول يوم جديد تُعاد الحالة إلى None
-# حتى يسمح البوت بأول طلب، ثم يقرأ الرصيد الجديد من رأس Twelve Data.
-API_CREDITS_DAY = None
-API_CREDITS_LEFT_AT = 0.0
+# Scanner cursors.
+SCAN_CURSORS = {"US": 0, "CRYPTO": 0}
 
-def reset_credit_state_if_new_utc_day():
-    global API_CREDITS_LEFT, API_CREDITS_DAY, API_CREDITS_LEFT_AT, TD_NEXT_SLOT, TD_DAILY_RESERVED
-    today_utc = datetime.now(timezone.utc).date()
-    with API_CREDITS_LOCK:
-        if API_CREDITS_DAY != today_utc:
-            API_CREDITS_DAY = today_utc
-            API_CREDITS_LEFT = None
-            API_CREDITS_LEFT_AT = 0.0
-            TD_DAILY_RESERVED = 0
-            TD_NEXT_SLOT = 0.0
-            print(f"🛡️ Twelve Data: يوم UTC جديد {today_utc} — إعادة تهيئة حالة الحصة وانتظار أول رد لتحديث الرصيد")
-
-# 🇺🇸 Stock split cache — لا نطلب التقسيم لكل الأسهم في كل دورة
-SPLIT_CACHE_TTL = 86400
-split_cache_lock = Lock()
-SPLIT_CACHE = {}
+# TASI duplicate state.
+TASI_LAST_SENT = {}
 
 # ============================================================
-# INSTANT TELEGRAM QUEUE
+# TELEGRAM QUEUE
 # ============================================================
-# إرسال الإشارة يتم في مسار مستقل حتى لا يتوقف فحص السوق بانتظار Telegram.
+
 TELEGRAM_QUEUE = queue.Queue(maxsize=5000)
 
-def telegram_worker():
-    while True:
-        item = TELEGRAM_QUEUE.get()
-        if item is None:
-            TELEGRAM_QUEUE.task_done()
-            break
-        token, result = item
-        try:
-            telegram_send_direction(token, result)
-            telegram_send_smart_animation(token, result)
-            message = build_message(result)
-            if telegram_send(token, message, build_tradingview_url(result)):
-                print(
-                    f"[{result['market']}] 📲 {result['symbol']} "
-                    f"{result['signal']} {result['score']}/100 — أُرسلت فوراً"
-                )
-        except Exception as error:
-            print(f"[TELEGRAM] إرسال خطأ: {error}")
-        finally:
-            TELEGRAM_QUEUE.task_done()
-
-def enqueue_signal(token, result):
-    try:
-        TELEGRAM_QUEUE.put_nowait((token, result))
-        return True
-    except queue.Full:
-        print("[TELEGRAM] ⚠️ قائمة الإرسال ممتلئة — تم تجاوز الإشارة")
-        return False
 
 # ============================================================
 # HTTP SESSION
 # ============================================================
 
 def get_session():
-    """
-    Session مستقل لكل worker thread.
-    هذا يعيد استخدام TCP connections بدل إنشاء اتصال جديد لكل طلب.
-    """
     session = getattr(_thread_local, "session", None)
 
     if session is None:
         session = requests.Session()
         session.headers.update({
-            "User-Agent": "AI-PRO-MAX/Stable"
+            "User-Agent": "AI-PRO-MAX/Unified-Quota-Protected"
         })
+
         adapter = requests.adapters.HTTPAdapter(
-            pool_connections=MAX_WORKERS + 2,
-            pool_maxsize=MAX_WORKERS + 2,
+            pool_connections=10,
+            pool_maxsize=10,
             max_retries=0,
         )
         session.mount("https://", adapter)
         session.mount("http://", adapter)
+
         _thread_local.session = session
 
     return session
 
 
-def rate_wait():
-    global last_request_time
+# ============================================================
+# TWELVE DATA QUOTA GATE
+# ============================================================
 
-    with request_lock:
+def reset_td_day():
+    global TD_CREDITS_LEFT, TD_CREDITS_LEFT_AT
+    global TD_RESERVED_TODAY, TD_DAY, td_last_request
+
+    today = datetime.now(timezone.utc).date()
+
+    with td_budget_lock:
+        if TD_DAY != today:
+            TD_DAY = today
+            TD_CREDITS_LEFT = None
+            TD_CREDITS_LEFT_AT = 0.0
+            TD_RESERVED_TODAY = 0
+
+    with td_request_lock:
+        td_last_request = 0.0
+
+
+def td_reserve(cost=1):
+    """
+    Reserve credits before making a Twelve Data request.
+    Never deliberately targets the provider's full 800/day quota.
+    """
+    global TD_RESERVED_TODAY
+
+    reset_td_day()
+    cost = max(1, int(cost))
+
+    with td_budget_lock:
+        # If a fresh provider header says less than cost is available,
+        # stop immediately.
+        if TD_CREDITS_LEFT is not None:
+            if (time.time() - TD_CREDITS_LEFT_AT) < 60 and TD_CREDITS_LEFT < cost:
+                return False
+
+        if TD_RESERVED_TODAY + cost > TD_DAILY_LIMIT:
+            return False
+
+        TD_RESERVED_TODAY += cost
+        return True
+
+
+def td_rate_wait():
+    global td_last_request
+
+    with td_request_lock:
         now = time.monotonic()
-        wait = REQUEST_GAP - (now - last_request_time)
+        wait = TD_REQUEST_GAP - (now - td_last_request)
 
         if wait > 0:
             time.sleep(wait)
 
-        last_request_time = time.monotonic()
+        td_last_request = time.monotonic()
 
 
-def _reserve_td_credits(required=1):
-    """Non-blocking Twelve Data budget gate. Never sleeps inside a market scan."""
-    global TD_DAILY_RESERVED
-    required = max(1, int(required or 1))
-    reset_credit_state_if_new_utc_day()
-    now = time.time()
-    with API_CREDITS_LOCK:
-        # Do not trust a stale zero from a previous minute.
-        left = API_CREDITS_LEFT
-        left_at = API_CREDITS_LEFT_AT
-        if left is not None and left_at and (now - left_at) < 58 and left < required:
-            return False
-        # Keep a small daily safety margin.
-        daily_budget = max(0, TD_DAILY_LIMIT - 20)
-        if TD_DAILY_RESERVED + required > daily_budget:
-            return False
-        TD_DAILY_RESERVED += required
-        return True
+def td_request(endpoint, params=None, credit_cost=1):
+    """
+    One quota-controlled Twelve Data request.
+    No /api_usage call is ever made.
+    """
+    global TD_CREDITS_LEFT, TD_CREDITS_LEFT_AT
 
-def td_request(endpoint, params=None):
-    """Quota-safe Twelve Data request. Returns immediately when budget is unavailable."""
     if not TWELVEDATA_API_KEY:
+        return None
+
+    if not td_reserve(credit_cost):
+        print(f"🛡️ Twelve Data: request blocked by local quota gate -> {endpoint}")
         return None
 
     params = dict(params or {})
     params["apikey"] = TWELVEDATA_API_KEY
+
     session = get_session()
 
-    credit_cost = 1
-    if endpoint == "/time_series":
-        raw_symbols = str(params.get("symbol", ""))
-        credit_cost = max(1, len([x for x in raw_symbols.split(",") if x.strip()]))
-
-    if not _reserve_td_credits(credit_cost):
-        return None
-
-    for attempt in range(MAX_RETRIES):
+    for attempt in range(3):
         try:
-            rate_wait()
-            response = session.get(BASE_URL + endpoint, params=params, timeout=(10, 30))
+            td_rate_wait()
 
+            response = session.get(
+                TWELVE_BASE + endpoint,
+                params=params,
+                timeout=(10, 30),
+            )
+
+            # Twelve Data commonly exposes usage through response headers.
             left = response.headers.get("api-credits-left")
+            if left is None:
+                left = response.headers.get("api-credits-left-per-minute")
+
             if left is not None:
                 try:
-                    with API_CREDITS_LOCK:
-                        global API_CREDITS_LEFT, API_CREDITS_LEFT_AT
-                        API_CREDITS_LEFT = int(float(left))
-                        API_CREDITS_LEFT_AT = time.time()
+                    with td_budget_lock:
+                        TD_CREDITS_LEFT = int(float(left))
+                        TD_CREDITS_LEFT_AT = time.time()
                 except Exception:
                     pass
 
             if response.status_code == 429:
-                # No retry loop that burns more quota. The next scheduled pass will retry.
+                print("🟠 Twelve Data: 429 — request stopped")
                 return None
+
             if response.status_code in (500, 502, 503, 504):
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(min(4, 2 ** attempt))
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
                     continue
                 return None
+
             if response.status_code != 200:
+                print(f"🔴 Twelve Data HTTP {response.status_code}: {endpoint}")
                 return None
 
             try:
                 data = response.json()
             except ValueError:
                 return None
-            if isinstance(data, dict) and str(data.get("status", "")).lower() == "error":
-                return None
+
+            if isinstance(data, dict):
+                status = str(data.get("status", "")).lower()
+                if status == "error":
+                    print("🔴 Twelve Data:", data.get("message", "error"))
+                    return None
+
             return data
-        except (requests.Timeout, requests.ConnectionError):
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(min(4, 2 ** attempt))
-            else:
-                return None
-        except Exception:
+
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+                continue
+            print("🔴 Twelve Data connection:", exc)
             return None
+
+        except Exception as exc:
+            print("🔴 Twelve Data:", exc)
+            return None
+
     return None
 
 
 # ============================================================
-# INDICATORS
+# GENERIC INDICATORS
 # ============================================================
 
 def ema(values, length):
     if len(values) < length:
         return None
 
-    multiplier = 2 / (length + 1)
-    result = sum(values[:length]) / length
+    alpha = 2.0 / (length + 1.0)
+    value = sum(values[:length]) / length
 
-    for value in values[length:]:
-        result = ((value - result) * multiplier) + result
+    for x in values[length:]:
+        value = (x - value) * alpha + value
 
-    return result
+    return value
 
 
 def sma(values, length):
     if len(values) < length:
         return None
-
     return sum(values[-length:]) / length
 
 
@@ -388,53 +409,53 @@ def atr(highs, lows, closes, length=14):
     trs = []
 
     for i in range(1, len(closes)):
-        tr = max(
+        trs.append(max(
             highs[i] - lows[i],
             abs(highs[i] - closes[i - 1]),
             abs(lows[i] - closes[i - 1]),
-        )
-        trs.append(tr)
+        ))
 
     if len(trs) < length:
         return None
 
     value = sum(trs[:length]) / length
 
-    for tr in trs[length:]:
-        value = ((value * (length - 1)) + tr) / length
+    for tr_value in trs[length:]:
+        value = ((value * (length - 1)) + tr_value) / length
 
     return value
 
 
 def vwap(highs, lows, closes, volumes):
-    cumulative_pv = 0.0
-    cumulative_volume = 0.0
+    pv = 0.0
+    vol = 0.0
 
-    for high, low, close, volume in zip(
-        highs, lows, closes, volumes
-    ):
+    for high, low, close, volume in zip(highs, lows, closes, volumes):
         typical = (high + low + close) / 3.0
-        cumulative_pv += typical * volume
-        cumulative_volume += volume
+        pv += typical * volume
+        vol += volume
 
-    if cumulative_volume <= 0:
+    if vol <= 0:
         return None
 
-    return cumulative_pv / cumulative_volume
+    return pv / vol
 
 
 # ============================================================
-# PRICE DATA
+# SERIES / CACHE
 # ============================================================
 
-def _parse_series_payload(data):
-    """Convert a Twelve Data single/batch time_series response to our candle format."""
+def parse_series_payload(data):
     if not isinstance(data, dict):
         return None
+
     values = data.get("values")
-    if not values:
+    if not isinstance(values, list) or not values:
         return None
+
     candles = []
+
+    # Twelve Data returns newest first. Reverse to oldest -> newest.
     for item in reversed(values):
         try:
             candles.append({
@@ -447,9 +468,12 @@ def _parse_series_payload(data):
             })
         except (TypeError, ValueError, KeyError):
             continue
+
     if len(candles) < 100:
         return None
+
     meta = data.get("meta") or {}
+
     return {
         "candles": candles,
         "name": str(meta.get("name") or "").strip(),
@@ -457,9 +481,10 @@ def _parse_series_payload(data):
     }
 
 
-def _cache_series(symbol, market, interval, series):
+def cache_series(symbol, market, interval, series):
     if not series:
         return
+
     with series_cache_lock:
         SERIES_CACHE[(market, symbol, interval)] = {
             "updated": time.time(),
@@ -467,16 +492,18 @@ def _cache_series(symbol, market, interval, series):
         }
 
 
-def _get_cached_series(symbol, market, interval):
+def get_cached_series(symbol, market, interval):
     with series_cache_lock:
         item = SERIES_CACHE.get((market, symbol, interval))
-        if item and time.time() - item["updated"] < SCAN_INTERVAL + 120:
+
+        if item and time.time() - item["updated"] < SERIES_CACHE_TTL:
             return item["data"]
+
     return None
 
 
 def get_series(symbol, market, interval=PRIMARY_TIMEFRAME):
-    cached = _get_cached_series(symbol, market, interval)
+    cached = get_cached_series(symbol, market, interval)
     if cached:
         return cached
 
@@ -487,82 +514,174 @@ def get_series(symbol, market, interval=PRIMARY_TIMEFRAME):
         "format": "JSON",
         "adjust": "splits",
     }
+
     if market == "US":
         params["prepost"] = "true"
 
-    data = td_request("/time_series", params)
+    data = td_request(
+        "/time_series",
+        params,
+        credit_cost=1,
+    )
+
+    # Some plans/feeds may reject prepost.
     if data is None and market == "US":
         params.pop("prepost", None)
-        data = td_request("/time_series", params)
+        data = td_request(
+            "/time_series",
+            params,
+            credit_cost=1,
+        )
 
-    series = _parse_series_payload(data)
+    series = parse_series_payload(data)
+
     if series:
-        _cache_series(symbol, market, interval, series)
+        cache_series(symbol, market, interval, series)
+
     return series
 
 
-def _batch_response_items(data):
-    """Yield (symbol, payload) from Twelve Data query-string batch responses."""
+def parse_batch_response(data):
     if not isinstance(data, dict):
         return []
-    # Some responses can be wrapped; normal batch responses are keyed by symbol.
-    items = []
+
+    result = []
+
     for key, value in data.items():
         if isinstance(value, dict) and "values" in value:
-            items.append((str(key), value))
-    return items
+            result.append((str(key), value))
+
+    return result
 
 
 def batch_load_series(symbols, market, interval=PRIMARY_TIMEFRAME):
-    """Load symbols in 8-symbol batches, respecting Twelve Data's 8 credits/minute."""
-    if not symbols:
-        return 0
-
-    reset_credit_state_if_new_utc_day()
+    """
+    Batch request for up to 8 symbols.
+    The provider still counts credits per symbol; batching only reduces
+    HTTP overhead. We therefore reserve len(batch) credits.
+    """
     loaded = 0
 
     for start in range(0, len(symbols), BATCH_SYMBOLS):
         batch = symbols[start:start + BATCH_SYMBOLS]
 
-        # لا نوقف بسبب api-credits-left=0؛ td_request ينتظر الدقيقة التالية.
+        # Do not make a request if the complete batch cannot be reserved.
+        cost = len(batch)
+
         params = {
-            "symbol": ",".join(quote(str(x), safe="/:.-") for x in batch),
+            "symbol": ",".join(
+                quote(str(x), safe="/:.-") for x in batch
+            ),
             "interval": interval,
             "outputsize": OUTPUTSIZE,
             "format": "JSON",
             "adjust": "splits",
         }
+
         if market == "US":
             params["prepost"] = "true"
 
-        data = td_request("/time_series", params)
+        data = td_request(
+            "/time_series",
+            params,
+            credit_cost=cost,
+        )
+
         if data is None and market == "US":
             params.pop("prepost", None)
-            data = td_request("/time_series", params)
+            data = td_request(
+                "/time_series",
+                params,
+                credit_cost=cost,
+            )
 
         if data is None:
-            with API_CREDITS_LOCK:
-                daily_exhausted = TD_DAILY_RESERVED >= TD_DAILY_LIMIT
-            if daily_exhausted:
-                print(f"[{market}] 🛑 Twelve Data: الحصة اليومية مستهلكة — إيقاف دورة السوق الحالية")
-                break
+            continue
 
-        for key, payload in _batch_response_items(data):
-            series = _parse_series_payload(payload)
+        for key, payload in parse_batch_response(data):
+            series = parse_series_payload(payload)
             if series:
-                _cache_series(key, market, interval, series)
+                cache_series(key, market, interval, series)
                 loaded += 1
-
-        print(f"[{market}] 📦 Batch {min(start + len(batch), len(symbols))}/{len(symbols)} | loaded={loaded}")
-
-        # لا نعيد طلباً فورياً بعد استهلاك الـ8 credits؛ البوابة الزمنية
-        # في td_request ستنتظر تلقائياً حتى الدقيقة التالية.
 
     return loaded
 
 
 # ============================================================
-# SUPPORT / RESISTANCE
+# US / CRYPTO SYMBOL DISCOVERY
+# ============================================================
+
+def extract_symbols(data):
+    if isinstance(data, dict):
+        rows = data.get("data", [])
+    elif isinstance(data, list):
+        rows = data
+    else:
+        rows = []
+
+    symbols = []
+
+    for item in rows:
+        if isinstance(item, dict) and item.get("symbol"):
+            symbols.append(str(item["symbol"]).strip())
+
+    return list(dict.fromkeys(symbols))
+
+
+def get_us_symbols():
+    data = td_request(
+        "/stocks",
+        {"country": "United States"},
+        credit_cost=1,
+    )
+
+    symbols = extract_symbols(data)
+
+    if not symbols:
+        for exchange in ("NASDAQ", "NYSE", "AMEX"):
+            data = td_request(
+                "/stocks",
+                {"exchange": exchange},
+                credit_cost=1,
+            )
+            symbols.extend(extract_symbols(data))
+
+    return sorted(set(symbols), key=str.upper)[:US_MAX_SYMBOLS]
+
+
+def get_crypto_symbols():
+    data = td_request(
+        "/cryptocurrencies",
+        {},
+        credit_cost=1,
+    )
+
+    return sorted(set(extract_symbols(data)), key=str.upper)
+
+
+def get_symbols(market, loader):
+    now = time.time()
+
+    with symbol_cache_lock:
+        item = SYMBOL_CACHE[market]
+
+        if item["symbols"] and now - item["updated"] < SYMBOL_REFRESH_SECONDS:
+            return list(item["symbols"])
+
+    symbols = loader()
+
+    if symbols:
+        with symbol_cache_lock:
+            SYMBOL_CACHE[market] = {
+                "symbols": list(symbols),
+                "updated": now,
+            }
+
+    return symbols
+
+
+# ============================================================
+# TECHNICAL HELPERS
 # ============================================================
 
 def support_resistance(candles):
@@ -570,15 +689,12 @@ def support_resistance(candles):
         return None, None
 
     recent = candles[-50:]
-    highs = [c["high"] for c in recent]
-    lows = [c["low"] for c in recent]
 
-    return min(lows), max(highs)
+    return (
+        min(c["low"] for c in recent),
+        max(c["high"] for c in recent),
+    )
 
-
-# ============================================================
-# TREND
-# ============================================================
 
 def calculate_trend(candles):
     closes = [c["close"] for c in candles]
@@ -590,38 +706,22 @@ def calculate_trend(candles):
     e50 = ema(closes, EMA_SLOW)
     e200 = ema(closes, EMA_LONG)
 
-    if None in (e10, e14, e25, e50, e200):
+    if None in (e10, e14, e15, e25, e50, e200):
         return "NEUTRAL"
-
-    current = closes[-1]
 
     bullish = 0
     bearish = 0
 
-    if e10 > e14:
-        bullish += 1
-    else:
-        bearish += 1
+    checks = [
+        e10 > e14,
+        e14 > e25,
+        e15 > e25,
+        e50 > e200,
+        closes[-1] > e200,
+    ]
 
-    if e14 > e25:
-        bullish += 1
-    else:
-        bearish += 1
-
-    if e15 > e25:
-        bullish += 1
-    else:
-        bearish += 1
-
-    if e50 > e200:
-        bullish += 1
-    else:
-        bearish += 1
-
-    if current > e200:
-        bullish += 1
-    else:
-        bearish += 1
+    bullish = sum(checks)
+    bearish = len(checks) - bullish
 
     if bullish >= 3:
         return "UP"
@@ -632,228 +732,130 @@ def calculate_trend(candles):
     return "NEUTRAL"
 
 
-def persistent_trend(market, symbol, current_trend):
-    """Keep UP/DOWN active until a confirmed two-cycle reversal."""
+def persistent_trend(market, symbol, current):
     key = f"{market}:{symbol}"
-    if current_trend == "NEUTRAL":
+
+    if current == "NEUTRAL":
         with state_lock:
             return TREND_STATE.get(key, "NEUTRAL")
 
     with state_lock:
         previous = TREND_STATE.get(key)
-        if previous is None:
-            TREND_STATE[key] = current_trend
-            REVERSAL_COUNT[key] = 0
-            return current_trend
 
-        if current_trend == previous:
+        if previous is None:
+            TREND_STATE[key] = current
+            REVERSAL_COUNT[key] = 0
+            return current
+
+        if previous == current:
             REVERSAL_COUNT[key] = 0
             return previous
 
         count = REVERSAL_COUNT.get(key, 0) + 1
         REVERSAL_COUNT[key] = count
+
         if count >= 2:
-            TREND_STATE[key] = current_trend
+            TREND_STATE[key] = current
             REVERSAL_COUNT[key] = 0
-            return current_trend
+            return current
 
         return previous
 
 
-# ============================================================
-# ARS — HIDDEN INTERNAL LEVEL ENGINE
-# ============================================================
-
-ARS_LEVELS = [20, 30, 40, 50, 60, 80, 100]
-
-def calculate_ars(candles):
-    """
-    ARS داخلي فقط. لا يظهر في Telegram.
-    القراءة محصورة بين 20 و100، مع مستويات مراقبة:
-    20 / 30 / 40 / 50 / 60 / 80 / 100.
-    """
-    closes = [c["close"] for c in candles]
-
-    if len(closes) < 50:
-        return 50
-
-    e8 = ema(closes, 8)
-    e21 = ema(closes, 21)
-    e50 = ema(closes, 50)
-    current = closes[-1]
-
-    score = 50
-
-    if e8 > e21:
-        score += 15
-    else:
-        score -= 15
-
-    if e21 > e50:
-        score += 15
-    else:
-        score -= 15
-
-    if current > e50:
-        score += 10
-    else:
-        score -= 10
-
-    return max(20, min(100, score))
-
-
-def nearest_ars_level(value):
-    return min(ARS_LEVELS, key=lambda level: abs(level - value))
-
-
-def ars_ladder_bias(ars_value, previous_ars=None):
-    """
-    قراءة مستويات ARS من 20 إلى 100 داخليًا.
-    عند الصعود: متابعة تجاوز المستويات.
-    عند الهبوط: متابعة كسر المستويات والارتداد منها.
-    لا يُعرض هذا في الإشعار.
-    """
-    level = nearest_ars_level(ars_value)
-    if previous_ars is None:
-        return 0, level
-
-    if ars_value > previous_ars:
-        return 1, level
-    if ars_value < previous_ars:
-        return -1, level
-    return 0, level
-
-
-# ============================================================
-# DIVERGENCE — REGULAR + HIDDEN (HIDDEN FROM TELEGRAM)
-# ============================================================
-
-def _pivot_lows(values, left=3, right=3):
-    result = []
-    for i in range(left, len(values) - right):
-        window = values[i-left:i+right+1]
-        if values[i] == min(window):
-            result.append((i, values[i]))
-    return result
-
-
-def _pivot_highs(values, left=3, right=3):
-    result = []
-    for i in range(left, len(values) - right):
-        window = values[i-left:i+right+1]
-        if values[i] == max(window):
-            result.append((i, values[i]))
-    return result
-
-
-def detect_divergence(candles, rsi_value):
-    """
-    يكشف Regular/Hidden Divergence بين السعر وRSI من القمم والقيعان
-    المؤكدة. النتيجة داخلية فقط ولا تظهر في Telegram.
-    """
-    closes = [c["close"] for c in candles]
-    if len(closes) < 60 or rsi_value is None:
-        return {"regular_bull": False, "regular_bear": False,
-                "hidden_bull": False, "hidden_bear": False}
-
-    # RSI series كاملة بنفس ترتيب الشموع
-    rsi_series = []
-    for end_i in range(15, len(closes) + 1):
-        value = rsi(closes[:end_i], RSI_LENGTH)
-        rsi_series.append(value if value is not None else 50.0)
-    pad = len(closes) - len(rsi_series)
-    rsi_full = [50.0] * pad + rsi_series
-
-    lows = _pivot_lows(closes)
-    highs = _pivot_highs(closes)
-
-    result = {
-        "regular_bull": False,
-        "regular_bear": False,
-        "hidden_bull": False,
-        "hidden_bear": False,
-    }
-
-    if len(lows) >= 2:
-        (i1, p1), (i2, p2) = lows[-2], lows[-1]
-        r1, r2 = rsi_full[i1], rsi_full[i2]
-        result["regular_bull"] = p2 < p1 and r2 > r1
-        result["hidden_bull"] = p2 > p1 and r2 < r1
-
-    if len(highs) >= 2:
-        (i1, p1), (i2, p2) = highs[-2], highs[-1]
-        r1, r2 = rsi_full[i1], rsi_full[i2]
-        result["regular_bear"] = p2 > p1 and r2 < r1
-        result["hidden_bear"] = p2 < p1 and r2 > r1
-
-    return result
-
-
-def trendline_bias(candles):
-    """
-    قراءة اتجاه خطوط الترند من آخر قمتين/قاعين، داخلي فقط.
-    """
-    closes = [c["close"] for c in candles]
-    lows = _pivot_lows(closes)
-    highs = _pivot_highs(closes)
-
-    bias = 0
-
-    if len(lows) >= 2:
-        (_, l1), (_, l2) = lows[-2], lows[-1]
-        if l2 > l1:
-            bias += 1
-        elif l2 < l1:
-            bias -= 1
-
-    if len(highs) >= 2:
-        (_, h1), (_, h2) = highs[-2], highs[-1]
-        if h2 > h1:
-            bias += 1
-        elif h2 < h1:
-            bias -= 1
-
-    return max(-2, min(2, bias))
-
-
-# ============================================================
-# SMART MOVEMENT / SMART-MONEY PROXY (INFERRED)
-# ============================================================
-
-def detect_smart_movements(candles, trend, volume_ratio, buy_power, sell_power,
-                           atr_value, rsi_value):
-    """
-    استدلال احتمالي لتحركات كبيرة/تجميع من السعر والحجم.
-    لا يعني رصد هوية صندوق بعينه؛ هو Proxy تقني.
-    """
+def calculate_power(candles):
     recent = candles[-20:]
+
+    buy = 0.0
+    sell = 0.0
+
+    has_volume = sum(c["volume"] for c in recent) > 0
+
+    for c in recent:
+        if has_volume:
+            amount = c["volume"]
+        else:
+            amount = 1.0
+
+        if c["close"] > c["open"]:
+            buy += amount
+        elif c["close"] < c["open"]:
+            sell += amount
+        else:
+            buy += amount * 0.5
+            sell += amount * 0.5
+
+    total = buy + sell
+
+    if total <= 0:
+        return 50.0, 50.0
+
+    return buy / total * 100.0, sell / total * 100.0
+
+
+def volume_strength(candles):
+    volumes = [c["volume"] for c in candles]
+
+    if len(volumes) < VOLUME_LENGTH + 1:
+        return 1.0
+
+    if sum(volumes[-VOLUME_LENGTH:]) <= 0:
+        return 1.0
+
+    average = sma(volumes[:-1], VOLUME_LENGTH)
+
+    if not average:
+        return 1.0
+
+    return volumes[-1] / average
+
+
+def detect_smart_movements(candles, trend, volume_ratio, buy_power,
+                           sell_power, atr_value, rsi_value):
+    recent = candles[-20:]
+
     if len(recent) < 10:
-        return {"maker": 0, "speculators": False, "accumulation": False, "unusual": False}
+        return {
+            "maker": 0,
+            "speculators": False,
+            "accumulation": False,
+            "unusual": False,
+        }
 
     closes = [c["close"] for c in recent]
-    opens = [c["open"] for c in recent]
     ranges = [abs(c["high"] - c["low"]) for c in recent]
+
     avg_range = sum(ranges[:-1]) / max(1, len(ranges) - 1)
     current_range = ranges[-1]
-    price_move = (closes[-1] - closes[0]) / closes[0] * 100 if closes[0] else 0
 
-    unusual = (volume_ratio >= 2.0 and abs(price_move) >= 1.0) or (volume_ratio >= 3.0)
+    price_move = (
+        (closes[-1] - closes[0]) / closes[0] * 100
+        if closes[0] else 0
+    )
 
-    # تجميع احتمالي: حجم قوي مع ضغط شرائي واتجاه/سلوك سعر متماسك.
+    unusual = (
+        (volume_ratio >= 2.0 and abs(price_move) >= 1.0)
+        or volume_ratio >= 3.0
+    )
+
     accumulation = (
         volume_ratio >= 1.5
         and buy_power >= 58
-        and (trend == "UP" or (rsi_value is not None and rsi_value < 60))
+        and (
+            trend == "UP"
+            or (rsi_value is not None and rsi_value < 60)
+        )
     )
 
-    # حركة مضاربين: اندفاع سعري + توسع نطاق/حجم.
     speculators = (
         (volume_ratio >= 2.0 and abs(price_move) >= 2.0)
-        or (avg_range > 0 and current_range >= avg_range * 1.8)
+        or (
+            avg_range > 0
+            and current_range >= avg_range * 1.8
+        )
     )
 
-    # سهم صغير متحرك لصنّاع السهم: نستخدم Proxy قوي وليس ادعاء معرفة جهة محددة.
     maker = 0
+
     if unusual and buy_power >= 65:
         maker = 1
     elif unusual and sell_power >= 65:
@@ -868,276 +870,174 @@ def detect_smart_movements(candles, trend, volume_ratio, buy_power, sell_power,
         "unusual": unusual,
     }
 
-# ============================================================
-# BUY / SELL POWER
-# ============================================================
-
-def calculate_power(candles):
-    recent = candles[-20:]
-
-    # أثناء ما قبل/بعد السوق قد لا تعيد TwelveData حجمًا للشموع الممتدة.
-    # في هذه الحالة نستخدم قوة الحركة السعرية بدل أن تصبح القوة 0/0.
-    volume_available = sum(c["volume"] for c in recent) > 0
-
-    buy_volume = 0.0
-    sell_volume = 0.0
-
-    if volume_available:
-        for candle in recent:
-            volume = candle["volume"]
-
-            if candle["close"] > candle["open"]:
-                buy_volume += volume
-            elif candle["close"] < candle["open"]:
-                sell_volume += volume
-            else:
-                buy_volume += volume * 0.5
-                sell_volume += volume * 0.5
-    else:
-        # fallback سعري للـ extended hours
-        for candle in recent:
-            if candle["close"] > candle["open"]:
-                buy_volume += 1.0
-            elif candle["close"] < candle["open"]:
-                sell_volume += 1.0
-            else:
-                buy_volume += 0.5
-                sell_volume += 0.5
-
-    total = buy_volume + sell_volume
-
-    if total <= 0:
-        return 50.0, 50.0
-
-    return (
-        buy_volume / total * 100,
-        sell_volume / total * 100,
-    )
-
-
-def volume_strength(candles):
-    volumes = [c["volume"] for c in candles]
-
-    # Extended-hours قد لا تحتوي على volume.
-    if sum(volumes[-VOLUME_LENGTH:]) <= 0:
-        return 1.0
-
-    if len(volumes) < VOLUME_LENGTH + 1:
-        return 1.0
-
-    average = sma(volumes[:-1], VOLUME_LENGTH)
-
-    if not average or average <= 0:
-        return 1.0
-
-    return volumes[-1] / average
-
 
 # ============================================================
-# TARGETS
+# PINE-LIKE SIGNAL ENGINE
 # ============================================================
 
-def calculate_targets(price, atr_value, direction):
-    if not atr_value or atr_value <= 0 or not price or price <= 0:
-        return []
-
-    result = []
-    for multiplier in ATR_TARGETS:
-        if direction == "UP":
-            result.append(price + atr_value * multiplier)
-        else:
-            result.append(price - atr_value * multiplier)
-    return result
-
-
-def calculate_stop_loss(price, atr_value, support, resistance, direction):
-    """ATR + structure stop. The wider protective level is used to avoid noise."""
-    if not price or not atr_value or atr_value <= 0:
-        return None
-    atr_stop = price - atr_value * STOP_ATR_MULTIPLIER if direction == "UP" else price + atr_value * STOP_ATR_MULTIPLIER
-    if direction == "UP" and support is not None and support < price:
-        structural = support - atr_value * 0.25
-        return round(max(0.0, min(atr_stop, structural)), 10)
-    if direction == "DOWN" and resistance is not None and resistance > price:
-        structural = resistance + atr_value * 0.25
-        return round(max(0.0, max(atr_stop, structural)), 10)
-    return round(max(0.0, atr_stop), 10)
-
-
-# ============================================================
-# NEWS
-# ============================================================
-
-def news_sentiment(symbol):
-    data = td_request(
-        "/news",
-        {
-            "symbol": symbol,
-            "limit": 10,
-        },
-    )
-
-    if not data:
-        return "⚪ محايد"
-
-    if isinstance(data, dict):
-        articles = data.get("news", [])
-    elif isinstance(data, list):
-        articles = data
-    else:
-        articles = []
-
-    if not articles:
-        return "⚪ محايد"
-
-    positive = 0
-    negative = 0
-
-    for article in articles:
-        if not isinstance(article, dict):
-            continue
-
-        text = (
-            str(article.get("title", "")) + " " +
-            str(article.get("description", ""))
-        ).lower()
-
-        positive += sum(1 for word in POSITIVE_WORDS if word in text)
-        negative += sum(1 for word in NEGATIVE_WORDS if word in text)
-
-    if positive > negative:
-        return "🟢 إيجابي"
-
-    if negative > positive:
-        return "🔴 سلبي"
-
-    return "⚪ محايد"
-
-
-# ============================================================
-# PINE INDICATOR PARITY — RSI / AI PRO MAX / GOLDEN CANDLE
-# ============================================================
-
-def _pine_sma_series(values, length):
+def pine_sma_series(values, length):
     out = [None] * len(values)
+
     if len(values) < length:
         return out
+
     for i in range(length - 1, len(values)):
-        window = values[i - length + 1:i + 1]
-        valid = [x for x in window if x is not None]
-        out[i] = sum(valid) / len(valid) if valid else None
+        out[i] = sum(values[i-length+1:i+1]) / length
+
     return out
 
 
-def _pine_ema_series(values, length):
+def pine_ema_series(values, length):
     out = [None] * len(values)
+
     if len(values) < length:
         return out
-    seed = sum(values[:length]) / length
-    out[length - 1] = seed
+
+    value = sum(values[:length]) / length
+    out[length - 1] = value
+
     alpha = 2.0 / (length + 1.0)
-    prev = seed
+
     for i in range(length, len(values)):
-        prev = (values[i] - prev) * alpha + prev
-        out[i] = prev
+        value = (values[i] - value) * alpha + value
+        out[i] = value
+
     return out
 
 
-def _cross_over(a, b, i):
-    return i > 0 and a[i] is not None and b[i] is not None and a[i - 1] is not None and b[i - 1] is not None and a[i] > b[i] and a[i - 1] <= b[i - 1]
+def cross_over(a, b, i):
+    return (
+        i > 0
+        and a[i] is not None
+        and b[i] is not None
+        and a[i-1] is not None
+        and b[i-1] is not None
+        and a[i] > b[i]
+        and a[i-1] <= b[i-1]
+    )
 
 
-def _cross_under(a, b, i):
-    return i > 0 and a[i] is not None and b[i] is not None and a[i - 1] is not None and b[i - 1] is not None and a[i] < b[i] and a[i - 1] >= b[i - 1]
+def cross_under(a, b, i):
+    return (
+        i > 0
+        and a[i] is not None
+        and b[i] is not None
+        and a[i-1] is not None
+        and b[i-1] is not None
+        and a[i] < b[i]
+        and a[i-1] >= b[i-1]
+    )
 
 
-def _confirmed_pivots(values, left=5, right=5, is_high=False):
+def confirmed_pivots(values, left=5, right=5, is_high=False):
     pivots = []
+
     for i in range(left, len(values) - right):
         window = values[i-left:i+right+1]
-        if is_high:
-            if values[i] == max(window):
-                pivots.append(i)
-        else:
-            if values[i] == min(window):
-                pivots.append(i)
+
+        if is_high and values[i] == max(window):
+            pivots.append(i)
+
+        if not is_high and values[i] == min(window):
+            pivots.append(i)
+
     return pivots
 
 
-def _pine_indicator_parity(candles):
-    """
-    Reproduces the signal-bearing logic from the supplied Pine file.
-    Visual objects/labels are intentionally not reproduced in Telegram.
-    """
+def pine_indicator_parity(candles):
     closes = [c["close"] for c in candles]
     opens = [c["open"] for c in candles]
     highs = [c["high"] for c in candles]
     lows = [c["low"] for c in candles]
-    volumes = [c.get("volume", 0.0) or 0.0 for c in candles]
+    volumes = [c["volume"] for c in candles]
+
     n = len(candles)
+    i = n - 1
 
-    # --------------------------------------------------------
-    # RSI / EMA block from the supplied AI PRO MAX script
-    # EMA 7 / 14 / 25 / 50 / 180 / 320 / 380
-    # --------------------------------------------------------
-    ema7 = _pine_ema_series(closes, 7)
-    ema14 = _pine_ema_series(closes, 14)
-    ema25 = _pine_ema_series(closes, 25)
-    ema50 = _pine_ema_series(closes, 50)
-    ema180 = _pine_ema_series(closes, 180)
-    ema320 = _pine_ema_series(closes, 320)
-    ema380 = _pine_ema_series(closes, 380)
+    ema7 = pine_ema_series(closes, 7)
+    ema14 = pine_ema_series(closes, 14)
+    ema25 = pine_ema_series(closes, 25)
+    ema50 = pine_ema_series(closes, 50)
+    ema180 = pine_ema_series(closes, 180)
+    ema320 = pine_ema_series(closes, 320)
+    ema380 = pine_ema_series(closes, 380)
+    ema200 = pine_ema_series(closes, 200)
 
-    rsi_series = []
-    for i in range(n):
-        rsi_series.append(rsi(closes[:i + 1], 14))
+    rsi_series = [
+        rsi(closes[:j+1], 14)
+        for j in range(n)
+    ]
 
-    # Strong BUY/SELL from EMA3(25) + volatility filter.
-    atr_series = []
-    for i in range(n):
-        atr_series.append(atr(highs[:i + 1], lows[:i + 1], closes[:i + 1], 14))
-    atr_sma20 = _pine_sma_series([x if x is not None else 0.0 for x in atr_series], 20)
+    atr_series = [
+        atr(
+            highs[:j+1],
+            lows[:j+1],
+            closes[:j+1],
+            14
+        )
+        for j in range(n)
+    ]
 
-    strong_buy = False
-    strong_sell = False
-    if n:
-        i = n - 1
-        bull_ema = all(x is not None for x in (ema7[i], ema14[i], ema25[i], ema50[i])) and ema7[i] > ema14[i] > ema25[i] > ema50[i]
-        bear_ema = all(x is not None for x in (ema7[i], ema14[i], ema25[i], ema50[i])) and ema7[i] < ema14[i] < ema25[i] < ema50[i]
-        vol_filter = atr_series[i] is not None and atr_sma20[i] is not None and atr_series[i] > atr_sma20[i]
-        strong_buy = _cross_over(closes, ema25, i) and bull_ema and vol_filter
-        strong_sell = _cross_under(closes, ema25, i) and bear_ema and vol_filter
+    atr_sma20 = pine_sma_series(
+        [x if x is not None else 0.0 for x in atr_series],
+        20
+    )
 
-    # --------------------------------------------------------
-    # Doji waiting/breakout logic — exact stateful behavior
-    # --------------------------------------------------------
+    bull_ema = (
+        all(x is not None for x in
+            (ema7[i], ema14[i], ema25[i], ema50[i]))
+        and ema7[i] > ema14[i] > ema25[i] > ema50[i]
+    )
+
+    bear_ema = (
+        all(x is not None for x in
+            (ema7[i], ema14[i], ema25[i], ema50[i]))
+        and ema7[i] < ema14[i] < ema25[i] < ema50[i]
+    )
+
+    vol_filter = (
+        atr_series[i] is not None
+        and atr_sma20[i] is not None
+        and atr_series[i] > atr_sma20[i]
+    )
+
+    strong_buy = cross_over(closes, ema25, i) and bull_ema and vol_filter
+    strong_sell = cross_under(closes, ema25, i) and bear_ema and vol_filter
+
+    # Doji breakout.
     waiting = False
     doji_high = None
     doji_low = None
     wait_bars = 0
     doji_buy = False
     doji_sell = False
-    for i in range(n):
-        body = abs(closes[i] - opens[i])
-        rng = highs[i] - lows[i]
+
+    for j in range(n):
+        body = abs(closes[j] - opens[j])
+        rng = highs[j] - lows[j]
         is_doji = rng > 0 and body <= rng * 0.10
 
         if is_doji and not waiting:
             waiting = True
-            doji_high = highs[i]
-            doji_low = lows[i]
+            doji_high = highs[j]
+            doji_low = lows[j]
             wait_bars = 0
 
         if waiting:
             wait_bars += 1
-            if wait_bars >= 10:
-                waiting = False
-                doji_high = None
-                doji_low = None
-                wait_bars = 0
 
-        buy_now = waiting and doji_high is not None and closes[i] > doji_high
-        sell_now = waiting and doji_low is not None and closes[i] < doji_low
+        buy_now = (
+            waiting
+            and doji_high is not None
+            and closes[j] > doji_high
+        )
+
+        sell_now = (
+            waiting
+            and doji_low is not None
+            and closes[j] < doji_low
+        )
+
         if buy_now or sell_now:
             doji_buy = buy_now
             doji_sell = sell_now
@@ -1145,111 +1045,201 @@ def _pine_indicator_parity(candles):
             doji_high = None
             doji_low = None
             wait_bars = 0
+        elif wait_bars >= 10:
+            waiting = False
+            doji_high = None
+            doji_low = None
+            wait_bars = 0
 
-    # --------------------------------------------------------
-    # Hidden divergence: pivot length 5, price vs RSI
-    # --------------------------------------------------------
+    # Hidden divergence.
     hidden_bull = False
     hidden_bear = False
-    low_pivots = _confirmed_pivots(lows, 5, 5, is_high=False)
-    high_pivots = _confirmed_pivots(highs, 5, 5, is_high=True)
+
+    low_pivots = confirmed_pivots(lows, 5, 5, False)
+    high_pivots = confirmed_pivots(highs, 5, 5, True)
 
     if len(low_pivots) >= 2:
         p1, p2 = low_pivots[-2], low_pivots[-1]
+
         if rsi_series[p1] is not None and rsi_series[p2] is not None:
-            hidden_bull = lows[p2] > lows[p1] and rsi_series[p2] < rsi_series[p1]
+            hidden_bull = (
+                lows[p2] > lows[p1]
+                and rsi_series[p2] < rsi_series[p1]
+            )
 
     if len(high_pivots) >= 2:
         p1, p2 = high_pivots[-2], high_pivots[-1]
+
         if rsi_series[p1] is not None and rsi_series[p2] is not None:
-            hidden_bear = highs[p2] < highs[p1] and rsi_series[p2] > rsi_series[p1]
+            hidden_bear = (
+                highs[p2] < highs[p1]
+                and rsi_series[p2] > rsi_series[p1]
+            )
 
-    # --------------------------------------------------------
-    # Smart Filters — exactly as supplied
-    # EMA200, RSI >/< 50, volume > SMA20
-    # --------------------------------------------------------
-    ema200_series = _pine_ema_series(closes, 200)
-    volume_sma20 = _pine_sma_series(volumes, 20)
-    i = n - 1
-    ema_buy_filter = ema200_series[i] is not None and closes[i] > ema200_series[i]
-    ema_sell_filter = ema200_series[i] is not None and closes[i] < ema200_series[i]
-    rsi_buy_filter = rsi_series[i] is not None and rsi_series[i] > 50
-    rsi_sell_filter = rsi_series[i] is not None and rsi_series[i] < 50
-    volume_filter = volume_sma20[i] is not None and volumes[i] > volume_sma20[i]
+    volume_sma20 = pine_sma_series(volumes, 20)
 
-    final_buy = (doji_buy or hidden_bull) and ema_buy_filter and rsi_buy_filter and volume_filter
-    final_sell = (doji_sell or hidden_bear) and ema_sell_filter and rsi_sell_filter and volume_filter
+    ema_buy_filter = (
+        ema200[i] is not None
+        and closes[i] > ema200[i]
+    )
 
-    # --------------------------------------------------------
-    # Golden Candle PRO — exact conditions from the supplied file
-    # EMA 7 / EMA 25 / RSI14 / body 45% / volume 1.10x / avg20
-    # --------------------------------------------------------
-    g_ema_fast = ema7
-    g_ema_slow = ema25
-    g_rsi = rsi_series
-    g_avg_volume = _pine_sma_series(volumes, 20)
+    ema_sell_filter = (
+        ema200[i] is not None
+        and closes[i] < ema200[i]
+    )
+
+    rsi_buy_filter = (
+        rsi_series[i] is not None
+        and rsi_series[i] > 50
+    )
+
+    rsi_sell_filter = (
+        rsi_series[i] is not None
+        and rsi_series[i] < 50
+    )
+
+    volume_filter = (
+        volume_sma20[i] is not None
+        and volumes[i] > volume_sma20[i]
+    )
+
+    final_buy = (
+        (doji_buy or hidden_bull)
+        and ema_buy_filter
+        and rsi_buy_filter
+        and volume_filter
+    )
+
+    final_sell = (
+        (doji_sell or hidden_bear)
+        and ema_sell_filter
+        and rsi_sell_filter
+        and volume_filter
+    )
+
+    # Golden Candle PRO.
+    avg_volume = pine_sma_series(volumes, 20)
 
     golden_first = False
-    golden_continue = False
     golden_active = False
 
     for j in range(n):
         rng = highs[j] - lows[j]
         body = abs(closes[j] - opens[j])
-        body_ratio = body / rng if rng > 0 else 0.0
+
+        body_ratio = body / rng if rng > 0 else 0
         bull_candle = closes[j] > opens[j]
         strong_body = body_ratio >= 0.45
-        ema_bull = g_ema_fast[j] is not None and g_ema_slow[j] is not None and g_ema_fast[j] > g_ema_slow[j]
-        price_bull = g_ema_fast[j] is not None and closes[j] > g_ema_fast[j]
-        rsi_bull = g_rsi[j] is not None and g_rsi[j] >= 50
-        # Pine: na(volume) OR volume >= avgVolume*1.10.
-        volume_bull = volumes[j] <= 0 or (g_avg_volume[j] is not None and volumes[j] >= g_avg_volume[j] * 1.10)
 
-        crossover_close_fast = _cross_over(closes, g_ema_fast, j)
-        crossover_fast_slow = _cross_over(g_ema_fast, g_ema_slow, j)
-        previous_bear_break = j > 0 and closes[j] > highs[j - 1] and closes[j - 1] <= opens[j - 1]
+        ema_bull = (
+            ema7[j] is not None
+            and ema25[j] is not None
+            and ema7[j] > ema25[j]
+        )
+
+        price_bull = (
+            ema7[j] is not None
+            and closes[j] > ema7[j]
+        )
+
+        rsi_bull = (
+            rsi_series[j] is not None
+            and rsi_series[j] >= 50
+        )
+
+        volume_bull = (
+            volumes[j] <= 0
+            or (
+                avg_volume[j] is not None
+                and volumes[j] >= avg_volume[j] * 1.10
+            )
+        )
 
         early_rise = (
-            bull_candle and strong_body and price_bull and rsi_bull and volume_bull and
-            (crossover_close_fast or crossover_fast_slow or previous_bear_break)
+            bull_candle
+            and strong_body
+            and price_bull
+            and rsi_bull
+            and volume_bull
+            and (
+                cross_over(closes, ema7, j)
+                or cross_over(ema7, ema25, j)
+                or (
+                    j > 0
+                    and closes[j] > highs[j-1]
+                    and closes[j-1] <= opens[j-1]
+                )
+            )
         )
 
         if early_rise:
             golden_active = True
 
         trend_break = (
-            (g_ema_fast[j] is not None and closes[j] < g_ema_fast[j]) or
-            (g_ema_fast[j] is not None and g_ema_slow[j] is not None and g_ema_fast[j] < g_ema_slow[j]) or
-            (g_rsi[j] is not None and g_rsi[j] < 45)
+            (
+                ema7[j] is not None
+                and closes[j] < ema7[j]
+            )
+            or (
+                ema7[j] is not None
+                and ema25[j] is not None
+                and ema7[j] < ema25[j]
+            )
+            or (
+                rsi_series[j] is not None
+                and rsi_series[j] < 45
+            )
         )
+
         if trend_break:
             golden_active = False
 
         if j == n - 1:
             golden_first = early_rise
-            golden_continue = golden_active and not golden_first
 
-    # --------------------------------------------------------
-    # VWAP crossover signal from the supplied script
-    # --------------------------------------------------------
+    golden_continue = golden_active and not golden_first
+
+    # VWAP series / crossover.
     vwap_series = []
-    cum_pv = 0.0
-    cum_vol = 0.0
+
+    pv = 0.0
+    volume_sum = 0.0
+
     for j in range(n):
-        vol = volumes[j]
         typical = (highs[j] + lows[j] + closes[j]) / 3.0
-        cum_pv += typical * vol
-        cum_vol += vol
-        v = cum_pv / cum_vol if cum_vol > 0 else None
+        pv += typical * volumes[j]
+        volume_sum += volumes[j]
+
+        v = pv / volume_sum if volume_sum > 0 else None
         vwap_series.append(v)
 
     vwap_buy = False
     vwap_sell = False
-    if i > 0 and vwap_series[i] is not None and vwap_series[i - 1] is not None:
-        avg_vol = g_avg_volume[i]
-        strong_volume = volumes[i] > avg_vol * 1.10 if avg_vol is not None else True
-        vwap_buy = closes[i] > vwap_series[i] and closes[i - 1] <= vwap_series[i - 1] and strong_volume
-        vwap_sell = closes[i] < vwap_series[i] and closes[i - 1] >= vwap_series[i - 1] and strong_volume
+
+    if (
+        i > 0
+        and vwap_series[i] is not None
+        and vwap_series[i-1] is not None
+    ):
+        avg_vol = avg_volume[i]
+
+        strong_volume = (
+            volumes[i] > avg_vol * 1.10
+            if avg_vol is not None
+            else True
+        )
+
+        vwap_buy = (
+            closes[i] > vwap_series[i]
+            and closes[i-1] <= vwap_series[i-1]
+            and strong_volume
+        )
+
+        vwap_sell = (
+            closes[i] < vwap_series[i]
+            and closes[i-1] >= vwap_series[i-1]
+            and strong_volume
+        )
 
     return {
         "final_buy": final_buy,
@@ -1273,7 +1263,7 @@ def _pine_indicator_parity(candles):
         "ema180": ema180[i],
         "ema320": ema320[i],
         "ema380": ema380[i],
-        "ema200": ema200_series[i],
+        "ema200": ema200[i],
         "volume_sma20": volume_sma20[i],
         "vwap": vwap_series[i],
     }
@@ -1283,138 +1273,612 @@ def _pine_indicator_parity(candles):
 # ANALYSIS
 # ============================================================
 
-def _analyze_symbol_interval(symbol, market, interval):
-    """Analyze one symbol on one of the approved signal timeframes."""
-    series = get_series(symbol, market, interval=interval)
+def calculate_targets(price, atr_value, direction, count=8):
+    if not price or not atr_value or atr_value <= 0:
+        return []
+
+    result = []
+
+    multipliers = list(ATR_TARGETS)
+
+    while len(multipliers) < count:
+        # Expanding continuation levels after TP8.
+        next_multiplier = multipliers[-1] + max(
+            1.5,
+            multipliers[-1] * 0.25
+        )
+        multipliers.append(next_multiplier)
+
+    for multiplier in multipliers[:count]:
+        if direction == "UP":
+            result.append(price + atr_value * multiplier)
+        else:
+            result.append(price - atr_value * multiplier)
+
+    return result
+
+
+def calculate_stop_loss(price, atr_value, support, resistance, direction):
+    if not price or not atr_value or atr_value <= 0:
+        return None
+
+    if direction == "UP":
+        atr_stop = price - atr_value * STOP_ATR_MULTIPLIER
+
+        if support is not None and support < price:
+            structural = support - atr_value * 0.25
+            return max(0.0, min(atr_stop, structural))
+
+        return max(0.0, atr_stop)
+
+    atr_stop = price + atr_value * STOP_ATR_MULTIPLIER
+
+    if resistance is not None and resistance > price:
+        structural = resistance + atr_value * 0.25
+        return max(0.0, max(atr_stop, structural))
+
+    return max(0.0, atr_stop)
+
+
+def analyze_us_crypto(symbol, market):
+    series = get_series(symbol, market, PRIMARY_TIMEFRAME)
+
     if not series:
         return None
 
     candles = series["candles"]
-    company_name = series.get("name") or ""
     closes = [c["close"] for c in candles]
     highs = [c["high"] for c in candles]
     lows = [c["low"] for c in candles]
     volumes = [c["volume"] for c in candles]
 
-    if not closes:
+    if len(closes) < 100:
         return None
+
     price = closes[-1]
-    previous_close = closes[-2] if len(closes) >= 2 else None
+    previous_close = closes[-2]
 
     if market == "US" and price < MIN_US_PRICE:
         return None
+
     e10 = ema(closes, EMA_FAST)
     e14 = ema(closes, EMA_MID)
     e15 = ema(closes, EMA_MOMENTUM)
     e25 = ema(closes, EMA_TRIGGER)
     e50 = ema(closes, EMA_SLOW)
     e200 = ema(closes, EMA_LONG)
+
     rsi_value = rsi(closes, RSI_LENGTH)
     atr_value = atr(highs, lows, closes, ATR_LENGTH)
     vwap_value = vwap(highs, lows, closes, volumes)
+
     support, resistance = support_resistance(candles)
-    ars = calculate_ars(candles)
     buy_power, sell_power = calculate_power(candles)
     volume_ratio = volume_strength(candles)
-    raw_trend = calculate_trend(candles)
 
-    pine = _pine_indicator_parity(candles)
+    raw_trend = calculate_trend(candles)
+    trend = persistent_trend(market, symbol, raw_trend)
+
+    pine = pine_indicator_parity(candles)
 
     if pine["final_buy"]:
-        signal, signal_text = "BUY", "🟢 شراء قوي — SMART BUY"
+        signal = "BUY"
+        signal_text = "🟢 شراء قوي — SMART BUY"
     elif pine["final_sell"]:
-        signal, signal_text = "SELL", "🔴 بيع قوي — SMART SELL"
+        signal = "SELL"
+        signal_text = "🔴 بيع قوي — SMART SELL"
     elif pine["golden_first"]:
-        signal, signal_text = "BUY", "🟡 شراء — GOLDEN CANDLE"
+        signal = "BUY"
+        signal_text = "🟡 شراء — GOLDEN CANDLE"
     elif pine["vwap_buy"]:
-        signal, signal_text = "BUY", "🟢 شراء — VWAP"
+        signal = "BUY"
+        signal_text = "🟢 شراء — VWAP"
     elif pine["vwap_sell"]:
-        signal, signal_text = "SELL", "🔴 بيع — VWAP"
+        signal = "SELL"
+        signal_text = "🔴 بيع — VWAP"
     elif pine["strong_buy"]:
-        signal, signal_text = "BUY", "🟢 شراء قوي — EMA"
+        signal = "BUY"
+        signal_text = "🟢 شراء قوي — EMA"
     elif pine["strong_sell"]:
-        signal, signal_text = "SELL", "🔴 بيع قوي — EMA"
+        signal = "SELL"
+        signal_text = "🔴 بيع قوي — EMA"
     else:
-        signal, signal_text = "WAIT", "⚪ انتظار"
+        signal = "WAIT"
+        signal_text = "⚪ انتظار"
 
-    # Score 0-100: trend + momentum + VWAP + volume + breakout + candle/RSI.
+    # Score with VWAP deliberately important.
     score = 0
+
     if e10 is not None and e14 is not None:
-        score += 12 if ((signal == "BUY" and e10 > e14) or (signal == "SELL" and e10 < e14)) else 0
+        if (
+            signal == "BUY" and e10 > e14
+        ) or (
+            signal == "SELL" and e10 < e14
+        ):
+            score += 10
+
     if e14 is not None and e25 is not None:
-        score += 12 if ((signal == "BUY" and e14 > e25) or (signal == "SELL" and e14 < e25)) else 0
+        if (
+            signal == "BUY" and e14 > e25
+        ) or (
+            signal == "SELL" and e14 < e25
+        ):
+            score += 10
+
     if e25 is not None and e50 is not None:
-        score += 12 if ((signal == "BUY" and e25 > e50) or (signal == "SELL" and e25 < e50)) else 0
+        if (
+            signal == "BUY" and e25 > e50
+        ) or (
+            signal == "SELL" and e25 < e50
+        ):
+            score += 10
+
     if e50 is not None and e200 is not None:
-        score += 12 if ((signal == "BUY" and e50 > e200) or (signal == "SELL" and e50 < e200)) else 0
+        if (
+            signal == "BUY" and e50 > e200
+        ) or (
+            signal == "SELL" and e50 < e200
+        ):
+            score += 10
+
     if rsi_value is not None:
-        score += 12 if ((signal == "BUY" and rsi_value >= 55) or (signal == "SELL" and rsi_value <= 45)) else 0
+        if (
+            signal == "BUY" and rsi_value >= 55
+        ) or (
+            signal == "SELL" and rsi_value <= 45
+        ):
+            score += 10
+
+    # VWAP = 15 points.
     if vwap_value is not None:
-        score += 12 if ((signal == "BUY" and price > vwap_value) or (signal == "SELL" and price < vwap_value)) else 0
-    score += 12 if ((signal == "BUY" and buy_power >= 55) or (signal == "SELL" and sell_power >= 55)) else 0
-    score += 8 if volume_ratio >= 1.20 else 0
-    score += 8 if ((signal == "BUY" and pine.get("golden_first")) or (signal == "SELL" and pine.get("strong_sell"))) else 0
+        if (
+            signal == "BUY" and price > vwap_value
+        ) or (
+            signal == "SELL" and price < vwap_value
+        ):
+            score += 15
+
+    if (
+        signal == "BUY" and buy_power >= 55
+    ) or (
+        signal == "SELL" and sell_power >= 55
+    ):
+        score += 10
+
+    if volume_ratio >= 1.20:
+        score += 10
+
+    if (
+        signal == "BUY" and pine.get("golden_first")
+    ) or (
+        signal == "SELL" and pine.get("strong_sell")
+    ):
+        score += 5
+
     score = min(100, int(score))
 
-    # Keep trend state per symbol, but do not overwrite it six times in one pass.
-    trend = raw_trend
-    key = f"{market}:{symbol}"
-    with state_lock:
-        previous_ars = TREND_STATE.get(key + ":ARS")
-        TREND_STATE[key + ":ARS"] = ars
-    trend = persistent_trend(market, symbol, trend)
-    ars_bias, ars_level = ars_ladder_bias(ars, previous_ars)
-    divergence = {
-        "regular_bull": False,
-        "regular_bear": False,
-        "hidden_bull": pine["hidden_bull"],
-        "hidden_bear": pine["hidden_bear"],
-    }
-    trendline = trendline_bias(candles)
     smart = detect_smart_movements(
-        candles, trend, volume_ratio, buy_power, sell_power, atr_value, rsi_value
+        candles,
+        trend,
+        volume_ratio,
+        buy_power,
+        sell_power,
+        atr_value,
+        rsi_value,
     )
 
     targets = []
     stop_loss = None
+
     if signal != "WAIT":
         direction = "UP" if signal == "BUY" else "DOWN"
-        targets = calculate_targets(price, atr_value, direction)
-        stop_loss = calculate_stop_loss(price, atr_value, support, resistance, direction)
+        targets = calculate_targets(
+            price,
+            atr_value,
+            direction,
+            8,
+        )
+
+        stop_loss = calculate_stop_loss(
+            price,
+            atr_value,
+            support,
+            resistance,
+            direction,
+        )
 
     return {
-        "symbol": symbol, "name": company_name, "market": market,
-        "price": price, "entry_price": price, "previous_close": previous_close,
-        "ema10": e10, "ema14": e14, "ema15": e15, "ema25": e25, "ema50": e50, "ema200": e200,
-        "rsi": rsi_value, "atr": atr_value, "vwap": vwap_value,
-        "support": support, "resistance": resistance, "ars": ars,
-        "ars_level": ars_level, "buy_power": buy_power, "sell_power": sell_power,
-        "volume_ratio": volume_ratio, "trend": trend, "score": score,
-        "signal": signal, "signal_text": signal_text, "news": "⚪ غير متاح",
-        "split_info": None, "targets": targets, "stop_loss": stop_loss, "divergence": divergence,
-        "trendline_bias": trendline, "smart": smart, "pine": pine,
-        "timeframe": interval,
-        "indicator_triggers": [label for label, active in (
-            ("SMART BUY", pine["final_buy"]), ("SMART SELL", pine["final_sell"]),
-            ("GOLDEN CANDLE", pine["golden_first"]),
-            ("GOLDEN CONTINUATION", pine["golden_continue"]),
-            ("VWAP BUY", pine["vwap_buy"]), ("VWAP SELL", pine["vwap_sell"]),
-            ("STRONG BUY", pine["strong_buy"]), ("STRONG SELL", pine["strong_sell"]),
-        ) if active],
+        "symbol": symbol,
+        "name": series.get("name") or "",
+        "market": market,
+        "price": price,
+        "previous_close": previous_close,
+        "entry_price": price,
+        "ema10": e10,
+        "ema14": e14,
+        "ema15": e15,
+        "ema25": e25,
+        "ema50": e50,
+        "ema200": e200,
+        "rsi": rsi_value,
+        "atr": atr_value,
+        "vwap": vwap_value,
+        "support": support,
+        "resistance": resistance,
+        "buy_power": buy_power,
+        "sell_power": sell_power,
+        "volume_ratio": volume_ratio,
+        "trend": trend,
+        "score": score,
+        "signal": signal,
+        "signal_text": signal_text,
+        "targets": targets,
+        "stop_loss": stop_loss,
+        "smart": smart,
+        "pine": pine,
+        "timeframe": PRIMARY_TIMEFRAME,
+        "news": "⚪ لم تُفحص بعد",
     }
 
 
-def analyze_symbol(symbol, market):
-    """Analyze one 5-minute series. Higher timeframes are not fetched per symbol on Basic quota."""
-    result = _analyze_symbol_interval(symbol, market, PRIMARY_TIMEFRAME)
-    if not result or result["signal"] == "WAIT":
-        return None
-    # News/split endpoints are deliberately not called here: they consume extra credits.
-    return result
+# ============================================================
+# NEWS — ONLY FOR STRONG SIGNALS
+# ============================================================
+
+def news_sentiment(symbol):
+    now = time.time()
+
+    cached = NEWS_CACHE.get(symbol)
+
+    if cached and now - cached["time"] < NEWS_CACHE_TTL:
+        return cached["value"]
+
+    data = td_request(
+        "/news",
+        {
+            "symbol": symbol,
+            "limit": 10,
+        },
+        credit_cost=1,
+    )
+
+    if not data:
+        value = "⚪ غير متاح"
+        NEWS_CACHE[symbol] = {"time": now, "value": value}
+        return value
+
+    if isinstance(data, dict):
+        articles = data.get("news", [])
+    elif isinstance(data, list):
+        articles = data
+    else:
+        articles = []
+
+    positive = 0
+    negative = 0
+
+    for article in articles:
+        if not isinstance(article, dict):
+            continue
+
+        text = (
+            str(article.get("title", ""))
+            + " "
+            + str(article.get("description", ""))
+        ).lower()
+
+        positive += sum(
+            1 for word in POSITIVE_WORDS if word in text
+        )
+
+        negative += sum(
+            1 for word in NEGATIVE_WORDS if word in text
+        )
+
+    if positive > negative:
+        value = "🟢 إيجابي"
+    elif negative > positive:
+        value = "🔴 سلبي"
+    else:
+        value = "⚪ محايد"
+
+    NEWS_CACHE[symbol] = {"time": now, "value": value}
+    return value
 
 
 # ============================================================
-# FORMAT
+# TARGET CONTINUATION
+# ============================================================
+
+def update_target_state(result):
+    """
+    TP1..TP8 are generated initially.
+    Once price reaches the last target, a new target is opened.
+    The process can continue for strong/momentum moves.
+    """
+    if result["signal"] not in ("BUY", "SELL"):
+        return None
+
+    key = f"{result['market']}:{result['symbol']}"
+    direction = "UP" if result["signal"] == "BUY" else "DOWN"
+
+    price = result["price"]
+    atr_value = result["atr"]
+
+    if not atr_value or atr_value <= 0:
+        return None
+
+    with state_lock:
+        state = TARGET_STATE.get(key)
+
+        if state is None or state.get("direction") != direction:
+            initial = calculate_targets(
+                result["entry_price"],
+                atr_value,
+                direction,
+                8,
+            )
+
+            if not initial:
+                return None
+
+            TARGET_STATE[key] = {
+                "direction": direction,
+                "last_target": initial[-1],
+                "next_multiplier": 9.5,
+                "highest_reached": 0,
+            }
+
+            return {
+                "new_target": None,
+                "reached": 0,
+            }
+
+        last_target = state["last_target"]
+
+        reached = False
+
+        if direction == "UP" and price >= last_target:
+            reached = True
+
+        if direction == "DOWN" and price <= last_target:
+            reached = True
+
+        if not reached:
+            return None
+
+        multiplier = state["next_multiplier"]
+
+        if direction == "UP":
+            new_target = price + atr_value * 1.25
+        else:
+            new_target = price - atr_value * 1.25
+
+        state["last_target"] = new_target
+        state["next_multiplier"] = multiplier + 1.5
+        state["highest_reached"] += 1
+
+        return {
+            "new_target": new_target,
+            "reached": state["highest_reached"],
+        }
+
+
+# ============================================================
+# TELEGRAM
+# ============================================================
+
+DIRECTION_GIF_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "telegram_gifs"
+)
+
+UP_GIF = os.path.join(DIRECTION_GIF_DIR, "green_up.gif")
+DOWN_GIF = os.path.join(DIRECTION_GIF_DIR, "red_down.gif")
+
+
+def ensure_direction_gifs():
+    try:
+        os.makedirs(DIRECTION_GIF_DIR, exist_ok=True)
+
+        def create(path, direction, title):
+            if os.path.exists(path):
+                return
+
+            frames = []
+
+            for i in range(8):
+                img = Image.new(
+                    "RGB",
+                    (420, 260),
+                    (18, 18, 24),
+                )
+
+                draw = ImageDraw.Draw(img)
+
+                pulse = i if i <= 4 else 8 - i
+
+                if direction == "up":
+                    points = [
+                        (210, 40 - pulse * 2),
+                        (90, 155 - pulse * 2),
+                        (160, 155 - pulse * 2),
+                        (160, 215),
+                        (260, 215),
+                        (260, 155 - pulse * 2),
+                        (330, 155 - pulse * 2),
+                    ]
+                    fill = (40, 220, 100)
+                    label = "UP"
+                else:
+                    points = [
+                        (90, 95 + pulse * 2),
+                        (160, 95 + pulse * 2),
+                        (160, 45),
+                        (260, 45),
+                        (260, 95 + pulse * 2),
+                        (330, 95 + pulse * 2),
+                        (210, 220 + pulse * 2),
+                    ]
+                    fill = (240, 55, 65)
+                    label = "DOWN"
+
+                draw.polygon(points, fill=fill)
+                draw.text((145, 15), title, fill=(245, 245, 245))
+                draw.text((175, 225), label, fill=fill)
+
+                frames.append(img)
+
+            frames[0].save(
+                path,
+                save_all=True,
+                append_images=frames[1:],
+                duration=140,
+                loop=0,
+                optimize=True,
+            )
+
+        create(UP_GIF, "up", "AI PRO MAX")
+        create(DOWN_GIF, "down", "AI PRO MAX")
+
+        return True
+
+    except Exception as exc:
+        print("⚠️ GIF:", exc)
+        return False
+
+
+def tradingview_url(result):
+    symbol = str(result.get("symbol", "")).strip()
+
+    if not symbol:
+        return None
+
+    return (
+        "https://www.tradingview.com/chart/?symbol="
+        + quote(symbol, safe="")
+    )
+
+
+def telegram_markup(url):
+    if not url:
+        return None
+
+    import json
+
+    return json.dumps({
+        "inline_keyboard": [[
+            {
+                "text": "📈 فتح في TradingView",
+                "url": url,
+            }
+        ]]
+    }, ensure_ascii=False)
+
+
+def telegram_send_animation(
+    token,
+    gif_path,
+    caption,
+    url=None,
+):
+    if (
+        not token
+        or not CHAT_ID
+        or not os.path.exists(gif_path)
+    ):
+        return False
+
+    try:
+        session = get_session()
+
+        with open(gif_path, "rb") as fh:
+            response = session.post(
+                f"https://api.telegram.org/bot{token}/sendAnimation",
+                data={
+                    "chat_id": CHAT_ID,
+                    "caption": caption,
+                    "parse_mode": "HTML",
+                    "reply_markup": telegram_markup(url)
+                    if url else None,
+                },
+                files={"animation": fh},
+                timeout=(10, 60),
+            )
+
+        return response.ok
+
+    except Exception:
+        return False
+
+
+def telegram_send(token, text, url=None):
+    if not token or not CHAT_ID:
+        return False
+
+    try:
+        response = get_session().post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data={
+                "chat_id": CHAT_ID,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+                "reply_markup": telegram_markup(url)
+                if url else None,
+            },
+            timeout=(10, 30),
+        )
+
+        return response.ok
+
+    except Exception:
+        return False
+
+
+def send_direction(token, result):
+    if result["trend"] == "UP":
+        return telegram_send_animation(
+            token,
+            UP_GIF,
+            "🟢 <b>اتجاه صاعد مستمر</b>\n⬆️ مستمر حتى انعكاس مؤكد",
+            tradingview_url(result),
+        )
+
+    if result["trend"] == "DOWN":
+        return telegram_send_animation(
+            token,
+            DOWN_GIF,
+            "🔴 <b>اتجاه هابط مستمر</b>\n⬇️ مستمر حتى انعكاس مؤكد",
+            tradingview_url(result),
+        )
+
+    return False
+
+
+def send_smart_animation(token, result):
+    maker = result.get("smart", {}).get("maker", 0)
+
+    if not maker:
+        return False
+
+    if maker > 0:
+        path = UP_GIF
+        caption = "🐋 ↑ حركة صنّاع السهم"
+    else:
+        path = DOWN_GIF
+        caption = "🐋 ↓ حركة صنّاع السهم"
+
+    return telegram_send_animation(
+        token,
+        path,
+        caption,
+        tradingview_url(result),
+    )
+
+
+# ============================================================
+# MESSAGE
 # ============================================================
 
 def fmt(value):
@@ -1432,195 +1896,20 @@ def fmt(value):
     if abs(value) >= 1_000:
         return f"{value / 1_000:.2f}K"
 
-    return f"{value:.4f}"
+    if abs(value) >= 1:
+        return f"{value:.4f}"
+
+    return f"{value:.6f}"
 
 
 def pct(value):
-    if value is None:
-        return "-"
-    return f"{value:.1f}%"
+    return "-" if value is None else f"{float(value):.1f}%"
 
 
-# ============================================================
-# TELEGRAM
-# ============================================================
-
-def ensure_direction_gifs():
-    """Create looping green/red direction GIFs locally once at startup."""
-    try:
-        os.makedirs(DIRECTION_GIF_DIR, exist_ok=True)
-
-        def make_gif(path, direction, title):
-            if os.path.exists(path):
-                return
-
-            frames = []
-            size = (420, 260)
-
-            for i in range(8):
-                img = Image.new("RGB", size, (18, 18, 24))
-                draw = ImageDraw.Draw(img)
-
-                # pulsing arrow size
-                pulse = i if i <= 4 else 8 - i
-                if direction == "up":
-                    cx, cy = 210, 125 - pulse * 5
-                    points = [
-                        (210, 45 - pulse * 2),
-                        (95, 165 - pulse * 2),
-                        (165, 165 - pulse * 2),
-                        (165, 215),
-                        (255, 215),
-                        (255, 165 - pulse * 2),
-                        (325, 165 - pulse * 2),
-                    ]
-                    label = "UP"
-                    fill = (40, 220, 100)
-                else:
-                    cx, cy = 210, 135 + pulse * 5
-                    points = [
-                        (95, 95 + pulse * 2),
-                        (165, 95 + pulse * 2),
-                        (165, 45),
-                        (255, 45),
-                        (255, 95 + pulse * 2),
-                        (325, 95 + pulse * 2),
-                        (210, 215 + pulse * 2),
-                    ]
-                    label = "DOWN"
-                    fill = (240, 55, 65)
-
-                draw.polygon(points, fill=fill)
-                draw.text((145, 15), title, fill=(245, 245, 245))
-                draw.text((175, 225), label, fill=fill)
-                frames.append(img)
-
-            frames[0].save(
-                path,
-                save_all=True,
-                append_images=frames[1:],
-                duration=140,
-                loop=0,
-                optimize=True,
-            )
-
-        make_gif(UP_GIF, "up", "AI PRO MAX")
-        make_gif(DOWN_GIF, "down", "AI PRO MAX")
-        return True
-    except Exception as error:
-        print(f"⚠️ تعذر إنشاء GIF الاتجاه: {error}")
-        return False
-
-
-def build_tradingview_url(result):
-    """Build a TradingView chart URL for the symbol in the Telegram alert."""
-    market = str(result.get("market", "")).upper()
-    symbol = str(result.get("symbol", "")).strip()
-    if not symbol:
-        return None
-
-    tv_symbol = symbol
-
-    return "https://www.tradingview.com/chart/?symbol=" + quote(tv_symbol, safe="")
-
-
-def tradingview_markup(url):
-    """Telegram inline button: open the exact TradingView chart."""
-    if not url:
-        return None
-    import json
-    return json.dumps({
-        "inline_keyboard": [[
-            {"text": "📈 فتح في TradingView", "url": url}
-        ]]
-    }, ensure_ascii=False)
-
-
-def telegram_send_animation(token, gif_path, caption, tradingview_url=None):
-    if not token or not CHAT_ID or not os.path.exists(gif_path):
-        return False
-
-    session = get_session()
-    url = f"https://api.telegram.org/bot{token}/sendAnimation"
-
-    try:
-        with open(gif_path, "rb") as gif_file:
-            response = session.post(
-                url,
-                data={
-                    "chat_id": CHAT_ID,
-                    "caption": caption,
-                    "parse_mode": "HTML",
-                    "reply_markup": tradingview_markup(tradingview_url) if tradingview_url else None,
-                },
-                files={"animation": gif_file},
-                timeout=(10, 60),
-            )
-        return response.ok
-    except Exception:
-        return False
-
-
-def telegram_send_smart_animation(token, result):
-    """Send one small animated arrow only when a smart movement is detected."""
-    smart = result.get("smart", {})
-    maker = smart.get("maker", 0)
-    if not maker:
-        return False
-
-    direction = "up" if maker > 0 else "down"
-    path = UP_GIF if direction == "up" else DOWN_GIF
-    caption = "🐋 ↑ حركة صنّاع السهم" if maker > 0 else "🐋 ↓ حركة صنّاع السهم"
-    return telegram_send_animation(token, path, caption, build_tradingview_url(result))
-
-
-def telegram_send_direction(token, result):
-    """Send a looping direction animation once when a new trend signal starts."""
-    if result["trend"] == "UP":
-        caption = "🟢 <b>اتجاه صاعد مستمر</b>\n⬆️ يستمر حتى ينتهي/ينعكس الاتجاه"
-        return telegram_send_animation(token, UP_GIF, caption, build_tradingview_url(result))
-
-    if result["trend"] == "DOWN":
-        caption = "🔴 <b>اتجاه هابط مستمر</b>\n⬇️ يستمر حتى ينتهي/ينعكس الاتجاه"
-        return telegram_send_animation(token, DOWN_GIF, caption, build_tradingview_url(result))
-
-    return False
-
-
-def telegram_send(token, message, tradingview_url=None):
-    if not token or not CHAT_ID:
-        return False
-
-    # Telegram أيضاً يستخدم Session معاد الاستخدام
-    session = get_session()
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-
-    try:
-        response = session.post(
-            url,
-            data={
-                "chat_id": CHAT_ID,
-                "text": message,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True,
-                "reply_markup": tradingview_markup(tradingview_url) if tradingview_url else None,
-            },
-            timeout=(10, 30),
-        )
-        return response.ok
-    except Exception:
-        return False
-
-
-# ============================================================
-# MESSAGE
-# ============================================================
-
-def escape_html(value):
-    text = str(value if value is not None else "-")
+def esc(value):
     return (
-        text.replace("&", "&amp;")
+        str(value if value is not None else "-")
+        .replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
@@ -1629,37 +1918,12 @@ def escape_html(value):
 def build_message(result):
     market = result["market"]
 
-    names = {
+    market_name = {
         "US": "🇺🇸 السوق الأمريكي (US)",
         "CRYPTO": "🪙 العملات الرقمية (CRYPTO)",
-    }
+    }.get(market, market)
 
-    market_name = names.get(market, market)
-    symbol = escape_html(result["symbol"])
-    company_name = escape_html(result.get("name") or "")
-
-    if result["trend"] == "UP":
-        trend_text = "🟢 صاعد قوي"
-        trend_icon = "📈"
-    elif result["trend"] == "DOWN":
-        trend_text = "🔴 هابط قوي"
-        trend_icon = "📉"
-    else:
-        trend_text = "⚪ محايد"
-        trend_icon = "↔️"
-
-    if result["vwap"] is not None:
-        vwap_text = (
-            "🟢 فوق VWAP"
-            if result["price"] > result["vwap"]
-            else "🔴 تحت VWAP"
-        )
-    else:
-        vwap_text = "⚪ VWAP غير متاح"
-
-    change_pct = None
-    if result.get("previous_close") not in (None, 0):
-        change_pct = (result["price"] - result["previous_close"]) / result["previous_close"] * 100
+    symbol = esc(result["symbol"])
 
     if result["signal"] == "BUY":
         signal_badge = "🟢 <b>شراء قوي</b>"
@@ -1668,7 +1932,16 @@ def build_message(result):
     else:
         signal_badge = "⚪ <b>انتظار</b>"
 
+    if result["trend"] == "UP":
+        trend_text = "🟢 صعود — مستمر حتى انعكاس مؤكد"
+    elif result["trend"] == "DOWN":
+        trend_text = "🔴 هبوط — مستمر حتى انعكاس مؤكد"
+    else:
+        trend_text = "⚪ محايد"
+
     smart = result.get("smart", {})
+    pine = result.get("pine", {})
+
     movement_lines = []
 
     if smart.get("maker", 0) > 0:
@@ -1679,58 +1952,90 @@ def build_message(result):
     if smart.get("speculators"):
         movement_lines.append("⚡ <b>حركة مضاربين قوية</b>")
 
-    if smart.get("accumulation"):
-        movement_lines.append("💰 <b>عمليات التجميع ✅</b>")
-
     if smart.get("unusual"):
         movement_lines.append("🔎 <b>رصد حركة غير اعتيادية</b>")
+
+    if smart.get("accumulation"):
+        movement_lines.append("💰 <b>عمليات التجميع</b>")
+
+    vwap_value = result.get("vwap")
+
+    if vwap_value is None:
+        vwap_text = "⚪ غير متاح"
+    elif result["price"] > vwap_value:
+        vwap_text = "🟢 فوق VWAP"
+    else:
+        vwap_text = "🔴 تحت VWAP"
+
+    rsi_value = pine.get("rsi")
+
+    if rsi_value is None:
+        rsi_text = "⚪ غير متاح"
+    elif rsi_value > 50:
+        rsi_text = "🟢 أعلى 50"
+    else:
+        rsi_text = "🔴 أقل 50"
+
+    if pine.get("golden_first"):
+        golden = "🟡 <b>مؤكدة — صعود</b>"
+    elif pine.get("golden_continue"):
+        golden = "🟡 <b>استمرارية صعود</b>"
+    else:
+        golden = "🟡 غير مؤكدة"
+
+    if pine.get("final_buy"):
+        ai_text = "SMART BUY"
+    elif pine.get("final_sell"):
+        ai_text = "SMART SELL"
+    else:
+        ai_text = "لا توجد إشارة نهائية"
+
+    change_pct = None
+
+    if result.get("previous_close") not in (None, 0):
+        change_pct = (
+            (result["price"] - result["previous_close"])
+            / result["previous_close"]
+            * 100
+        )
 
     lines = [
         "💀🚀 <b>AI PRO MAX SIGNAL</b>",
         "",
-        f"{market_name}",
+        market_name,
         f"<b>{symbol}</b>",
-    ]
-
-    lines.extend([
         "",
         f"{signal_badge}    🎯 قوة الإشارة: <b>{result['score']}/100</b>",
-    ])
+    ]
 
-    # هذه هي العناصر المطلوبة فقط لإشعارات الحركة.
     if movement_lines:
         lines.extend(["", *movement_lines])
 
-    # الاستمرارية هي حالة الاتجاه الحالية: UP صعود / DOWN هبوط،
-    # ولا تتغير إلا بعد انعكاس مؤكد بدورتين متتاليتين.
-    if result["trend"] == "UP":
-        continuation_text = "🟢 صعود — مستمر حتى انعكاس مؤكد"
-    elif result["trend"] == "DOWN":
-        continuation_text = "🔴 هبوط — مستمر حتى انعكاس مؤكد"
-    else:
-        continuation_text = "⚪ محايد"
-    lines.extend(["", f"🔄 <b>الاستمرارية:</b> {continuation_text}"])
-
-    pine = result.get("pine", {})
-    indicator_lines = [
-        "",
-        "🧩 <b>تأكيد المؤشرات</b>",
-        f"🧠 RSI 14: <b>{fmt(pine.get('rsi'))}</b>  " + ("🟢 أعلى 50" if (pine.get("rsi") is not None and pine.get("rsi") > 50) else "🔴 أقل 50" if pine.get("rsi") is not None else "⚪ غير متاح"),
-        f"🟡 الشمعة الذهبية: <b>{'مؤكدة' if pine.get('golden_first') else 'استمرارية' if pine.get('golden_continue') else 'غير مؤكدة'}</b>",
-        f"🤖 AI PRO MAX: <b>{'SMART BUY' if pine.get('final_buy') else 'SMART SELL' if pine.get('final_sell') else 'لا توجد إشارة نهائية'}</b>",
-    ]
-    lines.extend(indicator_lines)
     lines.extend([
         "",
-        f"💰 <b>دخول:</b> {fmt(result.get('entry_price') or result['price'])}" + (f"  ({change_pct:+.2f}%)" if change_pct is not None else ""),
-        f"🛑 <b>وقف الخسارة:</b> {fmt(result.get('stop_loss'))}",
-        f"📊 <b>VWAP:</b> {fmt(result['vwap'])}  {vwap_text}",
+        f"🔄 <b>الاستمرارية:</b> {trend_text}",
+        "",
+        "🧩 <b>تأكيد المؤشرات</b>",
+        f"🧠 RSI 14: <b>{fmt(rsi_value)}</b>  {rsi_text}",
+        f"🟡 الشمعة الذهبية: {golden}",
+        f"🤖 AI PRO MAX: <b>{ai_text}</b>",
+        "",
+        f"💰 <b>السعر:</b> {fmt(result['price'])}"
+        + (
+            f"  ({change_pct:+.2f}%)"
+            if change_pct is not None else ""
+        ),
+        f"📊 <b>VWAP:</b> {fmt(vwap_value)}  {vwap_text}",
         f"🧠 <b>RSI 14:</b> {fmt(result['rsi'])}",
         f"📐 <b>ATR 14:</b> {fmt(result['atr'])}",
+        f"🛑 <b>وقف الخسارة:</b> {fmt(result['stop_loss'])}",
         "",
-        f"📈 <b>EMA 10:</b> {fmt(result.get('ema10'))}    <b>EMA 14:</b> {fmt(result.get('ema14'))}",
-        f"📈 <b>EMA 15:</b> {fmt(result.get('ema15'))}    <b>EMA 25:</b> {fmt(result.get('ema25'))}",
-        f"📈 <b>EMA 50:</b> {fmt(result.get('ema50'))}    <b>EMA 200:</b> {fmt(result.get('ema200'))}",
+        f"📈 <b>EMA 10:</b> {fmt(result['ema10'])}",
+        f"📈 <b>EMA 14:</b> {fmt(result['ema14'])}",
+        f"📈 <b>EMA 15:</b> {fmt(result['ema15'])}",
+        f"📈 <b>EMA 25:</b> {fmt(result['ema25'])}",
+        f"📈 <b>EMA 50:</b> {fmt(result['ema50'])}",
+        f"📈 <b>EMA 200:</b> {fmt(result['ema200'])}",
         "",
         f"🟢 <b>قوة الشراء:</b> {pct(result['buy_power'])}",
         f"🔴 <b>قوة البيع:</b> {pct(result['sell_power'])}",
@@ -1738,30 +2043,78 @@ def build_message(result):
         "",
         f"🛡️ <b>الدعم:</b> {fmt(result['support'])}",
         f"🚧 <b>المقاومة:</b> {fmt(result['resistance'])}",
-        f"{trend_icon} <b>اتجاه السوق:</b> {trend_text}",
+        f"📊 <b>اتجاه السوق:</b> {trend_text}",
     ])
 
-    if market == "US":
-        lines.append("📰 <b>أخبار السهم:</b> ⚪ غير مفحوصة — حفاظًا على حصة الأسعار")
+    # News only for a strong signal.
+    if result["score"] >= NEWS_SCORE_MIN:
+        lines.append(
+            f"📰 <b>أخبار السهم:</b> {result.get('news', '⚪ غير متاحة')}"
+        )
 
-    if result["targets"]:
-        lines.extend(["", "🎯 <b>أهداف ATR — 8 أهداف</b>"])
+    # Initial targets.
+    if result.get("targets"):
+        lines.extend([
+            "",
+            "🎯 <b>أهداف ATR — 8 أهداف</b>",
+        ])
 
-        for i, target in enumerate(result["targets"], 1):
-            change = (target - result["price"]) / result["price"] * 100 if result["price"] else 0
-            lines.append(f"TP{i}: <b>{fmt(target)}</b> ({change:+.2f}%)")
-        if result["targets"] and result.get("atr"):
-            last = result["targets"][-1]
-            extra = last + result["atr"] * 2 if result["signal"] == "BUY" else last - result["atr"] * 2
-            lines.append(f"♾️ <b>استمرارية بعد TP8:</b> {fmt(extra)} → مع استمرار الاتجاه")
+        for idx, target in enumerate(result["targets"], 1):
+            change = (
+                (target - result["price"])
+                / result["price"]
+                * 100
+                if result["price"] else 0
+            )
+
+            lines.append(
+                f"TP{idx}: <b>{fmt(target)}</b> ({change:+.2f}%)"
+            )
+
+        lines.append(
+            "♾️ <b>بعد TP8:</b> الأهداف تفتح تلقائيًا "
+            "مع استمرار الاتجاه والحركة."
+        )
 
     lines.extend([
         "",
-        "🟢/🔴 السهم المتحرك يستمر حتى انعكاس مؤكد (دورتان متتاليتان)",
-        f"⏱️ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}",
+        "🟢/🔴 الاتجاه يستمر حتى انعكاس مؤكد.",
+        f"⏱️ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC",
     ])
 
     return "\n".join(lines)
+
+
+def build_continuation_message(result, target_info):
+    direction = "صعود" if result["signal"] == "BUY" else "هبوط"
+
+    if result["signal"] == "BUY":
+        icon = "🟢"
+    else:
+        icon = "🔴"
+
+    new_target = target_info.get("new_target")
+
+    return (
+        "🚀 <b>AI PRO MAX — استمرار الحركة</b>\n\n"
+        f"{icon} <b>{esc(result['symbol'])}</b>\n"
+        f"🔄 الاتجاه: <b>{direction} مستمر</b>\n"
+        f"🎯 تم الوصول إلى مستوى الهدف السابق\n"
+        f"♾️ <b>هدف جديد:</b> {fmt(new_target)}\n"
+        f"📊 <b>VWAP:</b> {fmt(result['vwap'])} "
+        + (
+            "🟢 فوق VWAP"
+            if result["price"] > result["vwap"]
+            else "🔴 تحت VWAP"
+            if result["vwap"] is not None
+            else "⚪ غير متاح"
+        )
+        + "\n"
+        f"💰 السعر الحالي: <b>{fmt(result['price'])}</b>\n"
+        f"🎯 قوة الإشارة: <b>{result['score']}/100</b>\n"
+        "\n"
+        "⚠️ الهدف التالي ديناميكي ويتحرك مع استمرار الاتجاه."
+    )
 
 
 # ============================================================
@@ -1772,9 +2125,12 @@ def should_send(result):
     if result["signal"] == "WAIT":
         return False
 
+    if result["score"] < MIN_SIGNAL_SCORE:
+        return False
+
     key = f"{result['market']}:{result['symbol']}"
 
-    current_state = (
+    current = (
         result["signal"],
         result["trend"],
     )
@@ -1782,221 +2138,578 @@ def should_send(result):
     with state_lock:
         previous = LAST_SIGNAL.get(key)
 
-        if previous == current_state:
+        if previous == current:
             return False
 
-        LAST_SIGNAL[key] = current_state
+        LAST_SIGNAL[key] = current
 
     return True
 
 
 # ============================================================
-# SYMBOL DISCOVERY
+# TELEGRAM WORKER
 # ============================================================
 
-def _extract_symbols(data):
-    if isinstance(data, dict):
-        values = data.get("data", [])
-    elif isinstance(data, list):
-        values = data
-    else:
-        values = []
-
-    symbols = []
-
-    for item in values:
-        if not isinstance(item, dict):
-            continue
-
-        symbol = item.get("symbol")
-
-        if symbol:
-            symbols.append(str(symbol).strip())
-
-    return list(dict.fromkeys(symbols))
+def enqueue(token, result):
+    try:
+        TELEGRAM_QUEUE.put_nowait(
+            ("SIGNAL", token, result)
+        )
+        return True
+    except queue.Full:
+        print("🔴 Telegram queue full")
+        return False
 
 
-def get_us_symbols():
-    """
-    🇺🇸 السوق الأمريكي: 13,402 رمز بالضبط كحد أعلى.
-    نطلب قائمة الولايات المتحدة كاملة من TwelveData، ثم نرتبها ونأخذ
-    أول 13,402 رمز بشكل ثابت حتى لا يتغير العدد عشوائياً بين الدورات.
-    إذا تعذر فلتر الدولة، نستخدم البورصات الرئيسية كخطة احتياطية.
-    """
-    data = td_request(
-        "/stocks",
-        {"country": "United States"},
-    )
-    symbols = _extract_symbols(data)
+def enqueue_continuation(token, result, target_info):
+    try:
+        TELEGRAM_QUEUE.put_nowait(
+            ("CONTINUATION", token, result, target_info)
+        )
+        return True
+    except queue.Full:
+        return False
 
-    if not symbols:
-        symbols = []
-        for exchange in ("NASDAQ", "NYSE", "AMEX"):
-            data = td_request(
-                "/stocks",
-                {"exchange": exchange},
+
+def telegram_worker():
+    while True:
+        item = TELEGRAM_QUEUE.get()
+
+        try:
+            if item is None:
+                return
+
+            kind = item[0]
+
+            if kind == "SIGNAL":
+                _, token, result = item
+
+                # ① Direction animation.
+                send_direction(token, result)
+
+                # ② Smart-movement animation only if detected.
+                # Kept separate so the main signal remains clean.
+                # It does not block the technical message.
+                if result.get("smart", {}).get("maker", 0):
+                    send_smart_animation(token, result)
+
+                # News only for strong signals and only once per cache window.
+                if result["score"] >= NEWS_SCORE_MIN:
+                    result["news"] = news_sentiment(result["symbol"])
+
+                message = build_message(result)
+
+                telegram_send(
+                    token,
+                    message,
+                    tradingview_url(result),
+                )
+
+            elif kind == "CONTINUATION":
+                _, token, result, target_info = item
+
+                message = build_continuation_message(
+                    result,
+                    target_info,
+                )
+
+                telegram_send(
+                    token,
+                    message,
+                    tradingview_url(result),
+                )
+
+        except Exception as exc:
+            print("🔴 Telegram worker:", exc)
+
+        finally:
+            TELEGRAM_QUEUE.task_done()
+
+
+# ============================================================
+# TASI / SAHMK
+# ============================================================
+
+sahmk_session = requests.Session()
+sahmk_session.headers.update({
+    "X-API-Key": SAHMK_API_KEY,
+    "Accept-Encoding": "gzip",
+    "User-Agent": "TASI-AI-PRO-MAX/Unified/1.0",
+})
+
+
+def sahmk(path, params=None):
+    if not SAHMK_API_KEY:
+        return None
+
+    try:
+        response = sahmk_session.get(
+            SAHMK_BASE + path,
+            params=params or {},
+            timeout=(10, 30),
+        )
+
+        if response.status_code == 429:
+            print("🟠 SAHMK: 429 — waiting")
+            return None
+
+        if response.status_code != 200:
+            print(
+                f"🔴 SAHMK HTTP {response.status_code}: {path}"
             )
-            symbols.extend(_extract_symbols(data))
+            return None
 
-    symbols = sorted(set(symbols), key=str.upper)
-    return symbols[:US_MAX_SYMBOLS]
+        data = response.json()
+
+        if isinstance(data, dict) and data.get("error"):
+            print("🔴 SAHMK:", data.get("error"))
+            return None
+
+        return data
+
+    except Exception as exc:
+        print("🔴 SAHMK:", exc)
+        return None
 
 
-def get_crypto_symbols():
-    data = td_request(
-        "/cryptocurrencies",
-        {},
+def market_is_active():
+    now = datetime.now(RIYADH)
+
+    # Sunday -> Thursday.
+    if now.weekday() not in (6, 0, 1, 2, 3):
+        return False
+
+    minutes = now.hour * 60 + now.minute
+
+    return (
+        9 * 60 + 30
+        <= minutes
+        < 15 * 60
     )
 
-    return sorted(set(_extract_symbols(data)), key=str.upper)
+
+def extract(rows_key, data):
+    if not isinstance(data, dict):
+        return []
+
+    rows = data.get(rows_key, [])
+
+    return rows if isinstance(rows, list) else []
 
 
-# ============================================================
-# SYMBOL CACHE
-# ============================================================
+def tasi_collect():
+    # Exactly 3 market calls per cycle.
+    summary = sahmk(
+        "/market/summary/",
+        {
+            "index": "TASI",
+            "data_mode": "delayed",
+        },
+    )
 
-def get_symbols(market, loader):
-    now = time.time()
+    gainers = sahmk(
+        "/market/gainers/",
+        {
+            "index": "TASI",
+            "limit": 50,
+            "data_mode": "delayed",
+        },
+    )
 
-    with symbol_cache_lock:
-        cached = SYMBOL_CACHE[market]
+    losers = sahmk(
+        "/market/losers/",
+        {
+            "index": "TASI",
+            "limit": 50,
+            "data_mode": "delayed",
+        },
+    )
 
-        if (
-            cached["symbols"]
-            and now - cached["updated"] < SYMBOL_REFRESH_SECONDS
-        ):
-            return list(cached["symbols"])
-
-    symbols = loader()
-
-    if symbols:
-        with symbol_cache_lock:
-            SYMBOL_CACHE[market] = {
-                "symbols": list(symbols),
-                "updated": now,
-            }
-
-    return symbols
+    return (
+        summary,
+        extract("gainers", gainers),
+        extract("losers", losers),
+    )
 
 
-# ============================================================
-# MARKET SCANNER
-# ============================================================
+def tasi_score(row):
+    try:
+        change = abs(float(
+            row.get("change_percent", 0) or 0
+        ))
 
-def scan_market(symbols, market, token):
-    """Quota-aware rotating scanner for US + CRYPTO only.
+        volume = float(
+            row.get("volume", 0) or 0
+        )
+    except Exception:
+        return 0
 
-    Twelve Data Basic cannot scan thousands of symbols every 5 minutes.
-    We therefore rotate through the full catalog without restarting from the beginning.
-    One-symbol requests use one credit, so alerts remain granular and the daily budget is protected.
-    """
-    if market not in ("US", "CRYPTO") or not token or not symbols:
+    score = min(70, change * 7)
+
+    if volume > 10_000_000:
+        score += 20
+    elif volume > 3_000_000:
+        score += 15
+    elif volume > 1_000_000:
+        score += 10
+    elif volume > 250_000:
+        score += 5
+
+    return int(max(0, min(100, score)))
+
+
+def tasi_alert(token, row, direction):
+    symbol = str(row.get("symbol", "")).strip()
+
+    if not symbol:
         return
 
-    symbols = list(symbols)
+    try:
+        change = float(
+            row.get("change_percent", 0) or 0
+        )
+    except Exception:
+        change = 0.0
+
+    # Do not spam small moves.
+    if abs(change) < 2.0:
+        return
+
+    key = f"{symbol}:{direction}"
+
+    old = TASI_LAST_SENT.get(key)
+
+    if old is not None and abs(change - old) < 1.0:
+        return
+
+    TASI_LAST_SENT[key] = change
+
+    if direction == "UP":
+        badge = "🟢 <b>حركة صاعدة</b> ↗️"
+    else:
+        badge = "🔴 <b>حركة هابطة</b> ↘️"
+
+    price = row.get("price", "-")
+    volume = row.get("volume", 0)
+
+    text = (
+        "💀🚀 <b>AI PRO MAX — تاسي</b>\n"
+        "🇸🇦 <b>SAHMK</b>\n\n"
+        f"📌 <b>{esc(symbol)}</b>\n"
+        f"{badge}   🎯 <b>{tasi_score(row)}/100</b>\n"
+        f"💰 السعر: <b>{esc(price)}</b>\n"
+        f"📊 التغير: <b>{change:+.2f}%</b>\n"
+        f"📦 الحجم: <b>{volume:,}</b>\n\n"
+        "🔄 <b>رصد آلي من SAHMK</b>\n"
+        f"🕒 {datetime.now(RIYADH).strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
+    telegram_send(
+        token,
+        text,
+        None,
+    )
+
+
+def tasi_cycle():
+    print("=" * 60)
+    print("🇸🇦 TASI — SAHMK ONLY")
+    print(datetime.now(RIYADH).strftime("%Y-%m-%d %H:%M:%S"))
+
+    summary, gainers, losers = tasi_collect()
+
+    if summary:
+        print(
+            "🟢 TASI:",
+            summary.get("index_value", "-"),
+            "| change=",
+            summary.get("index_change_percent", "-"),
+            "| mood=",
+            summary.get("market_mood", "-"),
+        )
+
+    print(
+        f"🟢 Gainers: {len(gainers)} | "
+        f"🔴 Losers: {len(losers)}"
+    )
+
+    if gainers:
+        try:
+            best_up = max(
+                gainers,
+                key=lambda x: float(
+                    x.get("change_percent", 0) or 0
+                ),
+            )
+            tasi_alert(
+                TASI_TOKEN,
+                best_up,
+                "UP",
+            )
+        except Exception as exc:
+            print("🔴 TASI gainers:", exc)
+
+    if losers:
+        try:
+            best_down = min(
+                losers,
+                key=lambda x: float(
+                    x.get("change_percent", 0) or 0
+                ),
+            )
+            tasi_alert(
+                TASI_TOKEN,
+                best_down,
+                "DOWN",
+            )
+        except Exception as exc:
+            print("🔴 TASI losers:", exc)
+
+
+# ============================================================
+# US / CRYPTO SCANNER
+# ============================================================
+
+def scanner_cycle(market, token, loader):
+    if not token:
+        print(f"⚠️ {market}: Telegram token missing")
+        return
+
+    symbols = get_symbols(market, loader)
+
+    if not symbols:
+        print(f"⚠️ {market}: symbol universe unavailable")
+        return
+
     total = len(symbols)
-    key = f"SCAN_CURSOR:{market}"
+
     with state_lock:
-        cursor = int(TREND_STATE.get(key, 0)) % total
+        cursor = SCAN_CURSORS.get(market, 0) % total
 
-    # Use a small slice per pass; the credit gate skips immediately when budget is exhausted.
-    # The cursor advances even when a request is skipped so the universe never gets stuck.
-    per_pass = 4 if market == "US" else 4
-    selected = [symbols[(cursor + i) % total] for i in range(min(per_pass, total))]
+    per_pass = (
+        US_PER_PASS
+        if market == "US"
+        else CRYPTO_PER_PASS
+    )
+
+    selected = [
+        symbols[(cursor + i) % total]
+        for i in range(min(per_pass, total))
+    ]
+
     with state_lock:
-        TREND_STATE[key] = (cursor + len(selected)) % total
+        SCAN_CURSORS[market] = (
+            cursor + len(selected)
+        ) % total
 
-    print(f"[{market}] 🔄 دوران كامل: {cursor + 1}→{cursor + len(selected)} / {total} | {len(selected)} رموز")
+    # One batch request = up to 8 symbols, but still reserves
+    # one Twelve Data credit per symbol.
+    loaded = batch_load_series(
+        selected,
+        market,
+        PRIMARY_TIMEFRAME,
+    )
 
+    print(
+        f"[{market}] 🔄 {cursor + 1}"
+        f"→{cursor + len(selected)}/{total} "
+        f"| loaded={loaded}"
+    )
+
+    # Analyze from cache. This does not make another candle request.
     for symbol in selected:
-        result = analyze_symbol(symbol, market)
-        if result and should_send(result):
-            enqueue_signal(token, result)
+        try:
+            result = analyze_us_crypto(
+                symbol,
+                market,
+            )
 
+            if not result:
+                continue
+
+            if should_send(result):
+                enqueue(
+                    token,
+                    result,
+                )
+
+            # Continuation after TP8 and beyond.
+            continuation = update_target_state(result)
+
+            if continuation and continuation.get("new_target"):
+                enqueue_continuation(
+                    token,
+                    result,
+                    continuation,
+                )
+
+        except Exception as exc:
+            print(
+                f"[{market}] 🔴 {symbol}: {exc}"
+            )
 
 
 # ============================================================
-# MARKET LOOP
+# THREADS
 # ============================================================
 
-def market_loop(market, token, loader):
+def tasi_loop():
     while True:
         try:
-            symbols = get_symbols(market, loader)
-            print(f"💀 {market}: تم تحميل {len(symbols)} رمز")
-            scan_market(symbols, market, token)
-        except Exception as error:
-            print(f"[{market}] loop error: {error}")
+            if market_is_active():
+                tasi_cycle()
+            else:
+                print(
+                    "⏸️ TASI خارج الجلسة — "
+                    "الخدمة مستمرة وتنتظر."
+                )
+        except Exception as exc:
+            print("🔴 TASI loop:", exc)
+
+        time.sleep(TASI_SCAN_SECONDS)
+
+
+def us_crypto_loop(market, token, loader):
+    while True:
+        try:
+            # Do not touch Twelve Data if the local daily budget is closed.
+            reset_td_day()
+
+            with td_budget_lock:
+                blocked = (
+                    TD_RESERVED_TODAY >= TD_DAILY_LIMIT
+                )
+
+            if blocked:
+                print(
+                    f"🛡️ {market}: Twelve Data daily "
+                    "budget reached — waiting for UTC day reset."
+                )
+            else:
+                scanner_cycle(
+                    market,
+                    token,
+                    loader,
+                )
+
+        except Exception as exc:
+            print(
+                f"🔴 {market} loop:",
+                exc,
+            )
+
         time.sleep(SCAN_INTERVAL)
 
 
-# ============================================================
-# HEARTBEAT
-# ============================================================
-
 def heartbeat():
     while True:
+        reset_td_day()
+
+        with td_budget_lock:
+            reserved = TD_RESERVED_TODAY
+            left = TD_CREDITS_LEFT
+
         print(
-            "💀🚀 AI PRO MAX يعمل 24/7 | "
-            + datetime.now(timezone.utc).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
+            "💀🚀 AI PRO MAX 24/7 | "
+            f"TD reserved={reserved}/{TD_DAILY_LIMIT} | "
+            f"provider-left={left}"
         )
+
         time.sleep(300)
 
 
 # ============================================================
-# START
+# MAIN
 # ============================================================
 
 def main():
-    print("=" * 68)
-    print("💀🚀 AI PRO MAX — INSTANT SIGNAL EDITION")
-    print("🇺🇸 US MARKET — 13,414 SYMBOLS | $0.15+ | A→Z | 24/7 | PRE + REGULAR + POST")
-    print("🪙 CRYPTO MARKET — FULL | 24/7")
-    print("⏱️ الدورة: كل 5 دقائق | دوران متواصل على كامل US + CRYPTO | حماية الحصة")
-    print("=" * 68)
+    print("=" * 72)
+    print("💀🚀 AI PRO MAX — UNIFIED TASI + US + CRYPTO")
+    print("🇸🇦 TASI -> SAHMK ONLY")
+    print("🇺🇸 US -> TWELVE DATA")
+    print("🪙 CRYPTO -> TWELVE DATA")
+    print("🛡️ TWELVE DATA LOCAL DAILY BUDGET:", TD_DAILY_LIMIT)
+    print("📊 VWAP: HIGH PRIORITY")
+    print("🎯 TP1..TP8 + DYNAMIC TP9+")
+    print("=" * 72)
 
-    if not TWELVEDATA_API_KEY:
-        print("❌ TWELVEDATA_API_KEY غير موجود")
-        return
+    missing = []
 
     if not CHAT_ID:
-        print("❌ CHAT_ID غير موجود")
+        missing.append("CHAT_ID")
+
+    if not TASI_TOKEN:
+        missing.append("TASI_TOKEN")
+
+    if not US_TOKEN:
+        missing.append("US_TOKEN")
+
+    if not CRYPTO_TOKEN:
+        missing.append("CRYPTO_TOKEN")
+
+    if not SAHMK_API_KEY:
+        missing.append("SAHMK_API_KEY")
+
+    if not TWELVEDATA_API_KEY:
+        missing.append("TWELVE_DATA_API_KEY")
+
+    if missing:
+        print(
+            "❌ Railway Variables missing:",
+            ", ".join(missing),
+        )
         return
 
-    print("🟢 Twelve Data API: OK | 🇺🇸 US + 🪙 CRYPTO فقط")
-    print("🟢 CHAT_ID: OK")
+    print("🟢 Railway Variables: OK")
 
     if ensure_direction_gifs():
-        print("🟢 Telegram Direction GIFs: OK | 🟢 UP + 🔴 DOWN | LOOP")
-
-    print("🇺🇸 US TOKEN:", "OK" if US_TOKEN else "MISSING")
-    print("🪙 CRYPTO TOKEN:", "OK" if CRYPTO_TOKEN else "MISSING")
+        print("🟢 Direction GIFs: OK")
 
     threading.Thread(
         target=telegram_worker,
         daemon=True,
-        name="TelegramInstantSender",
+        name="TelegramWorker",
     ).start()
-    print("⚡ Telegram Instant Sender: ON")
 
     threading.Thread(
         target=heartbeat,
         daemon=True,
+        name="Heartbeat",
     ).start()
 
     threading.Thread(
-        target=market_loop,
-        args=("US", US_TOKEN, get_us_symbols),
+        target=tasi_loop,
         daemon=True,
+        name="TASI",
     ).start()
 
     threading.Thread(
-        target=market_loop,
-        args=("CRYPTO", CRYPTO_TOKEN, get_crypto_symbols),
+        target=us_crypto_loop,
+        args=(
+            "US",
+            US_TOKEN,
+            get_us_symbols,
+        ),
         daemon=True,
+        name="US",
     ).start()
+
+    threading.Thread(
+        target=us_crypto_loop,
+        args=(
+            "CRYPTO",
+            CRYPTO_TOKEN,
+            get_crypto_symbols,
+        ),
+        daemon=True,
+        name="CRYPTO",
+    ).start()
+
+    print("🚀 ALL THREE MARKETS STARTED")
 
     while True:
         time.sleep(60)
+
+
+if __name__ == "__main__":
+    main()
