@@ -1,5 +1,5 @@
 # ============================================================
-# AI PRO MAX — TASI + US + CRYPTO
+‏# AI PRO MAX — US + CRYPTO
 # Stable / Low-Connection Edition
 # ============================================================
 
@@ -22,7 +22,6 @@ from PIL import Image, ImageDraw
 
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN", "").strip()
-TASI_TOKEN = os.getenv("TASI_TOKEN", "").strip()
 US_TOKEN = os.getenv("US_TOKEN", "").strip()
 
 TWELVEDATA_API_KEY = (
@@ -32,8 +31,6 @@ TWELVEDATA_API_KEY = (
 
 # المتغيران موجودان في Railway ونبقيهما كما هما حتى لو كان المحرك
 # الحالي يعتمد Twelve Data للفحص الفني الموحد.
-SIFTING_API_KEY = os.getenv("SIFTING_API_KEY", "").strip()
-SAHMK_API_KEY = os.getenv("SAHMK_API_KEY", "").strip()
 
 # ============================================================
 # TELEGRAM DIRECTION ANIMATION
@@ -48,12 +45,6 @@ DOWN_GIF = os.path.join(DIRECTION_GIF_DIR, "red_down.gif")
 # ============================================================
 
 BASE_URL = "https://api.twelvedata.com"
-SAHMK_BASE = "https://api.sahmk.sa/api/v1"
-
-# TASI: SAHMK current quote; Twelve Data remains the technical-history engine.
-SAHMK_QUOTE_CACHE = {}
-SAHMK_QUOTE_CACHE_TTL = 120
-SAHMK_QUOTE_LOCK = Lock()
 
 # لا نفتح آلاف الاتصالات معًا
 MAX_WORKERS = 4
@@ -79,7 +70,6 @@ OUTPUTSIZE = 220
 # جميع الأسهم من 0.20$ فأعلى تبقى ضمن الفحص.
 MIN_US_PRICE = 0.15
 US_MAX_SYMBOLS = 13414
-TASI_MAX_SYMBOLS = 374
 
 # Batch: يقلل عدد الاتصالات، ولا يلغي احتساب رصيد كل رمز.
 BATCH_SYMBOLS = 8
@@ -88,8 +78,6 @@ BATCH_SYMBOLS = 8
 CREDIT_RESERVE = 0
 
 # 🔎 FAST FILTER — يقلل الفحص العميق قبل تشغيل الأطر الستة
-FAST_FILTER_LIMIT = {"TASI": 120, "US": 400, "CRYPTO": 300}
-FAST_FILTER_MIN_MOVE = {"TASI": 0.25, "US": 0.50, "CRYPTO": 0.35}
 
 EMA_FAST = 10
 EMA_MID = 14
@@ -145,7 +133,6 @@ REVERSAL_COUNT = {}
 
 symbol_cache_lock = Lock()
 SYMBOL_CACHE = {
-    "TASI": {"symbols": [], "updated": 0},
     "US": {"symbols": [], "updated": 0},
     "CRYPTO": {"symbols": [], "updated": 0},
 }
@@ -260,186 +247,82 @@ def rate_wait():
         last_request_time = time.monotonic()
 
 
-def sahmk_request(endpoint, params=None):
-    """SAHMK REST client for Saudi market quotes. Uses existing Railway key only."""
-    if not SAHMK_API_KEY:
-        return None
-    try:
-        response = requests.get(
-            SAHMK_BASE + endpoint,
-            params=params or {},
-            headers={"X-API-Key": SAHMK_API_KEY},
-            timeout=(10, 20),
-        )
-        if response.status_code != 200:
-            return None
-        data = response.json()
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
-
-
-def get_sahmk_quote(symbol):
-    now = time.time()
-    with SAHMK_QUOTE_LOCK:
-        cached = SAHMK_QUOTE_CACHE.get(str(symbol))
-        if cached and now - cached["updated"] < SAHMK_QUOTE_CACHE_TTL:
-            return cached["data"]
-
-    data = sahmk_request(f"/quote/{quote(str(symbol), safe='')}/", {"data_mode": "delayed"})
-    if not data:
-        return None
-
-    try:
-        result = {
-            "symbol": str(data.get("symbol") or symbol),
-            "name": str(data.get("name") or data.get("name_en") or ""),
-            "price": float(data["price"]),
-            "volume": float(data.get("volume", 0) or 0),
-            "change": float(data.get("change", 0) or 0),
-            "change_percent": float(data.get("change_percent", 0) or 0),
-            "updated_at": data.get("updated_at"),
-            "is_delayed": bool(data.get("is_delayed", True)),
-        }
-    except (TypeError, ValueError, KeyError):
-        return None
-
-    with SAHMK_QUOTE_LOCK:
-        SAHMK_QUOTE_CACHE[str(symbol)] = {"updated": now, "data": result}
-    return result
-
-
-def _wait_for_td_minute_credit(required=1):
-    """
-    بوابة مركزية واحدة لـ Twelve Data.
-    كل Batch من 8 رموز يحجز خانة زمنية واحدة، بالتتابع، بدل أن
-    تتنافس خيوط TASI/US/CRYPTO وتطبع انتظاراً متكرراً.
-    """
-    global TD_NEXT_SLOT, TD_DAILY_RESERVED
+def _reserve_td_credits(required=1):
+    """Non-blocking Twelve Data budget gate. Never sleeps inside a market scan."""
+    global TD_DAILY_RESERVED
     required = max(1, int(required or 1))
     reset_credit_state_if_new_utc_day()
-
-    while True:
-        with API_CREDITS_LOCK:
-            left = API_CREDITS_LEFT
-            left_at = API_CREDITS_LEFT_AT
-            # الرصيد 0 قد يكون من الدقيقة السابقة؛ لا نسمح له بمنع أول طلب في الدقيقة الجديدة.
-            stale_minute = left is not None and left_at > 0 and (time.time() - left_at) >= 60.0
-            if left is not None and left < required and not stale_minute:
-                now = time.time()
-                wait_seconds = 60.0 - (now % 60.0) + 0.15
-                print(f"🕐 Twelve Data: المتبقي {left} لا يكفي لطلب يحتاج {required} — انتظار {wait_seconds:.1f}s للدقيقة التالية")
-            elif TD_DAILY_RESERVED + required > TD_DAILY_LIMIT:
-                print(f"🛡️ Twelve Data: تم حجز الحد اليومي {TD_DAILY_RESERVED}/{TD_DAILY_LIMIT} — إيقاف طلبات جديدة حتى يوم UTC التالي")
-                return False
-            else:
-                now = time.time()
-                slot = max(now, TD_NEXT_SLOT)
-                TD_NEXT_SLOT = slot + 60.0
-                TD_DAILY_RESERVED += required
-                wait_seconds = max(0.0, slot - now)
-                if wait_seconds > 0.1:
-                    print(f"🕐 Twelve Data: حجز Batch مركزي — الانتظار {wait_seconds:.1f}s")
-                break
-
-        time.sleep(min(wait_seconds, 60.0))
-
-    if wait_seconds > 0:
-        time.sleep(wait_seconds)
-    return True
-
+    now = time.time()
+    with API_CREDITS_LOCK:
+        # Do not trust a stale zero from a previous minute.
+        left = API_CREDITS_LEFT
+        left_at = API_CREDITS_LEFT_AT
+        if left is not None and left_at and (now - left_at) < 58 and left < required:
+            return False
+        # Keep a small daily safety margin.
+        daily_budget = max(0, TD_DAILY_LIMIT - 20)
+        if TD_DAILY_RESERVED + required > daily_budget:
+            return False
+        TD_DAILY_RESERVED += required
+        return True
 
 def td_request(endpoint, params=None):
-    """
-    طلب آمن:
-    - Session reuse
-    - Rate limit
-    - بوابة 8 credits/minute على مستوى كل الطلبات
-    - Retry
-    - معالجة 429
-    - لا يفتح آلاف الاتصالات
-    """
+    """Quota-safe Twelve Data request. Returns immediately when budget is unavailable."""
     if not TWELVEDATA_API_KEY:
         return None
 
     params = dict(params or {})
     params["apikey"] = TWELVEDATA_API_KEY
-
     session = get_session()
 
-    # Batch /time_series يستهلك credit لكل رمز، حتى مع HTTP request واحد.
     credit_cost = 1
     if endpoint == "/time_series":
         raw_symbols = str(params.get("symbol", ""))
         credit_cost = max(1, len([x for x in raw_symbols.split(",") if x.strip()]))
 
+    if not _reserve_td_credits(credit_cost):
+        return None
+
     for attempt in range(MAX_RETRIES):
         try:
-            # يمنع أكثر من worker من استهلاك نفس الدقيقة بالتوازي.
-            with TD_CREDIT_GATE_LOCK:
-                if not _wait_for_td_minute_credit(credit_cost):
-                    return None
-                rate_wait()
+            rate_wait()
+            response = session.get(BASE_URL + endpoint, params=params, timeout=(10, 30))
 
-                response = session.get(
-                    BASE_URL + endpoint,
-                    params=params,
-                    timeout=(10, 30),
-                )
-
-                left = response.headers.get("api-credits-left")
-                if left is not None:
-                    try:
-                        with API_CREDITS_LOCK:
-                            global API_CREDITS_LEFT, API_CREDITS_LEFT_AT
-                            API_CREDITS_LEFT = int(float(left))
-                            API_CREDITS_LEFT_AT = time.time()
-                    except Exception:
-                        pass
-
-                if response.status_code == 429:
-                    retry_after = response.headers.get("Retry-After")
-                    try:
-                        delay = float(retry_after)
-                    except Exception:
-                        delay = min(10, 2 ** attempt)
-
-                    time.sleep(delay)
-                    continue
-
-                if response.status_code in (500, 502, 503, 504):
-                    time.sleep(min(10, 2 ** attempt))
-                    continue
-
-                if response.status_code != 200:
-                    return None
-
+            left = response.headers.get("api-credits-left")
+            if left is not None:
                 try:
-                    data = response.json()
-                except ValueError:
-                    return None
+                    with API_CREDITS_LOCK:
+                        global API_CREDITS_LEFT, API_CREDITS_LEFT_AT
+                        API_CREDITS_LEFT = int(float(left))
+                        API_CREDITS_LEFT_AT = time.time()
+                except Exception:
+                    pass
 
-                if isinstance(data, dict):
-                    status = str(data.get("status", "")).lower()
-
-                    if status == "error":
-                        return None
-
-                    if data.get("code") in (429, "429"):
-                        time.sleep(min(10, 2 ** attempt))
-                        continue
-
-                return data
-
-        except (requests.Timeout, requests.ConnectionError):
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(min(10, 2 ** attempt))
-            else:
+            if response.status_code == 429:
+                # No retry loop that burns more quota. The next scheduled pass will retry.
+                return None
+            if response.status_code in (500, 502, 503, 504):
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(min(4, 2 ** attempt))
+                    continue
+                return None
+            if response.status_code != 200:
                 return None
 
+            try:
+                data = response.json()
+            except ValueError:
+                return None
+            if isinstance(data, dict) and str(data.get("status", "")).lower() == "error":
+                return None
+            return data
+        except (requests.Timeout, requests.ConnectionError):
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(min(4, 2 ** attempt))
+            else:
+                return None
         except Exception:
             return None
-
     return None
 
 
@@ -1454,8 +1337,6 @@ def _analyze_symbol_interval(symbol, market, interval):
     else:
         signal, signal_text = "WAIT", "⚪ انتظار"
 
-    # 🇸🇦 TASI لا يستخدم Twelve Data هنا. مسار TASI المنفصل أدناه يعتمد SAHMK فقط.
-
     # Score 0-100: trend + momentum + VWAP + volume + breakout + candle/RSI.
     score = 0
     if e10 is not None and e14 is not None:
@@ -1524,121 +1405,12 @@ def _analyze_symbol_interval(symbol, market, interval):
 
 
 def analyze_symbol(symbol, market):
-    """Full 5m market pass first; higher timeframes are confirmation only after a 5m signal."""
-    primary = _analyze_symbol_interval(symbol, market, "5min")
-    if not primary or primary["signal"] == "WAIT":
+    """Analyze one 5-minute series. Higher timeframes are not fetched per symbol on Basic quota."""
+    result = _analyze_symbol_interval(symbol, market, PRIMARY_TIMEFRAME)
+    if not result or result["signal"] == "WAIT":
         return None
-
-    # Strong signal: verify with the higher timeframes already requested.
-    for interval in ("15min", "30min", "1h", "4h"):
-        result = _analyze_symbol_interval(symbol, market, interval)
-        if result and result["signal"] != "WAIT":
-            if market == "US":
-                result["news"] = news_sentiment(symbol)
-                result["split_info"] = detect_local_split_from_daily(symbol)
-            return result
-
-    if market == "US":
-        primary["news"] = news_sentiment(symbol)
-        primary["split_info"] = detect_local_split_from_daily(symbol)
-    return primary
-
-
-# ============================================================
-# 🇺🇸 STOCK SPLITS
-# ============================================================
-
-def detect_local_split_from_daily(symbol):
-    """Quota-safe split detector from unadjusted daily history.
-    It identifies a probable split/reverse-split date and factor; it does not invent ticker changes.
-    """
-    if not symbol:
-        return None
-    cache_key = f"LOCAL_SPLIT:{symbol}"
-    now = time.time()
-    with split_cache_lock:
-        cached = SPLIT_CACHE.get(cache_key)
-        if cached and now - cached.get("updated", 0) < SPLIT_CACHE_TTL:
-            return cached.get("data")
-    params = {
-        "symbol": symbol,
-        "interval": "1day",
-        "outputsize": 260,
-        "adjust": "none",
-        "format": "JSON",
-    }
-    data = td_request("/time_series", params)
-    values = data.get("values", []) if isinstance(data, dict) else []
-    events = []
-    try:
-        rows = list(reversed(values))
-        for i in range(1, len(rows)):
-            prev = float(rows[i-1].get("close"))
-            cur = float(rows[i].get("close"))
-            if prev <= 0 or cur <= 0:
-                continue
-            ratio = cur / prev
-            candidates = [(2, 1/2), (3, 1/3), (4, 1/4), (5, 1/5), (10, 1/10), (1/2, 2), (1/3, 3), (1/4, 4), (1/5, 5), (1/10, 10)]
-            best = min(candidates, key=lambda x: abs(ratio - x[1]))
-            factor = best[0]
-            expected = best[1]
-            if abs(ratio - expected) / max(abs(expected), 1e-9) <= 0.08:
-                events.append({
-                    "date": rows[i].get("datetime"),
-                    "ratio": ratio,
-                    "factor": factor,
-                    "description": f"{factor}-for-1" if factor >= 1 else f"1-for-{int(round(1/factor))}",
-                    "ticker_after": symbol,
-                    "source": "detected_from_unadjusted_history",
-                })
-    except Exception:
-        events = []
-    result = events[-1] if events else None
-    with split_cache_lock:
-        SPLIT_CACHE[cache_key] = {"updated": now, "data": result}
+    # News/split endpoints are deliberately not called here: they consume extra credits.
     return result
-
-
-def get_stock_split(symbol):
-    """Get latest known split/reverse-split for a US symbol.
-    Cached for 24h so the scanner does not request /splits every 2 minutes.
-    Twelve Data may require a Grow/Venture plan for this endpoint.
-    """
-    if not symbol:
-        return None
-
-    now = time.time()
-    with split_cache_lock:
-        cached = SPLIT_CACHE.get(symbol)
-        if cached and now - cached.get("updated", 0) < SPLIT_CACHE_TTL:
-            return cached.get("data")
-
-    data = td_request("/splits", {"symbol": symbol})
-    split_data = None
-
-    if isinstance(data, dict):
-        events = data.get("splits") or []
-        if events:
-            # Latest event first when available; otherwise sort by date.
-            events = sorted(
-                [e for e in events if isinstance(e, dict)],
-                key=lambda e: str(e.get("date", "")),
-                reverse=True,
-            )
-            if events:
-                e = events[0]
-                split_data = {
-                    "date": e.get("date"),
-                    "description": e.get("description"),
-                    "ratio": e.get("ratio"),
-                    "from_factor": e.get("from_factor"),
-                    "to_factor": e.get("to_factor"),
-                }
-
-    with split_cache_lock:
-        SPLIT_CACHE[symbol] = {"updated": now, "data": split_data}
-
-    return split_data
 
 
 # ============================================================
@@ -1747,10 +1519,7 @@ def build_tradingview_url(result):
     if not symbol:
         return None
 
-    if market == "TASI":
-        tv_symbol = f"TADAWUL:{symbol}"
-    else:
-        tv_symbol = symbol
+    tv_symbol = symbol
 
     return "https://www.tradingview.com/chart/?symbol=" + quote(tv_symbol, safe="")
 
@@ -1861,7 +1630,6 @@ def build_message(result):
     market = result["market"]
 
     names = {
-        "TASI": "🇸🇦 السوق السعودي (TASI)",
         "US": "🇺🇸 السوق الأمريكي (US)",
         "CRYPTO": "🪙 العملات الرقمية (CRYPTO)",
     }
@@ -1933,6 +1701,16 @@ def build_message(result):
     if movement_lines:
         lines.extend(["", *movement_lines])
 
+    # الاستمرارية هي حالة الاتجاه الحالية: UP صعود / DOWN هبوط،
+    # ولا تتغير إلا بعد انعكاس مؤكد بدورتين متتاليتين.
+    if result["trend"] == "UP":
+        continuation_text = "🟢 صعود — مستمر حتى انعكاس مؤكد"
+    elif result["trend"] == "DOWN":
+        continuation_text = "🔴 هبوط — مستمر حتى انعكاس مؤكد"
+    else:
+        continuation_text = "⚪ محايد"
+    lines.extend(["", f"🔄 <b>الاستمرارية:</b> {continuation_text}"])
+
     pine = result.get("pine", {})
     indicator_lines = [
         "",
@@ -1964,18 +1742,7 @@ def build_message(result):
     ])
 
     if market == "US":
-        lines.append(f"📰 <b>أخبار السهم:</b> {result['news']}")
-
-        split_info = result.get("split_info")
-        if split_info:
-            lines.extend([
-                "",
-                "✂️ <b>تقسيم السهم</b>",
-                f"📅 التاريخ: <b>{escape_html(split_info.get('date') or '-')}</b>",
-                f"🔢 النسبة: <b>{escape_html(split_info.get('description') or '-')}</b>",
-                f"📊 النسبة السعرية المرصودة: <b>{fmt(split_info.get('ratio'))}</b>",
-                f"🏷️ الرمز بعد التقسيم: <b>{escape_html(split_info.get('ticker_after') or result['symbol'])}</b>",
-            ])
+        lines.append("📰 <b>أخبار السهم:</b> ⚪ غير مفحوصة — حفاظًا على حصة الأسعار")
 
     if result["targets"]:
         lines.extend(["", "🎯 <b>أهداف ATR — 8 أهداف</b>"])
@@ -1987,9 +1754,6 @@ def build_message(result):
             last = result["targets"][-1]
             extra = last + result["atr"] * 2 if result["signal"] == "BUY" else last - result["atr"] * 2
             lines.append(f"♾️ <b>استمرارية بعد TP8:</b> {fmt(extra)} → مع استمرار الاتجاه")
-
-    if result.get("tasi_note"):
-        lines.extend(["", f"ℹ️ {escape_html(result['tasi_note'])}"])
 
     lines.extend([
         "",
@@ -2050,36 +1814,6 @@ def _extract_symbols(data):
             symbols.append(str(symbol).strip())
 
     return list(dict.fromkeys(symbols))
-
-
-def get_tasi_symbols():
-    """TASI catalog from SAHMK only. Never falls back to Twelve Data."""
-    symbols = []
-    offset = 0
-    page_size = 200
-    while len(symbols) < TASI_MAX_SYMBOLS:
-        data = sahmk_request("/companies/", {"market": "TASI", "limit": page_size, "offset": offset})
-        if not isinstance(data, dict):
-            break
-        results = data.get("results") or []
-        if not results:
-            break
-        before = len(symbols)
-        for item in results:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get("status", "active")).lower() != "active":
-                continue
-            if str(item.get("security_type", "Equity")).lower() != "equity":
-                continue
-            if item.get("symbol"):
-                symbols.append(str(item["symbol"]).strip())
-        symbols = list(dict.fromkeys(symbols))
-        total = int(data.get("total") or 0)
-        offset += len(results)
-        if offset >= total or len(results) < page_size or len(symbols) == before:
-            break
-    return sorted(set(symbols), key=str.upper)[:TASI_MAX_SYMBOLS]
 
 
 def get_us_symbols():
@@ -2146,191 +1880,39 @@ def get_symbols(market, loader):
 
 
 # ============================================================
-# 🔎 FAST FILTER
-# ============================================================
-
-def fast_filter_symbol(symbol, market):
-    """
-    مرحلة أولى خفيفة: تستخدم 15min فقط لاختيار الرموز الأكثر نشاطًا.
-    لا تصدر أي إشارة Telegram هنا؛ الفحص العميق هو الذي يقرر الإشارة.
-    """
-    series = get_series(symbol, market, interval="15min")
-    if not series:
-        return None
-
-    candles = series.get("candles") or []
-    if len(candles) < 30:
-        return None
-
-    closes = [c["close"] for c in candles]
-    volumes = [c.get("volume", 0.0) or 0.0 for c in candles]
-    price = closes[-1]
-    prev = closes[-2] if len(closes) > 1 else price
-    if price <= 0 or prev <= 0:
-        return None
-
-    move = abs(price - prev) / prev * 100.0
-    lookback = min(20, len(closes) - 1)
-    base = closes[-1 - lookback]
-    move_window = abs(price - base) / base * 100.0 if base > 0 else 0.0
-
-    last_vol = volumes[-1]
-    avg_vol = sum(volumes[-21:-1]) / max(1, len(volumes[-21:-1])) if len(volumes) >= 21 else 0.0
-    volume_ratio = (last_vol / avg_vol) if avg_vol > 0 else 1.0
-
-    ema8 = ema(closes, 8)
-    ema21 = ema(closes, 21)
-    trend_bonus = 0.0
-    if ema8 is not None and ema21 is not None:
-        if ema8 > ema21:
-            trend_bonus = 1.0
-        elif ema8 < ema21:
-            trend_bonus = 1.0
-
-    threshold = FAST_FILTER_MIN_MOVE.get(market, 0.5)
-    active = (
-        move >= threshold
-        or move_window >= threshold * 1.5
-        or volume_ratio >= 1.5
-    )
-
-    if not active:
-        return None
-
-    score = move * 2.0 + move_window + max(0.0, volume_ratio - 1.0) * 5.0 + trend_bonus
-    return {
-        "symbol": symbol,
-        "score": score,
-        "move": move,
-        "move_window": move_window,
-        "volume_ratio": volume_ratio,
-    }
-
-
-def build_fast_candidates(symbols, market):
-    """Run the light first pass and return only the strongest candidates."""
-    total = len(symbols)
-    limit = FAST_FILTER_LIMIT.get(market, 300)
-    candidates = []
-    completed = 0
-    batch_size = MAX_WORKERS * 10
-
-    print(f"[{market}] 🔎 FAST FILTER بدء | {total} رمز | limit={limit}")
-
-    for start in range(0, total, batch_size):
-        batch = symbols[start:start + batch_size]
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            jobs = {executor.submit(fast_filter_symbol, symbol, market): symbol for symbol in batch}
-            for job in as_completed(jobs):
-                completed += 1
-                try:
-                    item = job.result()
-                    if item:
-                        candidates.append(item)
-                except Exception as error:
-                    print(f"[{market}] FAST FILTER error: {error}")
-
-        if completed % 100 == 0 or completed == total:
-            print(f"[{market}] FAST FILTER progress {completed}/{total} | candidates={len(candidates)}")
-
-    candidates.sort(key=lambda x: x["score"], reverse=True)
-    selected = [x["symbol"] for x in candidates[:limit]]
-    print(f"[{market}] 🎯 FAST FILTER انتهى | {total} → {len(selected)} مرشح للفحص العميق")
-    return selected
-
-
-# ============================================================
 # MARKET SCANNER
 # ============================================================
 
-def scan_tasi_sahmk(symbols, token):
-    """Quota-safe TASI scan using SAHMK market-wide endpoints and cached quotes.
-    Free SAHMK does not expose historical OHLCV, so full RSI/ATR history is not fabricated.
+def scan_market(symbols, market, token):
+    """Quota-aware rotating scanner for US + CRYPTO only.
+
+    Twelve Data Basic cannot scan thousands of symbols every 5 minutes.
+    We therefore rotate through the full catalog without restarting from the beginning.
+    One-symbol requests use one credit, so alerts remain granular and the daily budget is protected.
     """
-    if not token or not symbols:
+    if market not in ("US", "CRYPTO") or not token or not symbols:
         return
-    candidates = {}
-    for endpoint in ("/market/gainers/", "/market/losers/", "/market/volume/", "/market/value/"):
-        data = sahmk_request(endpoint, {"limit": 25, "index": "TASI"})
-        rows = (data or {}).get("results") or (data or {}).get("data") or []
-        if isinstance(rows, list):
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                sym = str(row.get("symbol") or row.get("ticker") or "").strip()
-                if sym:
-                    candidates[sym] = row
-    # Keep only TASI catalog symbols and randomize the order.
-    allowed = set(symbols)
-    selected = [s for s in candidates if s in allowed]
-    random.shuffle(selected)
-    print(f"[TASI] 🇸🇦 SAHMK market scan | candidates={len(selected)} | history=unavailable on Free")
+
+    symbols = list(symbols)
+    total = len(symbols)
+    key = f"SCAN_CURSOR:{market}"
+    with state_lock:
+        cursor = int(TREND_STATE.get(key, 0)) % total
+
+    # Use a small slice per pass; the credit gate skips immediately when budget is exhausted.
+    # The cursor advances even when a request is skipped so the universe never gets stuck.
+    per_pass = 4 if market == "US" else 4
+    selected = [symbols[(cursor + i) % total] for i in range(min(per_pass, total))]
+    with state_lock:
+        TREND_STATE[key] = (cursor + len(selected)) % total
+
+    print(f"[{market}] 🔄 دوران كامل: {cursor + 1}→{cursor + len(selected)} / {total} | {len(selected)} رموز")
+
     for symbol in selected:
-        q = get_sahmk_quote(symbol)
-        if not q:
-            continue
-        change = float(q.get("change_percent", 0) or 0)
-        if abs(change) < 1.0:
-            continue
-        signal = "BUY" if change > 0 else "SELL"
-        trend = "UP" if change > 0 else "DOWN"
-        score = min(100, int(60 + min(40, abs(change) * 8)))
-        result = {
-            "market": "TASI", "symbol": symbol, "name": q.get("name") or symbol,
-            "price": q.get("price"), "entry_price": q.get("price"), "previous_close": None,
-            "ema10": None, "ema14": None, "ema15": None, "ema25": None, "ema50": None, "ema200": None,
-            "rsi": None, "atr": None, "vwap": None, "support": None, "resistance": None,
-            "ars": None, "ars_level": None, "buy_power": None, "sell_power": None, "volume_ratio": None,
-            "trend": persistent_trend("TASI", symbol, trend), "score": score, "signal": signal,
-            "signal_text": "🟢 حركة إيجابية — SAHMK" if signal == "BUY" else "🔴 حركة سلبية — SAHMK",
-            "news": "⚪ غير متاح", "split_info": None, "targets": [], "stop_loss": None,
-            "divergence": {}, "trendline_bias": 0,
-            "smart": {"maker": 0, "speculators": abs(change) >= 3, "accumulation": change >= 1.5, "unusual": abs(change) >= 3},
-            "pine": {}, "timeframe": "market", "indicator_triggers": [],
-            "tasi_note": "السعر والحركة من SAHMK؛ المؤشرات التاريخية غير متاحة على الخطة المجانية.",
-        }
-        if should_send(result):
+        result = analyze_symbol(symbol, market)
+        if result and should_send(result):
             enqueue_signal(token, result)
 
-
-def scan_market(symbols, market, token):
-    if not symbols:
-        print(f"[{market}] لا توجد رموز للفحص")
-        return
-
-    if market == "TASI":
-        scan_tasi_sahmk(symbols, token)
-        return
-
-    # فحص كامل A→Z مع ترتيب عشوائي جديد في كل دورة.
-    symbols = list(symbols)
-    random.shuffle(symbols)
-    total = len(symbols)
-    print(f"[{market}] 🧠 فحص كامل A→Z عشوائي: {total} رمز | Batch={BATCH_SYMBOLS} | 5min أولاً")
-
-    batch_load_series(symbols, market, "5min")
-
-    completed = 0
-    signals = 0
-    BATCH_SIZE = MAX_WORKERS * 10
-
-    for start in range(0, total, BATCH_SIZE):
-        batch = symbols[start:start + BATCH_SIZE]
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            jobs = {executor.submit(analyze_symbol, symbol, market): symbol for symbol in batch}
-            for job in as_completed(jobs):
-                completed += 1
-                try:
-                    result = job.result()
-                    if result and should_send(result):
-                        if enqueue_signal(token, result):
-                            signals += 1
-                except Exception as error:
-                    print(f"[{market}] تحليل خطأ: {error}")
-        if completed % 100 == 0 or completed == total:
-            print(f"[{market}] progress {completed}/{total} | signals={signals}")
-
-    print(f"[{market}] انتهى الفحص | فحص={completed} | إشارات={signals}")
 
 
 # ============================================================
@@ -2341,20 +1923,10 @@ def market_loop(market, token, loader):
     while True:
         try:
             symbols = get_symbols(market, loader)
-
-            print(
-                f"💀 {market}: تم تحميل "
-                f"{len(symbols)} رمز"
-            )
-
-            # لا يوجد FAST FILTER ولا ترتيب عشوائي: الفحص كامل A→Z.
+            print(f"💀 {market}: تم تحميل {len(symbols)} رمز")
             scan_market(symbols, market, token)
-
         except Exception as error:
-            print(
-                f"[{market}] loop error: {error}"
-            )
-
+            print(f"[{market}] loop error: {error}")
         time.sleep(SCAN_INTERVAL)
 
 
@@ -2382,8 +1954,7 @@ def main():
     print("💀🚀 AI PRO MAX — INSTANT SIGNAL EDITION")
     print("🇺🇸 US MARKET — 13,414 SYMBOLS | $0.15+ | A→Z | 24/7 | PRE + REGULAR + POST")
     print("🪙 CRYPTO MARKET — FULL | 24/7")
-    print("🇸🇦 TASI — مفصول إلى TASI.py في خدمة Railway مستقلة")
-    print("⏱️ الدورة: كل 5 دقائق | 5m كامل ثم تأكيد 15m → 30m → 1h → 4h | Batch + حماية الحصة")
+    print("⏱️ الدورة: كل 5 دقائق | دوران متواصل على كامل US + CRYPTO | حماية الحصة")
     print("=" * 68)
 
     if not TWELVEDATA_API_KEY:
@@ -2395,7 +1966,6 @@ def main():
         return
 
     print("🟢 Twelve Data API: OK | 🇺🇸 US + 🪙 CRYPTO فقط")
-    print("🟢 SAHMK API: OK | 🇸🇦 TASI فقط — بدون Twelve Data")
     print("🟢 CHAT_ID: OK")
 
     if ensure_direction_gifs():
@@ -2403,7 +1973,6 @@ def main():
 
     print("🇺🇸 US TOKEN:", "OK" if US_TOKEN else "MISSING")
     print("🪙 CRYPTO TOKEN:", "OK" if CRYPTO_TOKEN else "MISSING")
-    print("🇸🇦 TASI: OFF هنا — يعمل من TASI.py المستقل")
 
     threading.Thread(
         target=telegram_worker,
@@ -2431,7 +2000,3 @@ def main():
 
     while True:
         time.sleep(60)
-
-
-if __name__ == "__main__":
-    main()
