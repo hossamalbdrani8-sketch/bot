@@ -7,6 +7,7 @@ import os
 import time
 import threading
 import queue
+import random
 from datetime import datetime, timezone
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -90,8 +91,10 @@ CREDIT_RESERVE = 0
 FAST_FILTER_LIMIT = {"TASI": 120, "US": 400, "CRYPTO": 300}
 FAST_FILTER_MIN_MOVE = {"TASI": 0.25, "US": 0.50, "CRYPTO": 0.35}
 
-EMA_FAST = 8
-EMA_MID = 21
+EMA_FAST = 10
+EMA_MID = 14
+EMA_MOMENTUM = 15
+EMA_TRIGGER = 25
 EMA_SLOW = 50
 EMA_LONG = 200
 
@@ -101,10 +104,12 @@ VOLUME_LENGTH = 20
 
 MIN_SIGNAL_SCORE = 70
 
+# ثمانية أهداف متدرجة تسمح للأسهم ذات القفزات الكبيرة بالاستمرار.
 ATR_TARGETS = [
-    1.0, 1.5, 2.0, 2.5,
-    3.0, 3.5, 4.0, 5.0
+    1.0, 1.5, 2.0, 3.0,
+    4.0, 5.0, 6.5, 8.0
 ]
+STOP_ATR_MULTIPLIER = 1.5
 
 # الأخبار لا تُطلب لكل الأسهم.
 # تطلب فقط عندما تكون إشارة فنية قوية.
@@ -136,6 +141,7 @@ last_request_time = 0.0
 state_lock = Lock()
 LAST_SIGNAL = {}
 TREND_STATE = {}
+REVERSAL_COUNT = {}
 
 symbol_cache_lock = Lock()
 SYMBOL_CACHE = {
@@ -596,6 +602,7 @@ def get_series(symbol, market, interval=PRIMARY_TIMEFRAME):
         "interval": interval,
         "outputsize": OUTPUTSIZE,
         "format": "JSON",
+        "adjust": "splits",
     }
     if market == "US":
         params["prepost"] = "true"
@@ -640,6 +647,7 @@ def batch_load_series(symbols, market, interval=PRIMARY_TIMEFRAME):
             "interval": interval,
             "outputsize": OUTPUTSIZE,
             "format": "JSON",
+            "adjust": "splits",
         }
         if market == "US":
             params["prepost"] = "true"
@@ -648,6 +656,13 @@ def batch_load_series(symbols, market, interval=PRIMARY_TIMEFRAME):
         if data is None and market == "US":
             params.pop("prepost", None)
             data = td_request("/time_series", params)
+
+        if data is None:
+            with API_CREDITS_LOCK:
+                daily_exhausted = TD_DAILY_RESERVED >= TD_DAILY_LIMIT
+            if daily_exhausted:
+                print(f"[{market}] 🛑 Twelve Data: الحصة اليومية مستهلكة — إيقاف دورة السوق الحالية")
+                break
 
         for key, payload in _batch_response_items(data):
             series = _parse_series_payload(payload)
@@ -685,12 +700,14 @@ def support_resistance(candles):
 def calculate_trend(candles):
     closes = [c["close"] for c in candles]
 
-    e8 = ema(closes, EMA_FAST)
-    e21 = ema(closes, EMA_MID)
+    e10 = ema(closes, EMA_FAST)
+    e14 = ema(closes, EMA_MID)
+    e15 = ema(closes, EMA_MOMENTUM)
+    e25 = ema(closes, EMA_TRIGGER)
     e50 = ema(closes, EMA_SLOW)
     e200 = ema(closes, EMA_LONG)
 
-    if None in (e8, e21, e50, e200):
+    if None in (e10, e14, e25, e50, e200):
         return "NEUTRAL"
 
     current = closes[-1]
@@ -698,12 +715,17 @@ def calculate_trend(candles):
     bullish = 0
     bearish = 0
 
-    if e8 > e21:
+    if e10 > e14:
         bullish += 1
     else:
         bearish += 1
 
-    if e21 > e50:
+    if e14 > e25:
+        bullish += 1
+    else:
+        bearish += 1
+
+    if e15 > e25:
         bullish += 1
     else:
         bearish += 1
@@ -728,16 +750,31 @@ def calculate_trend(candles):
 
 
 def persistent_trend(market, symbol, current_trend):
+    """Keep UP/DOWN active until a confirmed two-cycle reversal."""
     key = f"{market}:{symbol}"
+    if current_trend == "NEUTRAL":
+        with state_lock:
+            return TREND_STATE.get(key, "NEUTRAL")
 
     with state_lock:
         previous = TREND_STATE.get(key)
+        if previous is None:
+            TREND_STATE[key] = current_trend
+            REVERSAL_COUNT[key] = 0
+            return current_trend
 
-        if current_trend == "NEUTRAL":
-            return previous or "NEUTRAL"
+        if current_trend == previous:
+            REVERSAL_COUNT[key] = 0
+            return previous
 
-        TREND_STATE[key] = current_trend
-        return current_trend
+        count = REVERSAL_COUNT.get(key, 0) + 1
+        REVERSAL_COUNT[key] = count
+        if count >= 2:
+            TREND_STATE[key] = current_trend
+            REVERSAL_COUNT[key] = 0
+            return current_trend
+
+        return previous
 
 
 # ============================================================
@@ -1018,18 +1055,30 @@ def volume_strength(candles):
 # ============================================================
 
 def calculate_targets(price, atr_value, direction):
-    if not atr_value or atr_value <= 0:
+    if not atr_value or atr_value <= 0 or not price or price <= 0:
         return []
 
     result = []
-
     for multiplier in ATR_TARGETS:
         if direction == "UP":
             result.append(price + atr_value * multiplier)
         else:
             result.append(price - atr_value * multiplier)
-
     return result
+
+
+def calculate_stop_loss(price, atr_value, support, resistance, direction):
+    """ATR + structure stop. The wider protective level is used to avoid noise."""
+    if not price or not atr_value or atr_value <= 0:
+        return None
+    atr_stop = price - atr_value * STOP_ATR_MULTIPLIER if direction == "UP" else price + atr_value * STOP_ATR_MULTIPLIER
+    if direction == "UP" and support is not None and support < price:
+        structural = support - atr_value * 0.25
+        return round(max(0.0, min(atr_stop, structural)), 10)
+    if direction == "DOWN" and resistance is not None and resistance > price:
+        structural = resistance + atr_value * 0.25
+        return round(max(0.0, max(atr_stop, structural)), 10)
+    return round(max(0.0, atr_stop), 10)
 
 
 # ============================================================
@@ -1371,8 +1420,10 @@ def _analyze_symbol_interval(symbol, market, interval):
 
     if market == "US" and price < MIN_US_PRICE:
         return None
-    e8 = ema(closes, EMA_FAST)
-    e21 = ema(closes, EMA_MID)
+    e10 = ema(closes, EMA_FAST)
+    e14 = ema(closes, EMA_MID)
+    e15 = ema(closes, EMA_MOMENTUM)
+    e25 = ema(closes, EMA_TRIGGER)
     e50 = ema(closes, EMA_SLOW)
     e200 = ema(closes, EMA_LONG)
     rsi_value = rsi(closes, RSI_LENGTH)
@@ -1403,18 +1454,26 @@ def _analyze_symbol_interval(symbol, market, interval):
     else:
         signal, signal_text = "WAIT", "⚪ انتظار"
 
-    # 🇸🇦 TASI: بعد ظهور إشارة فقط، نتحقق من السعر الحالي من SAHMK.
-    # هذا يحافظ على حصة SAHMK؛ الفحص الفني الكامل يبقى على Twelve Data.
-    sahmk_quote = get_sahmk_quote(symbol) if (market == "TASI" and signal != "WAIT") else None
-    if sahmk_quote:
-        price = sahmk_quote["price"]
-        company_name = sahmk_quote.get("name") or company_name
+    # 🇸🇦 TASI لا يستخدم Twelve Data هنا. مسار TASI المنفصل أدناه يعتمد SAHMK فقط.
 
-    score = (
-        (30 if (pine["ema200"] is not None and (price > pine["ema200"] or price < pine["ema200"])) else 0)
-        + (30 if (pine["rsi"] is not None and (pine["rsi"] > 50 or pine["rsi"] < 50)) else 0)
-        + (40 if (pine["volume_sma20"] is not None and volumes[-1] > pine["volume_sma20"]) else 0)
-    )
+    # Score 0-100: trend + momentum + VWAP + volume + breakout + candle/RSI.
+    score = 0
+    if e10 is not None and e14 is not None:
+        score += 12 if ((signal == "BUY" and e10 > e14) or (signal == "SELL" and e10 < e14)) else 0
+    if e14 is not None and e25 is not None:
+        score += 12 if ((signal == "BUY" and e14 > e25) or (signal == "SELL" and e14 < e25)) else 0
+    if e25 is not None and e50 is not None:
+        score += 12 if ((signal == "BUY" and e25 > e50) or (signal == "SELL" and e25 < e50)) else 0
+    if e50 is not None and e200 is not None:
+        score += 12 if ((signal == "BUY" and e50 > e200) or (signal == "SELL" and e50 < e200)) else 0
+    if rsi_value is not None:
+        score += 12 if ((signal == "BUY" and rsi_value >= 55) or (signal == "SELL" and rsi_value <= 45)) else 0
+    if vwap_value is not None:
+        score += 12 if ((signal == "BUY" and price > vwap_value) or (signal == "SELL" and price < vwap_value)) else 0
+    score += 12 if ((signal == "BUY" and buy_power >= 55) or (signal == "SELL" and sell_power >= 55)) else 0
+    score += 8 if volume_ratio >= 1.20 else 0
+    score += 8 if ((signal == "BUY" and pine.get("golden_first")) or (signal == "SELL" and pine.get("strong_sell"))) else 0
+    score = min(100, int(score))
 
     # Keep trend state per symbol, but do not overwrite it six times in one pass.
     trend = raw_trend
@@ -1436,20 +1495,22 @@ def _analyze_symbol_interval(symbol, market, interval):
     )
 
     targets = []
+    stop_loss = None
     if signal != "WAIT":
         direction = "UP" if signal == "BUY" else "DOWN"
         targets = calculate_targets(price, atr_value, direction)
+        stop_loss = calculate_stop_loss(price, atr_value, support, resistance, direction)
 
     return {
         "symbol": symbol, "name": company_name, "market": market,
-        "price": price, "previous_close": previous_close,
-        "ema8": e8, "ema21": e21, "ema50": e50, "ema200": e200,
+        "price": price, "entry_price": price, "previous_close": previous_close,
+        "ema10": e10, "ema14": e14, "ema15": e15, "ema25": e25, "ema50": e50, "ema200": e200,
         "rsi": rsi_value, "atr": atr_value, "vwap": vwap_value,
         "support": support, "resistance": resistance, "ars": ars,
         "ars_level": ars_level, "buy_power": buy_power, "sell_power": sell_power,
         "volume_ratio": volume_ratio, "trend": trend, "score": score,
         "signal": signal, "signal_text": signal_text, "news": "⚪ غير متاح",
-        "split_info": None, "targets": targets, "divergence": divergence,
+        "split_info": None, "targets": targets, "stop_loss": stop_loss, "divergence": divergence,
         "trendline_bias": trendline, "smart": smart, "pine": pine,
         "timeframe": interval,
         "indicator_triggers": [label for label, active in (
@@ -1474,18 +1535,69 @@ def analyze_symbol(symbol, market):
         if result and result["signal"] != "WAIT":
             if market == "US":
                 result["news"] = news_sentiment(symbol)
-                result["split_info"] = get_stock_split(symbol)
+                result["split_info"] = detect_local_split_from_daily(symbol)
             return result
 
     if market == "US":
         primary["news"] = news_sentiment(symbol)
-        primary["split_info"] = get_stock_split(symbol)
+        primary["split_info"] = detect_local_split_from_daily(symbol)
     return primary
 
 
 # ============================================================
 # 🇺🇸 STOCK SPLITS
 # ============================================================
+
+def detect_local_split_from_daily(symbol):
+    """Quota-safe split detector from unadjusted daily history.
+    It identifies a probable split/reverse-split date and factor; it does not invent ticker changes.
+    """
+    if not symbol:
+        return None
+    cache_key = f"LOCAL_SPLIT:{symbol}"
+    now = time.time()
+    with split_cache_lock:
+        cached = SPLIT_CACHE.get(cache_key)
+        if cached and now - cached.get("updated", 0) < SPLIT_CACHE_TTL:
+            return cached.get("data")
+    params = {
+        "symbol": symbol,
+        "interval": "1day",
+        "outputsize": 260,
+        "adjust": "none",
+        "format": "JSON",
+    }
+    data = td_request("/time_series", params)
+    values = data.get("values", []) if isinstance(data, dict) else []
+    events = []
+    try:
+        rows = list(reversed(values))
+        for i in range(1, len(rows)):
+            prev = float(rows[i-1].get("close"))
+            cur = float(rows[i].get("close"))
+            if prev <= 0 or cur <= 0:
+                continue
+            ratio = cur / prev
+            candidates = [(2, 1/2), (3, 1/3), (4, 1/4), (5, 1/5), (10, 1/10), (1/2, 2), (1/3, 3), (1/4, 4), (1/5, 5), (1/10, 10)]
+            best = min(candidates, key=lambda x: abs(ratio - x[1]))
+            factor = best[0]
+            expected = best[1]
+            if abs(ratio - expected) / max(abs(expected), 1e-9) <= 0.08:
+                events.append({
+                    "date": rows[i].get("datetime"),
+                    "ratio": ratio,
+                    "factor": factor,
+                    "description": f"{factor}-for-1" if factor >= 1 else f"1-for-{int(round(1/factor))}",
+                    "ticker_after": symbol,
+                    "source": "detected_from_unadjusted_history",
+                })
+    except Exception:
+        events = []
+    result = events[-1] if events else None
+    with split_cache_lock:
+        SPLIT_CACHE[cache_key] = {"updated": now, "data": result}
+    return result
+
 
 def get_stock_split(symbol):
     """Get latest known split/reverse-split for a US symbol.
@@ -1812,9 +1924,6 @@ def build_message(result):
         f"<b>{symbol}</b>",
     ]
 
-    if company_name and company_name.lower() != result["symbol"].lower():
-        lines.append(f"{company_name}")
-
     lines.extend([
         "",
         f"{signal_badge}    🎯 قوة الإشارة: <b>{result['score']}/100</b>",
@@ -1835,13 +1944,15 @@ def build_message(result):
     lines.extend(indicator_lines)
     lines.extend([
         "",
-        f"💰 <b>السعر:</b> {fmt(result['price'])}" + (f"  ({change_pct:+.2f}%)" if change_pct is not None else ""),
+        f"💰 <b>دخول:</b> {fmt(result.get('entry_price') or result['price'])}" + (f"  ({change_pct:+.2f}%)" if change_pct is not None else ""),
+        f"🛑 <b>وقف الخسارة:</b> {fmt(result.get('stop_loss'))}",
         f"📊 <b>VWAP:</b> {fmt(result['vwap'])}  {vwap_text}",
         f"🧠 <b>RSI 14:</b> {fmt(result['rsi'])}",
         f"📐 <b>ATR 14:</b> {fmt(result['atr'])}",
         "",
-        f"📈 <b>EMA 8:</b> {fmt(result['ema8'])}    <b>EMA 21:</b> {fmt(result['ema21'])}",
-        f"📈 <b>EMA 50:</b> {fmt(result['ema50'])}    <b>EMA 200:</b> {fmt(result['ema200'])}",
+        f"📈 <b>EMA 10:</b> {fmt(result.get('ema10'))}    <b>EMA 14:</b> {fmt(result.get('ema14'))}",
+        f"📈 <b>EMA 15:</b> {fmt(result.get('ema15'))}    <b>EMA 25:</b> {fmt(result.get('ema25'))}",
+        f"📈 <b>EMA 50:</b> {fmt(result.get('ema50'))}    <b>EMA 200:</b> {fmt(result.get('ema200'))}",
         "",
         f"🟢 <b>قوة الشراء:</b> {pct(result['buy_power'])}",
         f"🔴 <b>قوة البيع:</b> {pct(result['sell_power'])}",
@@ -1862,7 +1973,8 @@ def build_message(result):
                 "✂️ <b>تقسيم السهم</b>",
                 f"📅 التاريخ: <b>{escape_html(split_info.get('date') or '-')}</b>",
                 f"🔢 النسبة: <b>{escape_html(split_info.get('description') or '-')}</b>",
-                f"📊 العدد: <b>{fmt(split_info.get('from_factor'))} → {fmt(split_info.get('to_factor'))}</b>",
+                f"📊 النسبة السعرية المرصودة: <b>{fmt(split_info.get('ratio'))}</b>",
+                f"🏷️ الرمز بعد التقسيم: <b>{escape_html(split_info.get('ticker_after') or result['symbol'])}</b>",
             ])
 
     if result["targets"]:
@@ -1871,10 +1983,17 @@ def build_message(result):
         for i, target in enumerate(result["targets"], 1):
             change = (target - result["price"]) / result["price"] * 100 if result["price"] else 0
             lines.append(f"TP{i}: <b>{fmt(target)}</b> ({change:+.2f}%)")
+        if result["targets"] and result.get("atr"):
+            last = result["targets"][-1]
+            extra = last + result["atr"] * 2 if result["signal"] == "BUY" else last - result["atr"] * 2
+            lines.append(f"♾️ <b>استمرارية بعد TP8:</b> {fmt(extra)} → مع استمرار الاتجاه")
+
+    if result.get("tasi_note"):
+        lines.extend(["", f"ℹ️ {escape_html(result['tasi_note'])}"])
 
     lines.extend([
         "",
-        "🔄 الاتجاه يستمر حتى ظهور انعكاس مؤكد",
+        "🟢/🔴 السهم المتحرك يستمر حتى انعكاس مؤكد (دورتان متتاليتان)",
         f"⏱️ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}",
     ])
 
@@ -1934,24 +2053,17 @@ def _extract_symbols(data):
 
 
 def get_tasi_symbols():
-    # 🇸🇦 TASI catalog من SAHMK مع pagination؛ وإذا كان دليل SAHMK أقل من الهدف،
-    # نملأ النقص من Twelve Data بدون تغيير محرك التحليل الفني.
+    """TASI catalog from SAHMK only. Never falls back to Twelve Data."""
     symbols = []
     offset = 0
     page_size = 200
-
     while len(symbols) < TASI_MAX_SYMBOLS:
-        data = sahmk_request(
-            "/companies/",
-            {"market": "TASI", "limit": page_size, "offset": offset},
-        )
+        data = sahmk_request("/companies/", {"market": "TASI", "limit": page_size, "offset": offset})
         if not isinstance(data, dict):
             break
-
         results = data.get("results") or []
         if not results:
             break
-
         before = len(symbols)
         for item in results:
             if not isinstance(item, dict):
@@ -1962,28 +2074,12 @@ def get_tasi_symbols():
                 continue
             if item.get("symbol"):
                 symbols.append(str(item["symbol"]).strip())
-
         symbols = list(dict.fromkeys(symbols))
         total = int(data.get("total") or 0)
         offset += len(results)
-
         if offset >= total or len(results) < page_size or len(symbols) == before:
             break
-
-    symbols = sorted(set(symbols), key=str.upper)
-
-    # إذا كان SAHMK يعرض دليلاً أقل من 374، نكمل الرموز الناقصة من قائمة
-    # Twelve Data فقط حتى يبقى عدد TASI ثابتاً كما طلبت.
-    if len(symbols) < TASI_MAX_SYMBOLS:
-        try:
-            td_data = td_request("/stocks", {"exchange": "TADAWUL"})
-            fallback = _extract_symbols(td_data)
-            merged = list(dict.fromkeys(symbols + fallback))
-            symbols = sorted(merged, key=str.upper)
-        except Exception:
-            pass
-
-    return symbols[:TASI_MAX_SYMBOLS]
+    return sorted(set(symbols), key=str.upper)[:TASI_MAX_SYMBOLS]
 
 
 def get_us_symbols():
@@ -2147,15 +2243,71 @@ def build_fast_candidates(symbols, market):
 # MARKET SCANNER
 # ============================================================
 
+def scan_tasi_sahmk(symbols, token):
+    """Quota-safe TASI scan using SAHMK market-wide endpoints and cached quotes.
+    Free SAHMK does not expose historical OHLCV, so full RSI/ATR history is not fabricated.
+    """
+    if not token or not symbols:
+        return
+    candidates = {}
+    for endpoint in ("/market/gainers/", "/market/losers/", "/market/volume/", "/market/value/"):
+        data = sahmk_request(endpoint, {"limit": 25, "index": "TASI"})
+        rows = (data or {}).get("results") or (data or {}).get("data") or []
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                sym = str(row.get("symbol") or row.get("ticker") or "").strip()
+                if sym:
+                    candidates[sym] = row
+    # Keep only TASI catalog symbols and randomize the order.
+    allowed = set(symbols)
+    selected = [s for s in candidates if s in allowed]
+    random.shuffle(selected)
+    print(f"[TASI] 🇸🇦 SAHMK market scan | candidates={len(selected)} | history=unavailable on Free")
+    for symbol in selected:
+        q = get_sahmk_quote(symbol)
+        if not q:
+            continue
+        change = float(q.get("change_percent", 0) or 0)
+        if abs(change) < 1.0:
+            continue
+        signal = "BUY" if change > 0 else "SELL"
+        trend = "UP" if change > 0 else "DOWN"
+        score = min(100, int(60 + min(40, abs(change) * 8)))
+        result = {
+            "market": "TASI", "symbol": symbol, "name": q.get("name") or symbol,
+            "price": q.get("price"), "entry_price": q.get("price"), "previous_close": None,
+            "ema10": None, "ema14": None, "ema15": None, "ema25": None, "ema50": None, "ema200": None,
+            "rsi": None, "atr": None, "vwap": None, "support": None, "resistance": None,
+            "ars": None, "ars_level": None, "buy_power": None, "sell_power": None, "volume_ratio": None,
+            "trend": persistent_trend("TASI", symbol, trend), "score": score, "signal": signal,
+            "signal_text": "🟢 حركة إيجابية — SAHMK" if signal == "BUY" else "🔴 حركة سلبية — SAHMK",
+            "news": "⚪ غير متاح", "split_info": None, "targets": [], "stop_loss": None,
+            "divergence": {}, "trendline_bias": 0,
+            "smart": {"maker": 0, "speculators": abs(change) >= 3, "accumulation": change >= 1.5, "unusual": abs(change) >= 3},
+            "pine": {}, "timeframe": "market", "indicator_triggers": [],
+            "tasi_note": "السعر والحركة من SAHMK؛ المؤشرات التاريخية غير متاحة على الخطة المجانية.",
+        }
+        if should_send(result):
+            enqueue_signal(token, result)
+
+
 def scan_market(symbols, market, token):
     if not symbols:
         print(f"[{market}] لا توجد رموز للفحص")
         return
 
-    total = len(symbols)
-    print(f"[{market}] 🧠 فحص A→Z: {total} رمز | Batch={BATCH_SYMBOLS} | 5min أولاً")
+    if market == "TASI":
+        scan_tasi_sahmk(symbols, token)
+        return
 
-    # Batch واحد للـ5min يغطي السوق كاملًا بأقل عدد من الاتصالات.
+    # فحص كامل A→Z مع ترتيب عشوائي جديد في كل دورة.
+    symbols = list(symbols)
+    random.shuffle(symbols)
+    total = len(symbols)
+    print(f"[{market}] 🧠 فحص كامل A→Z عشوائي: {total} رمز | Batch={BATCH_SYMBOLS} | 5min أولاً")
+
     batch_load_series(symbols, market, "5min")
 
     completed = 0
@@ -2242,8 +2394,8 @@ def main():
         print("❌ CHAT_ID غير موجود")
         return
 
-    print("🟢 Twelve Data API: OK | 🇺🇸 US + 🪙 CRYPTO + TASI technical history")
-    print("🟢 SAHMK API: OK | 🇸🇦 TASI catalog + signal-price verification")
+    print("🟢 Twelve Data API: OK | 🇺🇸 US + 🪙 CRYPTO فقط")
+    print("🟢 SAHMK API: OK | 🇸🇦 TASI فقط — بدون Twelve Data")
     print("🟢 CHAT_ID: OK")
 
     if ensure_direction_gifs():
