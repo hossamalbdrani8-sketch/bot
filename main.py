@@ -81,9 +81,10 @@ US_MAX_SYMBOLS = 13414
 TASI_MAX_SYMBOLS = 374
 
 # Batch: يقلل عدد الاتصالات، ولا يلغي احتساب رصيد كل رمز.
-BATCH_SYMBOLS = 100
-# هامش أمان ثابت لحماية الحصة؛ لا يضيف أي متغير Railway.
-CREDIT_RESERVE = 20
+BATCH_SYMBOLS = 8
+# Twelve Data Basic: 8 API credits/minute. لا نحجز رصيداً من الدفعة؛
+# البوابة الزمنية تنتظر الدقيقة التالية تلقائياً عند وصول الرصيد إلى الصفر.
+CREDIT_RESERVE = 0
 
 # 🔎 FAST FILTER — يقلل الفحص العميق قبل تشغيل الأطر الستة
 FAST_FILTER_LIMIT = {"TASI": 120, "US": 400, "CRYPTO": 300}
@@ -151,6 +152,7 @@ series_cache_lock = Lock()
 # حتى لا نستهلك رصيدًا إضافيًا.
 API_CREDITS_LEFT = None
 API_CREDITS_LOCK = Lock()
+TD_CREDIT_GATE_LOCK = Lock()
 # يوم UTC الذي ينتمي إليه الرصيد المعروف. عند دخول يوم جديد تُعاد الحالة إلى None
 # حتى يسمح البوت بأول طلب، ثم يقرأ الرصيد الجديد من رأس Twelve Data.
 API_CREDITS_DAY = None
@@ -294,11 +296,32 @@ def get_sahmk_quote(symbol):
     return result
 
 
+def _wait_for_td_minute_credit(required=1):
+    """
+    Twelve Data Basic يعطي 8 API credits لكل دقيقة.
+    إذا كان header السابق يقول 0، ننتظر بداية الدقيقة التالية بدلاً من
+    اعتبار الرصيد اليومي منتهياً. هذا مهم جداً مع Batch requests لأن
+    الـ8 رموز تستهلك 8 credits حتى لو كان الطلب HTTP واحداً.
+    """
+    required = max(1, int(required or 1))
+    while True:
+        with API_CREDITS_LOCK:
+            left = API_CREDITS_LEFT
+        if left is None or left >= required:
+            return
+
+        now = time.time()
+        wait_seconds = 60.0 - (now % 60.0) + 0.15
+        print(f"🕐 Twelve Data: المتبقي {left} لا يكفي لطلب يحتاج {required} — انتظار {wait_seconds:.1f}s للدقيقة التالية")
+        time.sleep(wait_seconds)
+
+
 def td_request(endpoint, params=None):
     """
     طلب آمن:
     - Session reuse
     - Rate limit
+    - بوابة 8 credits/minute على مستوى كل الطلبات
     - Retry
     - معالجة 429
     - لا يفتح آلاف الاتصالات
@@ -311,58 +334,67 @@ def td_request(endpoint, params=None):
 
     session = get_session()
 
+    # Batch /time_series يستهلك credit لكل رمز، حتى مع HTTP request واحد.
+    credit_cost = 1
+    if endpoint == "/time_series":
+        raw_symbols = str(params.get("symbol", ""))
+        credit_cost = max(1, len([x for x in raw_symbols.split(",") if x.strip()]))
+
     for attempt in range(MAX_RETRIES):
         try:
-            rate_wait()
+            # يمنع أكثر من worker من استهلاك نفس الدقيقة بالتوازي.
+            with TD_CREDIT_GATE_LOCK:
+                _wait_for_td_minute_credit(credit_cost)
+                rate_wait()
 
-            response = session.get(
-                BASE_URL + endpoint,
-                params=params,
-                timeout=(10, 30),
-            )
+                response = session.get(
+                    BASE_URL + endpoint,
+                    params=params,
+                    timeout=(10, 30),
+                )
 
-            left = response.headers.get("api-credits-left")
-            if left is not None:
-                try:
-                    with API_CREDITS_LOCK:
-                        global API_CREDITS_LEFT
-                        API_CREDITS_LEFT = int(float(left))
-                except Exception:
-                    pass
+                left = response.headers.get("api-credits-left")
+                if left is not None:
+                    try:
+                        with API_CREDITS_LOCK:
+                            global API_CREDITS_LEFT
+                            API_CREDITS_LEFT = int(float(left))
+                    except Exception:
+                        pass
 
-            if response.status_code == 429:
-                retry_after = response.headers.get("Retry-After")
-                try:
-                    delay = float(retry_after)
-                except Exception:
-                    delay = min(10, 2 ** attempt)
+                if response.status_code == 429:
+                    retry_after = response.headers.get("Retry-After")
+                    try:
+                        delay = float(retry_after)
+                    except Exception:
+                        delay = min(10, 2 ** attempt)
 
-                time.sleep(delay)
-                continue
+                    time.sleep(delay)
+                    continue
 
-            if response.status_code in (500, 502, 503, 504):
-                time.sleep(min(10, 2 ** attempt))
-                continue
-
-            if response.status_code != 200:
-                return None
-
-            try:
-                data = response.json()
-            except ValueError:
-                return None
-
-            if isinstance(data, dict):
-                status = str(data.get("status", "")).lower()
-
-                if status == "error":
-                    return None
-
-                if data.get("code") in (429, "429"):
+                if response.status_code in (500, 502, 503, 504):
                     time.sleep(min(10, 2 ** attempt))
                     continue
 
-            return data
+                if response.status_code != 200:
+                    return None
+
+                try:
+                    data = response.json()
+                except ValueError:
+                    return None
+
+                if isinstance(data, dict):
+                    status = str(data.get("status", "")).lower()
+
+                    if status == "error":
+                        return None
+
+                    if data.get("code") in (429, "429"):
+                        time.sleep(min(10, 2 ** attempt))
+                        continue
+
+                return data
 
         except (requests.Timeout, requests.ConnectionError):
             if attempt < MAX_RETRIES - 1:
@@ -563,27 +595,17 @@ def _batch_response_items(data):
 
 
 def batch_load_series(symbols, market, interval=PRIMARY_TIMEFRAME):
-    """Load many symbols with Twelve Data's batch /time_series endpoint."""
+    """Load symbols in 8-symbol batches, respecting Twelve Data's 8 credits/minute."""
     if not symbols:
         return 0
 
-    # مهم: حماية الحصة القديمة كانت تبقى = 0 بعد منتصف الليل، فتمنع أول طلب
-    # من اليوم الجديد. نعيد تهيئتها حسب يوم UTC ثم نسمح بأول Batch ليحدّثها.
     reset_credit_state_if_new_utc_day()
-
     loaded = 0
+
     for start in range(0, len(symbols), BATCH_SYMBOLS):
         batch = symbols[start:start + BATCH_SYMBOLS]
-        with API_CREDITS_LOCK:
-            left = API_CREDITS_LEFT
-        if left is not None and left <= CREDIT_RESERVE:
-            print(f"[{market}] 🛡️ حماية الحصة: المتبقي {left} — إيقاف الدورة قبل استنزاف الرصيد")
-            break
-        # إذا كان الرصيد معروفًا وأقل من حجم الدفعة، لا نرسل طلبًا قد يفشل جزئيًا.
-        if left is not None and left < len(batch) + CREDIT_RESERVE:
-            print(f"[{market}] 🛡️ حماية الحصة: المتبقي {left} لا يكفي لدفعة {len(batch)} + احتياطي {CREDIT_RESERVE}")
-            break
 
+        # لا نوقف بسبب api-credits-left=0؛ td_request ينتظر الدقيقة التالية.
         params = {
             "symbol": ",".join(quote(str(x), safe="/:.-") for x in batch),
             "interval": interval,
@@ -601,17 +623,14 @@ def batch_load_series(symbols, market, interval=PRIMARY_TIMEFRAME):
         for key, payload in _batch_response_items(data):
             series = _parse_series_payload(payload)
             if series:
-                # Key is normally the requested symbol. Also cache by exact key.
                 _cache_series(key, market, interval, series)
                 loaded += 1
 
         print(f"[{market}] 📦 Batch {min(start + len(batch), len(symbols))}/{len(symbols)} | loaded={loaded}")
 
-        with API_CREDITS_LOCK:
-            left_after = API_CREDITS_LEFT
-        if left_after is not None and left_after <= CREDIT_RESERVE:
-            print(f"[{market}] 🛡️ الحصة وصلت للاحتياطي {left_after} — إيقاف بقية الدورة")
-            break
+        # لا نعيد طلباً فورياً بعد استهلاك الـ8 credits؛ البوابة الزمنية
+        # في td_request ستنتظر تلقائياً حتى الدقيقة التالية.
+
     return loaded
 
 
@@ -1886,14 +1905,26 @@ def _extract_symbols(data):
 
 
 def get_tasi_symbols():
-    # 🇸🇦 TASI discovery comes from SAHMK; no extra Railway variable is needed.
-    data = sahmk_request(
-        "/companies/",
-        {"market": "TASI", "limit": 2000, "offset": 0},
-    )
+    # 🇸🇦 TASI catalog من SAHMK مع pagination؛ وإذا كان دليل SAHMK أقل من الهدف،
+    # نملأ النقص من Twelve Data بدون تغيير محرك التحليل الفني.
     symbols = []
-    if isinstance(data, dict):
-        for item in data.get("results", []):
+    offset = 0
+    page_size = 200
+
+    while len(symbols) < TASI_MAX_SYMBOLS:
+        data = sahmk_request(
+            "/companies/",
+            {"market": "TASI", "limit": page_size, "offset": offset},
+        )
+        if not isinstance(data, dict):
+            break
+
+        results = data.get("results") or []
+        if not results:
+            break
+
+        before = len(symbols)
+        for item in results:
             if not isinstance(item, dict):
                 continue
             if str(item.get("status", "active")).lower() != "active":
@@ -1902,11 +1933,28 @@ def get_tasi_symbols():
                 continue
             if item.get("symbol"):
                 symbols.append(str(item["symbol"]).strip())
-    if not symbols:
-        # Fallback only for catalog discovery; technical history remains Twelve Data.
-        data = td_request("/stocks", {"exchange": "TADAWUL"})
-        symbols = _extract_symbols(data)
-    return sorted(set(symbols), key=str.upper)[:TASI_MAX_SYMBOLS]
+
+        symbols = list(dict.fromkeys(symbols))
+        total = int(data.get("total") or 0)
+        offset += len(results)
+
+        if offset >= total or len(results) < page_size or len(symbols) == before:
+            break
+
+    symbols = sorted(set(symbols), key=str.upper)
+
+    # إذا كان SAHMK يعرض دليلاً أقل من 374، نكمل الرموز الناقصة من قائمة
+    # Twelve Data فقط حتى يبقى عدد TASI ثابتاً كما طلبت.
+    if len(symbols) < TASI_MAX_SYMBOLS:
+        try:
+            td_data = td_request("/stocks", {"exchange": "TADAWUL"})
+            fallback = _extract_symbols(td_data)
+            merged = list(dict.fromkeys(symbols + fallback))
+            symbols = sorted(merged, key=str.upper)
+        except Exception:
+            pass
+
+    return symbols[:TASI_MAX_SYMBOLS]
 
 
 def get_us_symbols():
