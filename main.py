@@ -153,17 +153,24 @@ series_cache_lock = Lock()
 API_CREDITS_LEFT = None
 API_CREDITS_LOCK = Lock()
 TD_CREDIT_GATE_LOCK = Lock()
+TD_NEXT_SLOT = 0.0
+TD_DAILY_RESERVED = 0
+TD_DAILY_LIMIT = 800
 # يوم UTC الذي ينتمي إليه الرصيد المعروف. عند دخول يوم جديد تُعاد الحالة إلى None
 # حتى يسمح البوت بأول طلب، ثم يقرأ الرصيد الجديد من رأس Twelve Data.
 API_CREDITS_DAY = None
+API_CREDITS_LEFT_AT = 0.0
 
 def reset_credit_state_if_new_utc_day():
-    global API_CREDITS_LEFT, API_CREDITS_DAY
+    global API_CREDITS_LEFT, API_CREDITS_DAY, API_CREDITS_LEFT_AT, TD_NEXT_SLOT, TD_DAILY_RESERVED
     today_utc = datetime.now(timezone.utc).date()
     with API_CREDITS_LOCK:
         if API_CREDITS_DAY != today_utc:
             API_CREDITS_DAY = today_utc
             API_CREDITS_LEFT = None
+            API_CREDITS_LEFT_AT = 0.0
+            TD_DAILY_RESERVED = 0
+            TD_NEXT_SLOT = 0.0
             print(f"🛡️ Twelve Data: يوم UTC جديد {today_utc} — إعادة تهيئة حالة الحصة وانتظار أول رد لتحديث الرصيد")
 
 # 🇺🇸 Stock split cache — لا نطلب التقسيم لكل الأسهم في كل دورة
@@ -298,22 +305,42 @@ def get_sahmk_quote(symbol):
 
 def _wait_for_td_minute_credit(required=1):
     """
-    Twelve Data Basic يعطي 8 API credits لكل دقيقة.
-    إذا كان header السابق يقول 0، ننتظر بداية الدقيقة التالية بدلاً من
-    اعتبار الرصيد اليومي منتهياً. هذا مهم جداً مع Batch requests لأن
-    الـ8 رموز تستهلك 8 credits حتى لو كان الطلب HTTP واحداً.
+    بوابة مركزية واحدة لـ Twelve Data.
+    كل Batch من 8 رموز يحجز خانة زمنية واحدة، بالتتابع، بدل أن
+    تتنافس خيوط TASI/US/CRYPTO وتطبع انتظاراً متكرراً.
     """
+    global TD_NEXT_SLOT, TD_DAILY_RESERVED
     required = max(1, int(required or 1))
+    reset_credit_state_if_new_utc_day()
+
     while True:
         with API_CREDITS_LOCK:
             left = API_CREDITS_LEFT
-        if left is None or left >= required:
-            return
+            left_at = API_CREDITS_LEFT_AT
+            # الرصيد 0 قد يكون من الدقيقة السابقة؛ لا نسمح له بمنع أول طلب في الدقيقة الجديدة.
+            stale_minute = left is not None and left_at > 0 and (time.time() - left_at) >= 60.0
+            if left is not None and left < required and not stale_minute:
+                now = time.time()
+                wait_seconds = 60.0 - (now % 60.0) + 0.15
+                print(f"🕐 Twelve Data: المتبقي {left} لا يكفي لطلب يحتاج {required} — انتظار {wait_seconds:.1f}s للدقيقة التالية")
+            elif TD_DAILY_RESERVED + required > TD_DAILY_LIMIT:
+                print(f"🛡️ Twelve Data: تم حجز الحد اليومي {TD_DAILY_RESERVED}/{TD_DAILY_LIMIT} — إيقاف طلبات جديدة حتى يوم UTC التالي")
+                return False
+            else:
+                now = time.time()
+                slot = max(now, TD_NEXT_SLOT)
+                TD_NEXT_SLOT = slot + 60.0
+                TD_DAILY_RESERVED += required
+                wait_seconds = max(0.0, slot - now)
+                if wait_seconds > 0.1:
+                    print(f"🕐 Twelve Data: حجز Batch مركزي — الانتظار {wait_seconds:.1f}s")
+                break
 
-        now = time.time()
-        wait_seconds = 60.0 - (now % 60.0) + 0.15
-        print(f"🕐 Twelve Data: المتبقي {left} لا يكفي لطلب يحتاج {required} — انتظار {wait_seconds:.1f}s للدقيقة التالية")
+        time.sleep(min(wait_seconds, 60.0))
+
+    if wait_seconds > 0:
         time.sleep(wait_seconds)
+    return True
 
 
 def td_request(endpoint, params=None):
@@ -344,7 +371,8 @@ def td_request(endpoint, params=None):
         try:
             # يمنع أكثر من worker من استهلاك نفس الدقيقة بالتوازي.
             with TD_CREDIT_GATE_LOCK:
-                _wait_for_td_minute_credit(credit_cost)
+                if not _wait_for_td_minute_credit(credit_cost):
+                    return None
                 rate_wait()
 
                 response = session.get(
@@ -357,8 +385,9 @@ def td_request(endpoint, params=None):
                 if left is not None:
                     try:
                         with API_CREDITS_LOCK:
-                            global API_CREDITS_LEFT
+                            global API_CREDITS_LEFT, API_CREDITS_LEFT_AT
                             API_CREDITS_LEFT = int(float(left))
+                            API_CREDITS_LEFT_AT = time.time()
                     except Exception:
                         pass
 
