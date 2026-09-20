@@ -47,6 +47,12 @@ DOWN_GIF = os.path.join(DIRECTION_GIF_DIR, "red_down.gif")
 # ============================================================
 
 BASE_URL = "https://api.twelvedata.com"
+SAHMK_BASE = "https://api.sahmk.sa/api/v1"
+
+# TASI: SAHMK current quote; Twelve Data remains the technical-history engine.
+SAHMK_QUOTE_CACHE = {}
+SAHMK_QUOTE_CACHE_TTL = 120
+SAHMK_QUOTE_LOCK = Lock()
 
 # لا نفتح آلاف الاتصالات معًا
 MAX_WORKERS = 4
@@ -145,6 +151,18 @@ series_cache_lock = Lock()
 # حتى لا نستهلك رصيدًا إضافيًا.
 API_CREDITS_LEFT = None
 API_CREDITS_LOCK = Lock()
+# يوم UTC الذي ينتمي إليه الرصيد المعروف. عند دخول يوم جديد تُعاد الحالة إلى None
+# حتى يسمح البوت بأول طلب، ثم يقرأ الرصيد الجديد من رأس Twelve Data.
+API_CREDITS_DAY = None
+
+def reset_credit_state_if_new_utc_day():
+    global API_CREDITS_LEFT, API_CREDITS_DAY
+    today_utc = datetime.now(timezone.utc).date()
+    with API_CREDITS_LOCK:
+        if API_CREDITS_DAY != today_utc:
+            API_CREDITS_DAY = today_utc
+            API_CREDITS_LEFT = None
+            print(f"🛡️ Twelve Data: يوم UTC جديد {today_utc} — إعادة تهيئة حالة الحصة وانتظار أول رد لتحديث الرصيد")
 
 # 🇺🇸 Stock split cache — لا نطلب التقسيم لكل الأسهم في كل دورة
 SPLIT_CACHE_TTL = 86400
@@ -225,6 +243,55 @@ def rate_wait():
             time.sleep(wait)
 
         last_request_time = time.monotonic()
+
+
+def sahmk_request(endpoint, params=None):
+    """SAHMK REST client for Saudi market quotes. Uses existing Railway key only."""
+    if not SAHMK_API_KEY:
+        return None
+    try:
+        response = requests.get(
+            SAHMK_BASE + endpoint,
+            params=params or {},
+            headers={"X-API-Key": SAHMK_API_KEY},
+            timeout=(10, 20),
+        )
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def get_sahmk_quote(symbol):
+    now = time.time()
+    with SAHMK_QUOTE_LOCK:
+        cached = SAHMK_QUOTE_CACHE.get(str(symbol))
+        if cached and now - cached["updated"] < SAHMK_QUOTE_CACHE_TTL:
+            return cached["data"]
+
+    data = sahmk_request(f"/quote/{quote(str(symbol), safe='')}/", {"data_mode": "delayed"})
+    if not data:
+        return None
+
+    try:
+        result = {
+            "symbol": str(data.get("symbol") or symbol),
+            "name": str(data.get("name") or data.get("name_en") or ""),
+            "price": float(data["price"]),
+            "volume": float(data.get("volume", 0) or 0),
+            "change": float(data.get("change", 0) or 0),
+            "change_percent": float(data.get("change_percent", 0) or 0),
+            "updated_at": data.get("updated_at"),
+            "is_delayed": bool(data.get("is_delayed", True)),
+        }
+    except (TypeError, ValueError, KeyError):
+        return None
+
+    with SAHMK_QUOTE_LOCK:
+        SAHMK_QUOTE_CACHE[str(symbol)] = {"updated": now, "data": result}
+    return result
 
 
 def td_request(endpoint, params=None):
@@ -499,6 +566,11 @@ def batch_load_series(symbols, market, interval=PRIMARY_TIMEFRAME):
     """Load many symbols with Twelve Data's batch /time_series endpoint."""
     if not symbols:
         return 0
+
+    # مهم: حماية الحصة القديمة كانت تبقى = 0 بعد منتصف الليل، فتمنع أول طلب
+    # من اليوم الجديد. نعيد تهيئتها حسب يوم UTC ثم نسمح بأول Batch ليحدّثها.
+    reset_credit_state_if_new_utc_day()
+
     loaded = 0
     for start in range(0, len(symbols), BATCH_SYMBOLS):
         batch = symbols[start:start + BATCH_SYMBOLS]
@@ -1247,10 +1319,10 @@ def _analyze_symbol_interval(symbol, market, interval):
     if not closes:
         return None
     price = closes[-1]
+    previous_close = closes[-2] if len(closes) >= 2 else None
+
     if market == "US" and price < MIN_US_PRICE:
         return None
-
-    previous_close = closes[-2] if len(closes) >= 2 else None
     e8 = ema(closes, EMA_FAST)
     e21 = ema(closes, EMA_MID)
     e50 = ema(closes, EMA_SLOW)
@@ -1282,6 +1354,13 @@ def _analyze_symbol_interval(symbol, market, interval):
         signal, signal_text = "SELL", "🔴 بيع قوي — EMA"
     else:
         signal, signal_text = "WAIT", "⚪ انتظار"
+
+    # 🇸🇦 TASI: بعد ظهور إشارة فقط، نتحقق من السعر الحالي من SAHMK.
+    # هذا يحافظ على حصة SAHMK؛ الفحص الفني الكامل يبقى على Twelve Data.
+    sahmk_quote = get_sahmk_quote(symbol) if (market == "TASI" and signal != "WAIT") else None
+    if sahmk_quote:
+        price = sahmk_quote["price"]
+        company_name = sahmk_quote.get("name") or company_name
 
     score = (
         (30 if (pine["ema200"] is not None and (price > pine["ema200"] or price < pine["ema200"])) else 0)
@@ -1807,12 +1886,27 @@ def _extract_symbols(data):
 
 
 def get_tasi_symbols():
-    data = td_request(
-        "/stocks",
-        {"exchange": "TADAWUL"},
+    # 🇸🇦 TASI discovery comes from SAHMK; no extra Railway variable is needed.
+    data = sahmk_request(
+        "/companies/",
+        {"market": "TASI", "limit": 2000, "offset": 0},
     )
-
-    return sorted(set(_extract_symbols(data)), key=str.upper)[:TASI_MAX_SYMBOLS]
+    symbols = []
+    if isinstance(data, dict):
+        for item in data.get("results", []):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("status", "active")).lower() != "active":
+                continue
+            if str(item.get("security_type", "Equity")).lower() != "equity":
+                continue
+            if item.get("symbol"):
+                symbols.append(str(item["symbol"]).strip())
+    if not symbols:
+        # Fallback only for catalog discovery; technical history remains Twelve Data.
+        data = td_request("/stocks", {"exchange": "TADAWUL"})
+        symbols = _extract_symbols(data)
+    return sorted(set(symbols), key=str.upper)[:TASI_MAX_SYMBOLS]
 
 
 def get_us_symbols():
@@ -2071,7 +2165,8 @@ def main():
         print("❌ CHAT_ID غير موجود")
         return
 
-    print("🟢 Twelve Data API: OK | Railway: TWELVEDATA_API_KEY / API")
+    print("🟢 Twelve Data API: OK | 🇺🇸 US + 🪙 CRYPTO + TASI technical history")
+    print("🟢 SAHMK API: OK | 🇸🇦 TASI catalog + signal-price verification")
     print("🟢 CHAT_ID: OK")
 
     if ensure_direction_gifs():
