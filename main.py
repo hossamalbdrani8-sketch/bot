@@ -60,6 +60,10 @@ RIYADH = ZoneInfo("Asia/Riyadh")
 # Keep a safety margin below the 800/day Basic quota.
 TD_DAILY_LIMIT = 700
 TD_PER_MINUTE_LIMIT = 8
+# Global per-minute budget shared by US + CRYPTO + NEWS.
+# Only one market batch can consume the 8 credits in a given minute.
+TD_MINUTE_USED = 0
+TD_MINUTE_ID = None
 
 # Do not use /api_usage: it consumes quota.
 # The response headers are used when Twelve Data returns them.
@@ -70,6 +74,7 @@ TD_DAY = None
 
 td_budget_lock = Lock()
 td_request_lock = Lock()
+td_minute_condition = threading.Condition(td_budget_lock)
 td_last_request = 0.0
 
 # Minimum spacing between Twelve Data HTTP requests.
@@ -214,6 +219,7 @@ def get_session():
 def reset_td_day():
     global TD_CREDITS_LEFT, TD_CREDITS_LEFT_AT
     global TD_RESERVED_TODAY, TD_DAY, td_last_request
+    global TD_MINUTE_USED, TD_MINUTE_ID
 
     today = datetime.now(timezone.utc).date()
 
@@ -223,6 +229,8 @@ def reset_td_day():
             TD_CREDITS_LEFT = None
             TD_CREDITS_LEFT_AT = 0.0
             TD_RESERVED_TODAY = 0
+            TD_MINUTE_USED = 0
+            TD_MINUTE_ID = int(time.time() // 60)
 
     with td_request_lock:
         td_last_request = 0.0
@@ -230,26 +238,50 @@ def reset_td_day():
 
 def td_reserve(cost=1):
     """
-    Reserve credits before making a Twelve Data request.
-    Never deliberately targets the provider's full 800/day quota.
+    Global Twelve Data quota gate.
+
+    Basic has 8 API credits/minute and 800/day. US and CRYPTO share the
+    same key, so they MUST share one minute bucket. This function waits for
+    the next UTC minute instead of firing requests that produce 429s.
+    A hard daily ceiling is also enforced.
     """
-    global TD_RESERVED_TODAY
+    global TD_RESERVED_TODAY, TD_MINUTE_USED, TD_MINUTE_ID
 
-    reset_td_day()
     cost = max(1, int(cost))
+    if cost > TD_PER_MINUTE_LIMIT:
+        print(f"🛑 Twelve Data: batch cost {cost} exceeds minute limit {TD_PER_MINUTE_LIMIT}")
+        return False
 
-    with td_budget_lock:
-        # If a fresh provider header says less than cost is available,
-        # stop immediately.
-        if TD_CREDITS_LEFT is not None:
-            if (time.time() - TD_CREDITS_LEFT_AT) < 60 and TD_CREDITS_LEFT < cost:
+    while True:
+        reset_td_day()
+        now = time.time()
+        minute_id = int(now // 60)
+
+        with td_minute_condition:
+            if TD_MINUTE_ID != minute_id:
+                TD_MINUTE_ID = minute_id
+                TD_MINUTE_USED = 0
+                td_minute_condition.notify_all()
+
+            # Never exceed the local daily ceiling.
+            if TD_RESERVED_TODAY + cost > TD_DAILY_LIMIT:
                 return False
 
-        if TD_RESERVED_TODAY + cost > TD_DAILY_LIMIT:
-            return False
+            # One shared 8-credit bucket for BOTH US and CRYPTO.
+            if TD_MINUTE_USED + cost <= TD_PER_MINUTE_LIMIT:
+                TD_MINUTE_USED += cost
+                TD_RESERVED_TODAY += cost
+                return True
 
-        TD_RESERVED_TODAY += cost
-        return True
+            # Wait until the next UTC minute. No 429 request is sent.
+            seconds_to_next_minute = 60.0 - (now % 60.0) + 0.15
+            print(
+                f"⏳ Twelve Data: الدقيقة ممتلئة "
+                f"({TD_MINUTE_USED}/{TD_PER_MINUTE_LIMIT}) — "
+                f"انتظار {seconds_to_next_minute:.1f}s"
+            )
+
+        time.sleep(max(0.5, seconds_to_next_minute))
 
 
 def td_rate_wait():
@@ -276,7 +308,7 @@ def td_request(endpoint, params=None, credit_cost=1):
         return None
 
     if not td_reserve(credit_cost):
-        print(f"🛡️ Twelve Data: request blocked by local quota gate -> {endpoint}")
+        print(f"🛡️ Twelve Data: الطلب موقوف محليًا لحماية الحصة -> {endpoint}")
         return None
 
     params = dict(params or {})
@@ -308,7 +340,7 @@ def td_request(endpoint, params=None, credit_cost=1):
                     pass
 
             if response.status_code == 429:
-                print("🟠 Twelve Data: 429 — request stopped")
+                print("🟠 Twelve Data: 429 — لن تتم إعادة المحاولة، وستنتقل الدفعة التالية للدقيقة القادمة")
                 return None
 
             if response.status_code in (500, 502, 503, 504):
@@ -587,14 +619,10 @@ def batch_load_series(symbols, market, interval=PRIMARY_TIMEFRAME):
             credit_cost=cost,
         )
 
-        if data is None and market == "US":
-            params.pop("prepost", None)
-            data = td_request(
-                "/time_series",
-                params,
-                credit_cost=cost,
-            )
-
+        # IMPORTANT: never retry the same batch immediately with another
+        # paid request. On Basic, every symbol costs 1 credit and retries can
+        # burn the remaining minute budget. The next scheduled minute/pass
+        # will retry naturally.
         if data is None:
             continue
 
