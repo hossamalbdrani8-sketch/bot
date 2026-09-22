@@ -17,8 +17,7 @@ from aiohttp import web
 # ⚙️ RAILWAY VARIABLES
 # ============================================================
 
-TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY", "").strip()
-
+TWELVE_DATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "").strip()
 TASI_TOKEN = os.getenv("TASI_TOKEN", "").strip()
 US_TOKEN = os.getenv("US_TOKEN", "").strip()
 CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN", "").strip()
