@@ -30,7 +30,14 @@ MIN_US_PRICE = float(os.getenv("MIN_US_PRICE", "0.15"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
 MAX_CONNECTIONS = int(os.getenv("MAX_CONNECTIONS", "8"))
 SIGNAL_COOLDOWN = int(os.getenv("SIGNAL_COOLDOWN", "1800"))
-CATALOG_REFRESH_SECONDS = int(os.getenv("SYMBOL_REFRESH_SECONDS", "21600"))
+CATALOG_REFRESH_SECONDS = int(os.getenv("SYMBOL_REFRESH_SECONDS", "86400"))
+
+# Twelve Data safety limits (keep a buffer below the user's 8/min and 800/day plan).
+TD_MINUTE_LIMIT = int(os.getenv("TD_MINUTE_LIMIT", "7"))
+TD_DAILY_BUDGET = int(os.getenv("TD_DAILY_BUDGET", "650"))
+TD_WINDOW_SECONDS = 60
+TD_DAY_SECONDS = 86400
+td_request_times = []
 
 # Rotation sizes. The catalog remains COMPLETE; only a rotating batch is queried each cycle.
 # This avoids pretending that a free API quota can query every US/crypto symbol every 2 minutes.
@@ -40,6 +47,7 @@ TASI_BATCH_SIZE = int(os.getenv("TASI_BATCH_SIZE", "25"))
 
 # US news cache: news is fetched for a US symbol when a signal is generated, then cached.
 NEWS_CACHE_SECONDS = int(os.getenv("NEWS_CACHE_SECONDS", "21600"))
+TD_HISTORY_CACHE_SECONDS = int(os.getenv("TD_HISTORY_CACHE_SECONDS", "1500"))
 
 # ============================================================
 # 🧠 MEMORY
@@ -108,6 +116,27 @@ async def http_json(url, params=None, headers=None):
 async def twelve(endpoint, params=None):
     if not TWELVE_DATA_API_KEY:
         raise RuntimeError("متغير TWELVEDATA_API_KEY غير موجود")
+
+    # Hard safety gate: never intentionally exceed the user's Twelve Data plan.
+    # We keep one credit/minute and 150 credits/day as a safety buffer.
+    while True:
+        now = time.time()
+        td_request_times[:] = [t for t in td_request_times if now - t < TD_DAY_SECONDS]
+
+        if len(td_request_times) >= TD_DAILY_BUDGET:
+            raise RuntimeError(
+                f"Twelve Data daily safety budget reached ({TD_DAILY_BUDGET}); request skipped"
+            )
+
+        recent = [t for t in td_request_times if now - t < TD_WINDOW_SECONDS]
+        if len(recent) < TD_MINUTE_LIMIT:
+            td_request_times.append(now)
+            break
+
+        sleep_for = max(0.5, TD_WINDOW_SECONDS - (now - min(recent)) + 0.1)
+        log(f"⏳ Twelve Data rate-limit: انتظار {sleep_for:.1f} ثانية")
+        await asyncio.sleep(sleep_for)
+
     query = dict(params or {})
     query["apikey"] = TWELVE_DATA_API_KEY
     return await http_json("https://api.twelvedata.com/" + endpoint.lstrip("/"), query)
@@ -381,7 +410,7 @@ async def get_td_history(item, market):
     key = (market, item["symbol"], item.get("exchange", ""))
     cached = history_cache.get(key)
     now = time.time()
-    if cached and now - cached["time"] < 21600:
+    if cached and now - cached["time"] < TD_HISTORY_CACHE_SECONDS:
         return cached["data"]
     params = {"symbol": item["symbol"], "interval": "1day", "outputsize": 100}
     if item.get("exchange"):
@@ -730,25 +759,36 @@ def can_send(signal):
 # ============================================================
 async def process_symbol(market, item):
     if market == "TASI":
+        # TASI is 100% SAHMK — Twelve Data is never used here.
         quote = await get_tasi_quote(item)
         if not quote:
             return
         rows = await get_tasi_history(item)
-    elif market == "US":
-        quote = await get_us_quote(item)
-        if not quote:
+    else:
+        # US + CRYPTO use Twelve Data only. One time_series call provides
+        # current/latest OHLCV plus the historical data needed by the analyzer.
+        rows = await get_td_history(item, market)
+        if not rows or len(rows) < 2:
             return
         try:
-            if float(quote.get("close", 0)) < MIN_US_PRICE:
+            latest = rows[-1]
+            previous = rows[-2]
+            price = float(latest.get("close", 0))
+            previous_close = float(previous.get("close", 0))
+            if price <= 0:
                 return
-        except Exception:
+            if market == "US" and price < MIN_US_PRICE:
+                return
+            change = ((price - previous_close) / previous_close * 100) if previous_close else 0.0
+            quote = {
+                "symbol": item["symbol"],
+                "name": item.get("name", item["symbol"]),
+                "close": price,
+                "percent_change": change,
+            }
+        except Exception as exc:
+            log(f"ℹ️ تجهيز {market} {item.get('symbol','')}: {exc}")
             return
-        rows = await get_td_history(item, market)
-    else:
-        quote = await get_crypto_quote(item)
-        if not quote:
-            return
-        rows = await get_td_history(item, market)
 
     if not rows:
         return
@@ -850,6 +890,9 @@ async def health(request):
         "symbols": {m: len(symbols_cache[m]) for m in symbols_cache},
         "telegram": {"TASI": bool(TASI_TOKEN), "US": bool(US_TOKEN), "CRYPTO": bool(CRYPTO_TOKEN)},
         "twelve_data": bool(TWELVE_DATA_API_KEY),
+        "twelve_data_minute_limit": TD_MINUTE_LIMIT,
+        "twelve_data_daily_budget": TD_DAILY_BUDGET,
+        "twelve_data_used_since_start": len(td_request_times),
         "sahmk": bool(SAHMK_API_KEY),
     })
 
@@ -918,6 +961,10 @@ async def main():
     log(f"📰 US NEWS: Twelve Data press releases")
     log(f"💵 US minimum price: ${MIN_US_PRICE:.2f}")
     log(f"🔄 rotation: every {SCAN_SECONDS} seconds")
+    log(f"🛡️ Twelve Data safety: {TD_MINUTE_LIMIT}/minute | {TD_DAILY_BUDGET}/24h")
+    log("🇸🇦 TASI source: SAHMK only")
+    log("🇺🇸 US source: Twelve Data only")
+    log("🪙 CRYPTO source: Twelve Data only")
     log("📚 US catalog: FULL / random A-Z")
     log("📚 TASI catalog: FULL active equities")
     log("📚 CRYPTO catalog: FULL available catalog")
