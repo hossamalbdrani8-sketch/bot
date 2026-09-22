@@ -1,5 +1,2 @@
-Flask>=3.0,<4
+aiohttp>=3.10,<4
 requests>=2.31,<3
-gunicorn>=22,<24
-pandas>=2.2,<3
-numpy>=1.26,<3
