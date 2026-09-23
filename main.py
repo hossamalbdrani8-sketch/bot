@@ -67,6 +67,7 @@ us_order = []
 crypto_order = []
 scan_number = 0
 session = None
+catalog_tasks = {}
 
 # ============================================================
 # 📝 LOG
@@ -249,52 +250,73 @@ async def get_paginated_twelve_catalog(endpoint, base_params=None, max_pages=100
         if not rows:
             break
         rows_all.extend(rows)
-        # The docs expose count/page; stop on a short final page.
         if len(rows) < 100:
             break
     return rows_all
 
 
-async def get_us_symbols():
-    rows = await get_paginated_twelve_catalog(
-        "stocks",
-        {"country": "United States", "type": "Common Stock"},
-    )
-    out = []
-    for item in rows:
-        if not isinstance(item, dict):
-            continue
-        symbol = str(item.get("symbol", "")).strip()
-        if not symbol:
-            continue
-        out.append({
+async def get_twelve_catalog_page(endpoint, base_params=None, page=1):
+    params = dict(base_params or {})
+    params["page"] = page
+    data = await twelve(endpoint, params)
+    return extract_rows(data)
+
+
+def catalog_item(market, item):
+    if not isinstance(item, dict):
+        return None
+    symbol = str(item.get("symbol", "")).strip()
+    if not symbol:
+        return None
+    if market == "US":
+        return {
             "symbol": symbol,
             "name": str(item.get("name", symbol)).strip(),
             "exchange": str(item.get("exchange", "")).strip(),
-        })
-    out = unique_items(out)
-    out.sort(key=lambda x: x["symbol"].upper())
-    return out
+        }
+    exchanges = item.get("available_exchanges") or []
+    return {
+        "symbol": symbol,
+        "name": str(item.get("currency_base") or item.get("name") or symbol).strip(),
+        "exchange": str(exchanges[0]).strip() if exchanges else "",
+    }
 
 
-async def get_crypto_symbols():
-    rows = await get_paginated_twelve_catalog("cryptocurrencies")
-    out = []
-    for item in rows:
-        if not isinstance(item, dict):
+def append_catalog_rows(market, rows):
+    existing = symbols_cache[market]
+    seen = {(x["symbol"], x.get("exchange", "")) for x in existing}
+    added = 0
+    for raw in rows:
+        item = catalog_item(market, raw)
+        if not item:
             continue
-        symbol = str(item.get("symbol", "")).strip()
-        if not symbol:
+        key = (item["symbol"], item.get("exchange", ""))
+        if key in seen:
             continue
-        exchanges = item.get("available_exchanges") or []
-        out.append({
-            "symbol": symbol,
-            "name": str(item.get("currency_base") or item.get("name") or symbol).strip(),
-            "exchange": str(exchanges[0]).strip() if exchanges else "",
-        })
-    out = unique_items(out)
-    out.sort(key=lambda x: x["symbol"].upper())
-    return out
+        seen.add(key)
+        existing.append(item)
+        added += 1
+    existing.sort(key=lambda x: x["symbol"].upper())
+    return added
+
+
+async def complete_td_catalog(market, endpoint, base_params, next_page):
+    """Continue catalog discovery in the background so scanning never waits for it."""
+    try:
+        page = next_page
+        while page <= 1000:
+            rows = await get_twelve_catalog_page(endpoint, base_params, page)
+            if not rows:
+                break
+            added = append_catalog_rows(market, rows)
+            log(f"📚 {market}: صفحة {page} | +{added} | الإجمالي {len(symbols_cache[market])}")
+            if len(rows) < 100:
+                break
+            page += 1
+    except Exception as exc:
+        log(f"ℹ️ {market}: استكمال الكتالوج توقف: {exc}")
+    finally:
+        catalog_tasks.pop(market, None)
 
 
 async def load_market_symbols(market, force=False):
@@ -304,37 +326,35 @@ async def load_market_symbols(market, force=False):
     try:
         if market == "TASI":
             symbols = await get_tasi_symbols()
-        elif market == "US":
-            symbols = await get_us_symbols()
+            symbols_cache[market] = symbols
         else:
-            symbols = await get_crypto_symbols()
-        symbols_cache[market] = symbols
+            endpoint = "stocks" if market == "US" else "cryptocurrencies"
+            base_params = {"country": "United States", "type": "Common Stock"} if market == "US" else {}
+            rows = await get_twelve_catalog_page(endpoint, base_params, 1)
+            symbols_cache[market] = []
+            append_catalog_rows(market, rows)
+            if market not in catalog_tasks:
+                catalog_tasks[market] = asyncio.create_task(
+                    complete_td_catalog(market, endpoint, base_params, 2)
+                )
         symbols_cache_time[market] = now
 
         if market == "TASI":
             rotation["TASI"] = 0
         elif market == "US":
             global us_order
-            us_order = build_random_alphabet_order(symbols)
+            us_order = build_random_alphabet_order(symbols_cache[market])
             rotation["US"] = 0
         elif market == "CRYPTO":
             global crypto_order
-            crypto_order = list(range(len(symbols)))
+            crypto_order = list(range(len(symbols_cache[market])))
             random.shuffle(crypto_order)
             rotation["CRYPTO"] = 0
 
-        log(f"✅ {market}: تم تحميل {len(symbols)} رمز")
+        log(f"✅ {market}: جاهز للفحص الآن — {len(symbols_cache[market])} رمز محمل")
     except Exception as exc:
         log(f"ℹ️ {market}: تعذر تحميل القائمة: {exc}")
 
-
-async def load_symbols(force=False):
-    await asyncio.gather(
-        load_market_symbols("TASI", force),
-        load_market_symbols("US", force),
-        load_market_symbols("CRYPTO", force),
-        return_exceptions=True,
-    )
 
 # ============================================================
 # 🎲 ORDER — US STARTS AT RANDOM LETTER, NOT ALWAYS A
@@ -350,13 +370,19 @@ def build_random_alphabet_order(items):
 
 
 def next_order_batch(market, size):
+    global us_order, crypto_order
     items = symbols_cache.get(market, [])
     if not items:
         return []
     if market == "US":
-        order = us_order or list(range(len(items)))
+        if not us_order or len(us_order) != len(items):
+            us_order = build_random_alphabet_order(items)
+        order = us_order
     elif market == "CRYPTO":
-        order = crypto_order or list(range(len(items)))
+        if not crypto_order or len(crypto_order) != len(items):
+            crypto_order = list(range(len(items)))
+            random.shuffle(crypto_order)
+        order = crypto_order
     else:
         order = list(range(len(items)))
     pos = rotation[market] % len(order)
@@ -1090,22 +1116,25 @@ async def full_scan():
     log(f"💀🚀 AI PRO MAX SCAN #{scan_number}")
     log("=" * 60)
 
-    await load_symbols(force=False)
+    # Load each provider independently. TASI 429 must never delay US/CRYPTO.
+    await asyncio.gather(
+        load_market_symbols("TASI", False),
+        load_market_symbols("US", False),
+        load_market_symbols("CRYPTO", False),
+        return_exceptions=True,
+    )
 
-    # 🇸🇦 TASI: SAHMK ONLY. Free plan is one quote per symbol, so rotate
-    # through the complete catalog instead of attempting a bulk request.
-    # The catalog itself is loaded once per process and the quote rotation
-    # continues 24/7 as quota permits.
+    # Start US/CRYPTO immediately and keep TASI independent.
     tasi_batch = next_order_batch("TASI", TASI_BATCH_SIZE)
-    await scan_market_batch("TASI", tasi_batch)
-
-    # 🇺🇸 US + 🪙 CRYPTO: Twelve Data ONLY, completely independent from SAHMK.
-    # US starts from a random alphabetical point, then continues A→Z and wraps.
-    # alphabetical point, then continues A→Z and wraps around.
     us_batch = next_order_batch("US", US_BATCH_SIZE)
     crypto_batch = next_order_batch("CRYPTO", CRYPTO_BATCH_SIZE)
-    await scan_market_batch("US", us_batch)
-    await scan_market_batch("CRYPTO", crypto_batch)
+
+    await asyncio.gather(
+        scan_market_batch("US", us_batch),
+        scan_market_batch("CRYPTO", crypto_batch),
+        scan_market_batch("TASI", tasi_batch),
+        return_exceptions=True,
+    )
 
     td_min, td_day, td_budget = td_limiter.status()
     sm_min, sm_day, sm_budget = sahmk_limiter.status()
@@ -1254,7 +1283,14 @@ async def main():
             for market in telegram_chats:
                 telegram_chats[market].add(chat)
         except Exception:
-            pass
+            log("ℹ️ CHAT_ID غير صالح")
+
+    # Confirm Telegram delivery immediately; do not wait for a trading signal.
+    for market in ("US", "CRYPTO", "TASI"):
+        token = token_for_market(market)
+        if token and CHAT_ID:
+            ok = await telegram_send(token, CHAT_ID, startup_message(market))
+            log(f"📩 Telegram {market}: اختبار التشغيل {'OK' if ok else 'FAILED'}")
 
     try:
         await scanner_loop()
