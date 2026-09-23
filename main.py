@@ -889,7 +889,6 @@ def startup_message(market):
         "🛡️ الدعم / 🚧 المقاومة\n"
         "🎯 TP1 → TP8 → TP9 → TP10 → …\n"
         "🚫 منع تكرار الإشارة\n"
-        "⚡️ TASI يبدأ من أول فحص؛ لا يوجد تاريخ محلي"
     )
 
 
@@ -945,9 +944,6 @@ def signal_text(signal, news=None):
         f"🛡️ الدعم: {number(signal.get('support'))}",
         f"🚧 المقاومة: {number(signal.get('resistance'))}",
     ]
-
-    if market == "TASI" and signal.get("mode") == "TASI_FIRST_SCAN":
-        lines += ["", "⚡️ أول فحص مباشر من SAHMK", "ℹ️ EMA/RSI/ATR/VWAP التاريخية غير متاحة من SAHMK Free بدون Historical API"]
 
     lines += ["", "🎯 الأهداف:"]
     for i, target in enumerate(signal["targets"], 1):
