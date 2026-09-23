@@ -43,7 +43,7 @@ SAHMK_DAILY_BUDGET = int(os.getenv("SAHMK_DAILY_BUDGET", "100"))
 
 # Batch sizes are deliberately small because each US/crypto symbol uses a
 # Twelve Data time-series request and each TASI symbol uses one SAHMK quote.
-TASI_BATCH_SIZE = int(os.getenv("TASI_BATCH_SIZE", "50"))
+TASI_BATCH_SIZE = int(os.getenv("TASI_BATCH_SIZE", "8"))
 US_BATCH_SIZE = int(os.getenv("US_BATCH_SIZE", "4"))
 CRYPTO_BATCH_SIZE = int(os.getenv("CRYPTO_BATCH_SIZE", "4"))
 
@@ -66,7 +66,6 @@ rotation = {"TASI": 0, "US": 0, "CRYPTO": 0}
 us_order = []
 crypto_order = []
 scan_number = 0
-last_tasi_full_scan = 0.0
 session = None
 
 # ============================================================
@@ -136,7 +135,7 @@ class RateLimiter:
 
 
 td_limiter = RateLimiter(TD_REQUESTS_PER_MINUTE, TD_DAILY_BUDGET, "Twelve Data")
-sahmk_limiter = RateLimiter(8, SAHMK_DAILY_BUDGET, "SAHMK")
+sahmk_limiter = RateLimiter(10, SAHMK_DAILY_BUDGET, "SAHMK")
 
 # ============================================================
 # 🌐 API CLIENTS
@@ -205,37 +204,36 @@ def unique_items(items):
 
 
 async def get_tasi_symbols():
-    """Load the TASI company directory from SAHMK, excluding ETFs/non-equities."""
+    """Load the complete TASI equity catalog from SAHMK only.
+
+    This function is catalog discovery only; it never calls Twelve Data.
+    We request a large page first so the Free daily quota is not wasted on
+    multiple catalog pages when the provider returns the full catalog.
+    """
     symbols = []
-    limit = 100
-    offset = 0
-    while len(symbols) < 500:
-        data = await sahmk("companies/", {"market": "TASI", "limit": limit, "offset": offset})
-        rows = extract_rows(data)
-        if not rows:
-            break
-        for item in rows:
-            if not isinstance(item, dict) or item.get("is_etf"):
-                continue
-            security_type = str(item.get("security_type", "")).upper()
-            if security_type not in ("", "EQUITY", "STOCK", "COMMON_STOCK"):
-                continue
-            symbol = str(item.get("symbol", "")).strip()
-            if symbol:
-                symbols.append({
-                    "symbol": symbol,
-                    "name": str(item.get("name_ar") or item.get("name_en") or symbol).strip(),
-                    "exchange": "TASI",
-                })
-        if len(rows) < limit:
-            break
-        offset += limit
+    data = await sahmk("companies/", {"market": "TASI", "limit": 500, "offset": 0})
+    rows = extract_rows(data)
+
+    for item in rows:
+        if not isinstance(item, dict) or item.get("is_etf"):
+            continue
+        security_type = str(item.get("security_type", "")).upper()
+        if security_type not in ("", "EQUITY", "STOCK", "COMMON_STOCK"):
+            continue
+        symbol = str(item.get("symbol", "")).strip()
+        if symbol:
+            symbols.append({
+                "symbol": symbol,
+                "name": str(item.get("name_ar") or item.get("name_en") or symbol).strip(),
+                "exchange": "TASI",
+            })
+
     unique = {}
     for item in symbols:
         unique[item["symbol"]] = item
     result = list(unique.values())
-    # Keep the provider's actual symbol; only sort the catalog for stable rotation.
     result.sort(key=lambda x: x["symbol"])
+    log(f"📋 SAHMK TASI catalog: {len(result)} equities")
     return result
 
 
@@ -313,7 +311,9 @@ async def load_market_symbols(market, force=False):
         symbols_cache[market] = symbols
         symbols_cache_time[market] = now
 
-        if market == "US":
+        if market == "TASI":
+            rotation["TASI"] = 0
+        elif market == "US":
             global us_order
             us_order = build_random_alphabet_order(symbols)
             rotation["US"] = 0
@@ -389,30 +389,6 @@ def normalize_quote(data, item):
         "bid": first("bid", default=0),
         "ask": first("ask", default=0),
     }
-
-
-async def get_tasi_quotes_bulk(items):
-    """SAHMK Free supports bulk quotes up to 50 symbols per request.
-    This lets the bot cover the complete TASI catalog without spending one
-    daily API call per stock.
-    """
-    if not items:
-        return {}
-    result = {}
-    for start in range(0, len(items), 50):
-        chunk = items[start:start + 50]
-        symbols = ",".join(x["symbol"] for x in chunk)
-        try:
-            data = await sahmk("quotes/", {"symbols": symbols})
-            rows = data.get("quotes", []) if isinstance(data, dict) else []
-            by_symbol = {str(x.get("symbol", "")).strip(): x for x in rows if isinstance(x, dict)}
-            for item in chunk:
-                payload = by_symbol.get(item["symbol"])
-                if payload:
-                    result[item["symbol"]] = normalize_quote(payload, item)
-        except Exception as exc:
-            log(f"ℹ️ SAHMK Bulk TASI {start + 1}-{start + len(chunk)}: {exc}")
-    return result
 
 
 async def get_tasi_quote(item):
@@ -1091,10 +1067,11 @@ async def scan_market_batch(market, batch):
         return
     log(f"🔎 {market}: فحص دفعة {len(batch)} رمز")
     if market == "TASI":
-        quotes = await get_tasi_quotes_bulk(batch)
+        # Free SAHMK supports one-symbol quotes only. Never send TASI
+        # through Twelve Data and never use the Starter-only /quotes/ endpoint.
         for item in batch:
             try:
-                await process_symbol("TASI", item, quotes.get(item["symbol"]))
+                await process_symbol("TASI", item)
             except Exception as exc:
                 log(f"ℹ️ TASI {item.get('symbol','')}: {exc}")
         return
@@ -1106,7 +1083,7 @@ async def scan_market_batch(market, batch):
 
 
 async def full_scan():
-    global scan_number, last_tasi_full_scan
+    global scan_number
     scan_number += 1
     started = time.monotonic()
     log("=" * 60)
@@ -1115,19 +1092,15 @@ async def full_scan():
 
     await load_symbols(force=False)
 
-    # 🇸🇦 TASI: complete catalog every ~2 hours. The Free SAHMK quota is
-    # 100/day; 374 symbols need 8 bulk requests, so 12 full passes/day
-    # plus the 4 catalog requests fit exactly inside that quota.
-    now = time.time()
-    if now - last_tasi_full_scan >= 7200 or last_tasi_full_scan == 0:
-        tasi_items = symbols_cache.get("TASI", [])
-        for start in range(0, len(tasi_items), 50):
-            await scan_market_batch("TASI", tasi_items[start:start + 50])
-        last_tasi_full_scan = now
-    else:
-        log("⏭️ TASI: الجولة الكاملة القادمة كل ساعتين حسب حصة SAHMK")
+    # 🇸🇦 TASI: SAHMK ONLY. Free plan is one quote per symbol, so rotate
+    # through the complete catalog instead of attempting a bulk request.
+    # The catalog itself is loaded once per process and the quote rotation
+    # continues 24/7 as quota permits.
+    tasi_batch = next_order_batch("TASI", TASI_BATCH_SIZE)
+    await scan_market_batch("TASI", tasi_batch)
 
-    # 🇺🇸 US + 🪙 CRYPTO: continuous rotating scan. US starts from a random
+    # 🇺🇸 US + 🪙 CRYPTO: Twelve Data ONLY, completely independent from SAHMK.
+    # US starts from a random alphabetical point, then continues A→Z and wraps.
     # alphabetical point, then continues A→Z and wraps around.
     us_batch = next_order_batch("US", US_BATCH_SIZE)
     crypto_batch = next_order_batch("CRYPTO", CRYPTO_BATCH_SIZE)
@@ -1152,7 +1125,7 @@ async def health(request):
     return web.json_response({
         "status": "ok",
         "system": "AI PRO MAX FINAL",
-        "sources": {"TASI": "SAHMK", "US": "Twelve Data", "CRYPTO": "Twelve Data"},
+        "sources": {"TASI": "SAHMK ONLY", "US": "Twelve Data ONLY", "CRYPTO": "Twelve Data ONLY"},
         "historical_api_tasi": False,
         "local_history": False,
         "scan_seconds": SCAN_SECONDS,
@@ -1252,8 +1225,8 @@ async def main():
     log("🚫 LOCAL HISTORY: REMOVED COMPLETELY")
     log("🟢 النظام يعمل 24/7")
     log(f"⏱️ الفحص كل {SCAN_SECONDS} ثانية")
-    log(f"🛡️ Twelve Data: {TD_REQUESTS_PER_MINUTE}/minute, {TD_DAILY_BUDGET}/day")
-    log(f"🛡️ SAHMK: {SAHMK_DAILY_BUDGET}/day")
+    log(f"🛡️ Twelve Data (US + CRYPTO ONLY): {TD_REQUESTS_PER_MINUTE}/minute, {TD_DAILY_BUDGET}/day")
+    log(f"🛡️ SAHMK (TASI ONLY): {SAHMK_DAILY_BUDGET}/day")
     log(f"🇺🇸 US minimum price: ${MIN_US_PRICE}")
     log("=" * 60)
 
