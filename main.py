@@ -428,17 +428,46 @@ async def get_tasi_quote(item):
         return None
 
 
-async def get_td_quote(item, market):
-    params = {"symbol": item["symbol"]}
+async def get_td_market_data(item, market):
+    """One Twelve Data request gives enough candles to analyze immediately.
+    This removes the old requirement to wait for locally-built history.
+    """
+    params = {
+        "symbol": item["symbol"],
+        "interval": "1day",
+        "outputsize": 80,
+        "order": "desc",
+    }
     if item.get("exchange"):
         params["exchange"] = item["exchange"]
     try:
-        data = await twelve("quote", params)
-        if isinstance(data, dict):
-            return normalize_quote(data, item)
+        data = await twelve("time_series", params)
+        values = data.get("values", []) if isinstance(data, dict) else []
+        if not values:
+            return None, []
+        values = list(reversed(values))
+        last = values[-1]
+        quote = normalize_quote({
+            "symbol": data.get("meta", {}).get("symbol", item["symbol"]),
+            "name": item.get("name", item["symbol"]),
+            "close": last.get("close", 0),
+            "open": last.get("open", 0),
+            "high": last.get("high", 0),
+            "low": last.get("low", 0),
+            "volume": last.get("volume", 0),
+            "percent_change": 0,
+            "previous_close": values[-2].get("close", 0) if len(values) > 1 else 0,
+        }, item)
+        try:
+            prev = float(quote.get("previous_close", 0) or 0)
+            close = float(quote.get("close", 0) or 0)
+            quote["percent_change"] = ((close / prev) - 1) * 100 if prev > 0 else 0
+        except Exception:
+            pass
+        return quote, values
     except Exception as exc:
-        log(f"ℹ️ Twelve Quote {market} {item['symbol']}: {exc}")
-    return None
+        log(f"ℹ️ Twelve Data Time Series {market} {item['symbol']}: {exc}")
+        return None, []
 
 
 def normalize_quote(data, item):
@@ -457,6 +486,10 @@ def normalize_quote(data, item):
         "low": first("low", "day_low", default=0),
         "volume": first("volume", "day_volume", default=0),
         "percent_change": first("percent_change", "change_percent", default=0),
+        "previous_close": first("previous_close", "prev_close", default=0),
+        "value": first("value", "turnover", default=0),
+        "bid": first("bid", default=0),
+        "ask": first("ask", default=0),
     }
 
 # ============================================================
@@ -525,6 +558,93 @@ def volume_strength(data):
     avg = sum(vals) / len(vals)
     current = float(data[-1].get("volume", 0))
     return current / avg if avg else 1.0
+
+
+def analyze_first_scan(market, quote):
+    """Immediate signal from the provider's current snapshot.
+    Used only when there is not enough local history yet. It never fabricates
+    EMA/RSI/ATR values.
+    """
+    try:
+        price = float(quote.get("close", 0) or 0)
+        op = float(quote.get("open", price) or price)
+        high = float(quote.get("high", price) or price)
+        low = float(quote.get("low", price) or price)
+        change = float(quote.get("percent_change", 0) or 0)
+    except Exception:
+        return None
+    if price <= 0:
+        return None
+    if market == "US" and price < MIN_US_PRICE:
+        return None
+
+    span = max(high - low, price * 0.0001)
+    position = max(0.0, min(1.0, (price - low) / span))
+    body = price - op
+
+    # First-scan thresholds are intentionally modest; they are not a
+    # guarantee of future movement. They simply avoid waiting for local data.
+    thresholds = {"TASI": 1.0, "US": 1.5, "CRYPTO": 2.0}
+    threshold = thresholds.get(market, 1.5)
+
+    buy_score = 0
+    sell_score = 0
+    if change >= threshold:
+        buy_score += 2
+    elif change <= -threshold:
+        sell_score += 2
+    if body > 0:
+        buy_score += 1
+    elif body < 0:
+        sell_score += 1
+    if position >= 0.70:
+        buy_score += 1
+    elif position <= 0.30:
+        sell_score += 1
+
+    if buy_score >= 3 and buy_score > sell_score:
+        signal = "BUY"
+        strength = min(99, 70 + buy_score * 6)
+        trend = "صاعد — إشارة أول فحص"
+    elif sell_score >= 3 and sell_score > buy_score:
+        signal = "SELL"
+        strength = min(99, 70 + sell_score * 6)
+        trend = "هابط — إشارة أول فحص"
+    else:
+        return None
+
+    # First-scan targets use the live day range as a range proxy, not ATR.
+    range_proxy = max(span, price * 0.005)
+    targets = [
+        price + range_proxy * m if signal == "BUY" else price - range_proxy * m
+        for m in (0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25)
+    ]
+    if signal == "BUY":
+        buy_power, sell_power = 82, 18
+    else:
+        buy_power, sell_power = 18, 82
+    return {
+        "market": market,
+        "symbol": quote.get("symbol", ""),
+        "name": quote.get("name", quote.get("symbol", "")),
+        "price": price,
+        "change": change,
+        "signal": signal,
+        "strength": strength,
+        "buy_power": buy_power,
+        "sell_power": sell_power,
+        "volume": 1.0,
+        "ema8": None,
+        "ema21": None,
+        "ema50": None,
+        "rsi": None,
+        "atr": None,
+        "support": low,
+        "resistance": high,
+        "trend": trend,
+        "targets": targets,
+        "mode": "FIRST_SCAN",
+    }
 
 
 def analyze(market, quote, history):
@@ -598,6 +718,7 @@ def analyze(market, quote, history):
         "resistance": resistance,
         "trend": trend,
         "targets": targets,
+        "mode": "FULL_TECHNICAL",
     }
 
 # ============================================================
@@ -654,7 +775,8 @@ def startup_message(market):
         "🧠 EMA / RSI / ATR / دعم / مقاومة / حجم\n"
         "🎯 TP1 → TP8\n"
         "🚫 منع تكرار الإشارة\n"
-        "💾 TASI يبني التاريخ محليًا تدريجيًا"
+        "⚡️ الإشارة تبدأ من أول فحص — بدون انتظار بناء التاريخ المحلي\n"
+        "💾 التاريخ المحلي يُستخدم لتحسين التحليل لاحقًا"
     )
 
 
@@ -679,15 +801,22 @@ async def send_signal(signal):
         f"🎯 القوة: {signal['strength']}/100\n"
         f"🟢 شراء: {signal['buy_power']}% | 🔴 بيع: {signal['sell_power']}%\n"
         f"📊 حجم: {signal['volume']:.1f}x\n\n"
-        f"EMA8: {number(signal['ema8'])}\nEMA21: {number(signal['ema21'])}\nEMA50: {number(signal['ema50'])}\n"
-        f"RSI14: {number(signal['rsi'])}\nATR14: {number(signal['atr'])}\n\n"
+        + (
+            f"EMA8: {number(signal['ema8'])}\nEMA21: {number(signal['ema21'])}\nEMA50: {number(signal['ema50'])}\n"
+            f"RSI14: {number(signal['rsi'])}\nATR14: {number(signal['atr'])}\n\n"
+            if signal.get("mode") == "FULL_TECHNICAL"
+            else "⚡️ وضع الإشارة: أول فحص — بدون انتظار بناء تاريخ محلي\n"
+               "📌 المؤشرات التاريخية تُضاف تلقائيًا عند توفر البيانات\n\n"
+        ) +
         f"🛡️ دعم: {number(signal['support'])}\n🔺 مقاومة: {number(signal['resistance'])}\n"
         f"📊 الاتجاه: {signal['trend']}\n\n🎯 الأهداف:\n" + "\n".join(targets)
     )
     chats = list(telegram_chats[market])
     if not chats and CHAT_ID:
         chats = [CHAT_ID]
-    await asyncio.gather(*[telegram_send(token, c, text) for c in chats], return_exceptions=True)
+    results = await asyncio.gather(*[telegram_send(token, c, text) for c in chats], return_exceptions=True)
+    sent = sum(1 for r in results if r is True)
+    log(f"📩 Telegram {market} {signal['symbol']}: تم إرسال {sent}/{len(chats)}")
 
 
 def can_send(signal):
@@ -703,14 +832,18 @@ def can_send(signal):
 # ============================================================
 
 async def process_symbol(market, item):
+    history = []
+
     if market == "TASI":
         quote = await get_tasi_quote(item)
     else:
-        quote = await get_td_quote(item, market)
+        quote, provider_history = await get_td_market_data(item, market)
+        history = provider_history
+
     if not quote:
         return
     try:
-        price = float(quote["close"])
+        price = float(quote.get("close", 0) or 0)
     except Exception:
         return
     if price <= 0:
@@ -718,12 +851,24 @@ async def process_symbol(market, item):
     if market == "US" and price < MIN_US_PRICE:
         return
 
-    # Save every observation locally. This is the replacement for SAHMK Historical.
+    # Keep local observations for TASI and for continuity, but NEVER require
+    # them before an alert. US/Crypto already arrive with provider candles.
     save_observation(market, item, quote)
-    history = load_local_history(market, item)
+    local_history = load_local_history(market, item)
+    if market == "TASI":
+        history = local_history
+    elif not history:
+        history = local_history
+
     history_cache[(market, item["symbol"], item.get("exchange", ""))] = history
 
-    signal = analyze(market, quote, history)
+    # First scan is allowed immediately. Once enough history exists, use the
+    # full technical engine. No market is blocked waiting for local history.
+    if len(history) >= 20:
+        signal = analyze(market, quote, history)
+    else:
+        signal = analyze_first_scan(market, quote)
+
     if signal and can_send(signal):
         await send_signal(signal)
 
