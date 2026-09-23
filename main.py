@@ -262,6 +262,15 @@ async def get_twelve_catalog_page(endpoint, base_params=None, page=1):
     return extract_rows(data)
 
 
+def is_otc_exchange(value):
+    """True when an exchange/venue identifies OTC or OTC Markets."""
+    text = str(value or "").strip().upper()
+    if not text:
+        return False
+    markers = ("OTC", "PINK", "GREY MARKET", "GREY SHEET", "PINK SHEETS")
+    return any(marker in text for marker in markers)
+
+
 def catalog_item(market, item):
     if not isinstance(item, dict):
         return None
@@ -269,10 +278,14 @@ def catalog_item(market, item):
     if not symbol:
         return None
     if market == "US":
+        exchange = str(item.get("exchange", "")).strip()
+        # 🚫 OTC / OTC Markets are completely excluded.
+        if is_otc_exchange(exchange):
+            return None
         return {
             "symbol": symbol,
             "name": str(item.get("name", symbol)).strip(),
-            "exchange": str(item.get("exchange", "")).strip(),
+            "exchange": exchange,
         }
     exchanges = item.get("available_exchanges") or []
     return {
@@ -1067,8 +1080,13 @@ async def process_symbol(market, item, prefetched_quote=None):
             return
         if price <= 0:
             return
-        if market == "US" and price < MIN_US_PRICE:
-            return
+        if market == "US":
+            # Safety check: never request/analyze an OTC symbol even if it slips into the catalog.
+            if is_otc_exchange(item.get("exchange")):
+                log(f"🚫 US {item.get('symbol', '')}: OTC مستبعد")
+                return
+            if price < MIN_US_PRICE:
+                return
         signal = analyze(market, quote, history)
 
     if not signal:
@@ -1249,7 +1267,7 @@ async def main():
     log("=" * 60)
     log("💀🚀 AI PRO MAX — FINAL")
     log("🇸🇦 TASI: SAHMK ONLY — 374 catalog target — no Historical API")
-    log("🇺🇸 US: Twelve Data ONLY — full catalog — price >= $0.15")
+    log("🇺🇸 US: Twelve Data ONLY — listed US equities — OTC EXCLUDED — price >= $0.15")
     log("🪙 CRYPTO: Twelve Data ONLY — full catalog")
     log("🚫 LOCAL HISTORY: REMOVED COMPLETELY")
     log("🟢 النظام يعمل 24/7")
