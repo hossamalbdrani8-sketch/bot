@@ -965,7 +965,7 @@ def startup_message(market):
     return (
         "💀🚀 AI PRO MAX\n\n"
         f"{names[market]}\n\n"
-        "✅ البوت يعمل 24/7\n"
+        f"🕒 وقت الفحص: {market_schedule_text(market)}\n"
         f"📡 مصدر البيانات: {sources[market]}\n"
         "🧠 EMA 10/14/15/25/50/200 / RSI14 / ATR14 / VWAP\n"
         "📦 Volume / 📊 Volume Ratio\n"
