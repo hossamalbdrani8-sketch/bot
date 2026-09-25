@@ -11,6 +11,7 @@ import asyncio
 import time
 import random
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from collections import deque
 
 import aiohttp
@@ -31,7 +32,7 @@ CHAT_ID = os.getenv("CHAT_ID", "").strip()
 PORT = int(os.getenv("PORT", "8080"))
 
 # Continuous scanner settings.
-SCAN_SECONDS = int(os.getenv("SCAN_SECONDS", "1800"))
+SCAN_SECONDS = int(os.getenv("SCAN_SECONDS", "300"))
 MIN_US_PRICE = float(os.getenv("MIN_US_PRICE", "0.15"))
 
 # User's current Twelve Data observed limits: keep a safety margin.
@@ -43,14 +44,50 @@ SAHMK_DAILY_BUDGET = int(os.getenv("SAHMK_DAILY_BUDGET", "100"))
 
 # Batch sizes are deliberately small because each US/crypto symbol uses a
 # Twelve Data time-series request and each TASI symbol uses one SAHMK quote.
-TASI_BATCH_SIZE = int(os.getenv("TASI_BATCH_SIZE", "8"))
-US_BATCH_SIZE = int(os.getenv("US_BATCH_SIZE", "4"))
-CRYPTO_BATCH_SIZE = int(os.getenv("CRYPTO_BATCH_SIZE", "4"))
+TASI_BATCH_SIZE = int(os.getenv("TASI_BATCH_SIZE", "1"))
+US_BATCH_SIZE = int(os.getenv("US_BATCH_SIZE", "1"))
+CRYPTO_BATCH_SIZE = int(os.getenv("CRYPTO_BATCH_SIZE", "1"))
 
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
 MAX_CONNECTIONS = int(os.getenv("MAX_CONNECTIONS", "10"))
 SIGNAL_COOLDOWN = int(os.getenv("SIGNAL_COOLDOWN", "1800"))
 NEWS_CACHE_SECONDS = int(os.getenv("NEWS_CACHE_SECONDS", "21600"))
+
+# 🇸🇦 Saudi Arabia market schedule / 🇺🇸 US scanner schedule
+# All windows are interpreted in Asia/Riyadh time.
+RIYADH_TZ = ZoneInfo("Asia/Riyadh")
+
+def market_is_open(market, now=None):
+    """Return whether this market should be scanned right now (Riyadh time)."""
+    now = now.astimezone(RIYADH_TZ) if now else datetime.now(RIYADH_TZ)
+    weekday = now.weekday()  # Monday=0 ... Sunday=6
+    minutes = now.hour * 60 + now.minute
+
+    if market == "CRYPTO":
+        return True
+
+    if market == "US":
+        # User requested: Monday 00:00 through Friday 03:00 Riyadh time.
+        if weekday in (0, 1, 2, 3):
+            return True
+        if weekday == 4:
+            return minutes < 180  # Friday before 03:00
+        return False
+
+    if market == "TASI":
+        # Saudi Exchange: Sunday-Thursday, from 09:30 through 15:00 Riyadh time.
+        if weekday in (6, 0, 1, 2, 3):
+            return 570 <= minutes < 900
+        return False
+
+    return False
+
+def market_schedule_text(market):
+    return {
+        "US": "🇺🇸 الاثنين 00:00 → الجمعة 03:00 (بتوقيت السعودية)",
+        "TASI": "🇸🇦 الأحد → الخميس 09:30 → 15:00 (بتوقيت السعودية)",
+        "CRYPTO": "🪙 24/7",
+    }.get(market, "")
 
 # ============================================================
 # 🧠 RUNTIME MEMORY ONLY
@@ -68,6 +105,13 @@ crypto_order = []
 scan_number = 0
 session = None
 catalog_tasks = {}
+# Runtime-only observations. They disappear on restart; no local history is written.
+observation_cache = {}
+
+EARLY_SCORE_MIN = int(os.getenv("EARLY_SCORE_MIN", "62"))
+SIGNAL_SCORE_MIN = int(os.getenv("SIGNAL_SCORE_MIN", "75"))
+INTRADAY_INTERVAL = os.getenv("INTRADAY_INTERVAL", "15min")
+INTRADAY_OUTPUTSIZE = int(os.getenv("INTRADAY_OUTPUTSIZE", "120"))
 
 # ============================================================
 # 📝 LOG
@@ -479,6 +523,25 @@ async def get_td_market_data(item, market):
         log(f"ℹ️ Twelve Data Time Series {market} {item['symbol']}: {exc}")
         return None, []
 
+async def get_td_intraday_history(item, market):
+    """Short-term confirmation for US/Crypto candidates. One extra TD credit only when needed."""
+    params = {
+        "symbol": item["symbol"],
+        "interval": INTRADAY_INTERVAL,
+        "outputsize": INTRADAY_OUTPUTSIZE,
+        "order": "desc",
+    }
+    if item.get("exchange"):
+        params["exchange"] = item["exchange"]
+    try:
+        data = await twelve("time_series", params)
+        values = data.get("values", []) if isinstance(data, dict) else []
+        return list(reversed(values)) if values else []
+    except Exception as exc:
+        log(f"ℹ️ Twelve Data intraday {market} {item['symbol']}: {exc}")
+        return []
+
+
 # ============================================================
 # 📊 TECHNICAL ENGINE — NO LOCAL HISTORY
 # ============================================================
@@ -661,13 +724,19 @@ def analyze(market, quote, history):
     buy_score = round(buy / total * 100)
     sell_score = round(sell / total * 100)
 
-    # Signal threshold; neutral symbols do not spam Telegram.
-    if buy_score >= 70 and buy_score > sell_score:
-        signal, strength = "BUY", buy_score
+    # Two-stage scanner: early setup first, confirmed signal second.
+    if buy_score >= SIGNAL_SCORE_MIN and buy_score > sell_score:
+        signal, strength, mode = "BUY", buy_score, "CONFIRMED"
         trend = "صاعد قوي"
-    elif sell_score >= 70 and sell_score > buy_score:
-        signal, strength = "SELL", sell_score
+    elif sell_score >= SIGNAL_SCORE_MIN and sell_score > buy_score:
+        signal, strength, mode = "SELL", sell_score, "CONFIRMED"
         trend = "هابط قوي"
+    elif buy_score >= EARLY_SCORE_MIN and buy_score > sell_score:
+        signal, strength, mode = "EARLY_BUY", buy_score, "EARLY"
+        trend = "صاعد مبكر"
+    elif sell_score >= EARLY_SCORE_MIN and sell_score > buy_score:
+        signal, strength, mode = "EARLY_SELL", sell_score, "EARLY"
+        trend = "هابط مبكر"
     else:
         return None
 
@@ -675,7 +744,8 @@ def analyze(market, quote, history):
         atr14 = max(price * 0.01, 0.00000001)
 
     # Dynamic TP ladder. It is extended beyond TP8 while the same trend remains.
-    targets = [price + atr14 * m if signal == "BUY" else price - atr14 * m
+    direction = "BUY" if signal in ("BUY", "EARLY_BUY") else "SELL"
+    targets = [price + atr14 * m if direction == "BUY" else price - atr14 * m
                for m in (1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5)]
 
     return {
@@ -706,20 +776,19 @@ def analyze(market, quote, history):
         "short_state": short_state,
         "movement_labels": movement_labels(history, vol_ratio, buy_power, sell_power),
         "targets": targets,
-        "mode": "FULL_TECHNICAL",
+        "mode": mode,
     }
 
 
 def analyze_tasi_first_scan(quote):
-    """SAHMK Free has no historical endpoint. Use only current quote data.
-    No EMA/RSI/ATR values are invented.
-    """
+    """Free SAHMK snapshot scanner. No historical indicators are invented."""
     try:
         price = float(quote.get("close", 0) or 0)
         op = float(quote.get("open", price) or price)
         high = float(quote.get("high", price) or price)
         low = float(quote.get("low", price) or price)
         change = float(quote.get("percent_change", 0) or 0)
+        volume = float(quote.get("volume", 0) or 0)
     except Exception:
         return None
     if price <= 0:
@@ -727,38 +796,38 @@ def analyze_tasi_first_scan(quote):
     span = max(high - low, price * 0.0001)
     pos = max(0.0, min(1.0, (price - low) / span))
     body = price - op
-    buy = sell = 0
-    if change >= 1.0: buy += 2
-    elif change <= -1.0: sell += 2
-    if body > 0: buy += 1
-    elif body < 0: sell += 1
-    if pos >= 0.70: buy += 1
-    elif pos <= 0.30: sell += 1
-    if buy < 3 and sell < 3:
-        return None
-    if buy >= 3 and buy > sell:
-        signal, strength = "BUY", min(99, 70 + buy * 6)
-        trend = "صاعد — أول فحص"
-        bp, sp = 82, 18
-    elif sell >= 3 and sell > buy:
-        signal, strength = "SELL", min(99, 70 + sell * 6)
-        trend = "هابط — أول فحص"
-        bp, sp = 18, 82
+    score = 50
+    if change >= 2: score += 25
+    elif change >= 1: score += 15
+    elif change <= -2: score -= 25
+    elif change <= -1: score -= 15
+    if body > 0: score += 10
+    elif body < 0: score -= 10
+    if pos >= .75: score += 10
+    elif pos <= .25: score -= 10
+    score = max(0, min(100, score))
+    if score >= SIGNAL_SCORE_MIN:
+        signal, strength = "BUY", score
+    elif score <= 100 - SIGNAL_SCORE_MIN:
+        signal, strength = "SELL", 100 - score
+    elif score >= EARLY_SCORE_MIN:
+        signal, strength = "EARLY_BUY", score
+    elif score <= 100 - EARLY_SCORE_MIN:
+        signal, strength = "EARLY_SELL", 100 - score
     else:
         return None
+    direction = "BUY" if signal in ("BUY", "EARLY_BUY") else "SELL"
     proxy = max(span, price * 0.005)
-    targets = [price + proxy * m if signal == "BUY" else price - proxy * m
-               for m in (0.5, .75, 1, 1.25, 1.5, 1.75, 2, 2.25)]
+    targets = [price + proxy * m if direction == "BUY" else price - proxy * m for m in (.5,.75,1,1.25,1.5,1.75,2,2.25)]
     return {
-        "market": "TASI", "symbol": quote.get("symbol", ""),
-        "name": quote.get("name", quote.get("symbol", "")), "price": price,
-        "change": change, "signal": signal, "strength": strength,
-        "buy_power": bp, "sell_power": sp, "volume": float(quote.get("volume", 0) or 0),
-        "volume_ratio": None, "vwap": None, "ema10": None, "ema14": None,
-        "ema15": None, "ema25": None, "ema50": None, "ema200": None,
+        "market": "TASI", "symbol": quote.get("symbol", ""), "name": quote.get("name", quote.get("symbol", "")),
+        "price": price, "change": change, "signal": signal, "strength": strength,
+        "buy_power": score, "sell_power": 100-score, "volume": volume, "volume_ratio": None,
+        "vwap": None, "ema10": None, "ema14": None, "ema15": None, "ema25": None, "ema50": None, "ema200": None,
         "rsi": None, "atr": None, "support": low, "resistance": high,
-        "trend": trend, "long_state": "🟡 أول فحص", "short_state": "🟡 أول فحص",
-        "movement_labels": [], "targets": targets, "mode": "TASI_FIRST_SCAN",
+        "trend": "صاعد مبكر" if direction == "BUY" else "هابط مبكر",
+        "long_state": "🟡 غير متاح بدون Historical API", "short_state": "🟡 غير متاح بدون Historical API",
+        "movement_labels": [], "targets": targets, "mode": "TASI_SNAPSHOT",
     }
 
 # ============================================================
@@ -853,7 +922,7 @@ def target_value(state, n):
     if n <= len(state["targets"]):
         return state["targets"][n - 1]
     mult = 4.5 + (n - 8) * 0.5
-    return base + atr_value * mult if state["signal"] == "BUY" else base - atr_value * mult
+    return base + atr_value * mult if state["signal"] in ("BUY", "EARLY_BUY") else base - atr_value * mult
 
 
 def reached_targets(state, price):
@@ -861,7 +930,7 @@ def reached_targets(state, price):
     while True:
         nxt = reached + 1
         target = target_value(state, nxt)
-        hit = price >= target if state["signal"] == "BUY" else price <= target
+        hit = price >= target if state["signal"] in ("BUY", "EARLY_BUY") else price <= target
         if not hit:
             break
         reached = nxt
@@ -903,12 +972,14 @@ def startup_message(market):
         "🟢 قوة الشراء / 🔴 قوة البيع\n"
         "🛡️ الدعم / 🚧 المقاومة\n"
         "🎯 TP1 → TP8 → TP9 → TP10 → …\n"
+        "🔎 ماسح الحركة: صعود/هبوط + إنذار مبكر\n"
+        "🕒 تأكيد قصير المدى: 15min للمرشحين\n"
         "🚫 منع تكرار الإشارة\n"
     )
 
 
 def pct_target(price, target, signal):
-    if signal == "BUY":
+    if signal in ("BUY", "EARLY_BUY"):
         return ((target / price) - 1) * 100
     return (1 - target / price) * 100
 
@@ -916,8 +987,12 @@ def pct_target(price, target, signal):
 def signal_text(signal, news=None):
     market = signal["market"]
     market_name = {"TASI": "🇸🇦 TASI", "US": "🇺🇸 US", "CRYPTO": "🪙 CRYPTO"}[market]
-    arrow = "🟢⬆️" if signal["signal"] == "BUY" else "🔴⬇️"
-    title = "شراء قوي" if signal["signal"] == "BUY" else "بيع قوي"
+    is_buy = signal["signal"] in ("BUY", "EARLY_BUY")
+    is_early = signal["signal"].startswith("EARLY_")
+    arrow = "🟡⬆️" if is_buy and is_early else ("🟢⬆️" if is_buy else ("🟡⬇️" if is_early else "🔴⬇️"))
+    title = ("إنذار مبكر للشراء" if is_buy and is_early else
+             "إنذار مبكر للبيع" if (not is_buy and is_early) else
+             "شراء قوي" if is_buy else "بيع قوي")
 
     lines = [
         "💀🚀 AI PRO MAX SIGNAL",
@@ -1022,14 +1097,14 @@ async def send_target_update(signal, reached):
     token = token_for_market(signal["market"])
     if not token:
         return
-    direction = "استمرار الصعود" if state["signal"] == "BUY" else "استمرار الهبوط"
+    direction = "استمرار الصعود" if state["signal"] in ("BUY", "EARLY_BUY") else "استمرار الهبوط"
     lines = [
         "💀🚀 AI PRO MAX TARGET UPDATE",
         "",
         {"TASI": "🇸🇦 TASI", "US": "🇺🇸 US", "CRYPTO": "🪙 CRYPTO"}[signal["market"]],
         f"{signal['symbol']} — {signal['name']}",
         "",
-        f"{'🟢 UP' if state['signal'] == 'BUY' else '🔴 DOWN'}",
+        f"{'🟢 UP' if state['signal'] in ('BUY', 'EARLY_BUY') else '🔴 DOWN'}",
         "↓",
     ]
     for n in range(1, reached + 1):
@@ -1048,7 +1123,8 @@ async def send_target_update(signal, reached):
 def can_send(signal):
     key = (signal["market"], signal["symbol"], signal["signal"])
     now = time.time()
-    if now - last_signal.get(key, 0) < SIGNAL_COOLDOWN:
+    cooldown = 900 if signal.get("mode") == "EARLY" else SIGNAL_COOLDOWN
+    if now - last_signal.get(key, 0) < cooldown:
         return False
     last_signal[key] = now
     return True
@@ -1088,6 +1164,16 @@ async def process_symbol(market, item, prefetched_quote=None):
             if price < MIN_US_PRICE:
                 return
         signal = analyze(market, quote, history)
+        if signal and signal.get("mode") in ("EARLY", "CONFIRMED"):
+            # Short-term confirmation on a smaller timeframe for US/Crypto.
+            intraday = await get_td_intraday_history(item, market)
+            if intraday:
+                closes_i = [float(x.get("close", 0)) for x in intraday if float(x.get("close", 0) or 0) > 0]
+                e10i = ema(closes_i, 10) if len(closes_i) >= 10 else None
+                e25i = ema(closes_i, 25) if len(closes_i) >= 25 else None
+                if e10i is not None and e25i is not None:
+                    signal["short_state"] = "🟢 قصير المدى" if e10i >= e25i else "🔴 قصير المدى"
+                signal["intraday_interval"] = INTRADAY_INTERVAL
 
     if not signal:
         return
@@ -1131,7 +1217,7 @@ async def full_scan():
     scan_number += 1
     started = time.monotonic()
     log("=" * 60)
-    log(f"💀🚀 AI PRO MAX SCAN #{scan_number}")
+    log(f"💀🚀 AI PRO MAX ADAPTIVE SCAN #{scan_number}")
     log("=" * 60)
 
     # Load each provider independently. TASI 429 must never delay US/CRYPTO.
@@ -1142,17 +1228,20 @@ async def full_scan():
         return_exceptions=True,
     )
 
-    # Start US/CRYPTO immediately and keep TASI independent.
-    tasi_batch = next_order_batch("TASI", TASI_BATCH_SIZE)
-    us_batch = next_order_batch("US", US_BATCH_SIZE)
-    crypto_batch = next_order_batch("CRYPTO", CRYPTO_BATCH_SIZE)
+    # Respect each market's requested operating window. Crypto is always on.
+    jobs = [scan_market_batch("CRYPTO", next_order_batch("CRYPTO", CRYPTO_BATCH_SIZE))]
 
-    await asyncio.gather(
-        scan_market_batch("US", us_batch),
-        scan_market_batch("CRYPTO", crypto_batch),
-        scan_market_batch("TASI", tasi_batch),
-        return_exceptions=True,
-    )
+    if market_is_open("US"):
+        jobs.append(scan_market_batch("US", next_order_batch("US", US_BATCH_SIZE)))
+    else:
+        log(f"⏸️ US خارج وقت الفحص — {market_schedule_text('US')}")
+
+    if market_is_open("TASI"):
+        jobs.append(scan_market_batch("TASI", next_order_batch("TASI", TASI_BATCH_SIZE)))
+    else:
+        log(f"⏸️ TASI خارج وقت الفحص — {market_schedule_text('TASI')}")
+
+    await asyncio.gather(*jobs, return_exceptions=True)
 
     td_min, td_day, td_budget = td_limiter.status()
     sm_min, sm_day, sm_budget = sahmk_limiter.status()
@@ -1271,7 +1360,10 @@ async def main():
     log("🪙 CRYPTO: Twelve Data ONLY — full catalog")
     log("🚫 LOCAL HISTORY: REMOVED COMPLETELY")
     log("🟢 النظام يعمل 24/7")
-    log(f"⏱️ الفحص كل {SCAN_SECONDS} ثانية")
+    log(f"⏱️ دورة الماسح كل {SCAN_SECONDS} ثانية")
+    log(f"🕒 🇺🇸 US: {market_schedule_text('US')}")
+    log(f"🕒 🇸🇦 TASI: {market_schedule_text('TASI')}")
+    log(f"🕒 🪙 CRYPTO: {market_schedule_text('CRYPTO')}")
     log(f"🛡️ Twelve Data (US + CRYPTO ONLY): {TD_REQUESTS_PER_MINUTE}/minute, {TD_DAILY_BUDGET}/day")
     log(f"🛡️ SAHMK (TASI ONLY): {SAHMK_DAILY_BUDGET}/day")
     log(f"🇺🇸 US minimum price: ${MIN_US_PRICE}")
