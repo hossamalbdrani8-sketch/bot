@@ -318,12 +318,13 @@ def is_otc_exchange(value):
 def catalog_item(market, item):
     if not isinstance(item, dict):
         return None
+
     symbol = str(item.get("symbol", "")).strip()
-    if not symbol:
-        return None
+
     if market == "US":
+        if not symbol:
+            return None
         exchange = str(item.get("exchange", "")).strip()
-        # 🚫 OTC / OTC Markets are completely excluded.
         if is_otc_exchange(exchange):
             return None
         return {
@@ -331,12 +332,27 @@ def catalog_item(market, item):
             "name": str(item.get("name", symbol)).strip(),
             "exchange": exchange,
         }
-    exchanges = item.get("available_exchanges") or []
-    return {
-        "symbol": symbol,
-        "name": str(item.get("currency_base") or item.get("name") or symbol).strip(),
-        "exchange": str(exchanges[0]).strip() if exchanges else "",
-    }
+
+    if market == "CRYPTO":
+        base = str(item.get("currency_base") or item.get("base_currency") or item.get("base") or "").strip().upper()
+        quote = str(item.get("currency_quote") or item.get("quote_currency") or item.get("quote") or "").strip().upper()
+        if "/" in symbol:
+            parts = symbol.upper().split("/")
+            if len(parts) == 2:
+                base = base or parts[0].strip()
+                quote = quote or parts[1].strip()
+        if not base or quote not in {"USD", "USDT"}:
+            return None
+        pair = f"{base}/{quote}"
+        exchanges = item.get("available_exchanges") or []
+        return {
+            "symbol": pair,
+            "name": str(item.get("name") or base).strip(),
+            "exchange": str(exchanges[0]).strip() if exchanges else "",
+            "quote_currency": quote,
+        }
+
+    return None
 
 
 def append_catalog_rows(market, rows):
@@ -659,10 +675,33 @@ def movement_labels(data, vol_ratio, buy_power, sell_power):
     return labels
 
 
-def trend_states(price, ema10, ema25, ema50, ema200):
-    long = "🟢 طويل المدى" if ema200 is not None and price >= ema200 else "🔴 طويل المدى"
-    short = "🟢 قصير المدى" if ema10 is not None and ema25 is not None and ema10 >= ema25 else "🔴 قصير المدى"
-    return long, short
+def trend_states(price, ema10, ema25, ema50, ema200, rsi14=None, vwap20=None):
+    long_bull = (
+        ema200 is not None and ema50 is not None
+        and price >= ema200 and ema50 >= ema200
+        and (rsi14 is None or rsi14 >= 50)
+    )
+    long_bear = (
+        ema200 is not None and ema50 is not None
+        and price <= ema200 and ema50 <= ema200
+        and (rsi14 is None or rsi14 <= 50)
+    )
+    long_state = "🟢 طويل المدى" if long_bull else ("🔴 طويل المدى" if long_bear else "🟡 طويل المدى")
+
+    short_bull = (
+        ema10 is not None and ema25 is not None
+        and price >= ema10 >= ema25
+        and (vwap20 is None or price >= vwap20)
+        and (rsi14 is None or rsi14 >= 50)
+    )
+    short_bear = (
+        ema10 is not None and ema25 is not None
+        and price <= ema10 <= ema25
+        and (vwap20 is None or price <= vwap20)
+        and (rsi14 is None or rsi14 <= 50)
+    )
+    short_state = "🟢 قصير المدى" if short_bull else ("🔴 قصير المدى" if short_bear else "🟡 قصير المدى")
+    return long_state, short_state
 
 
 def analyze(market, quote, history):
@@ -691,7 +730,7 @@ def analyze(market, quote, history):
     vol_ratio = volume_ratio(history)
     vwap20 = vwap(history, 20)
     buy_power, sell_power = power(history)
-    long_state, short_state = trend_states(price, ema10, ema25, ema50, ema200)
+    long_state, short_state = trend_states(price, ema10, ema25, ema50, ema200, rsi14, vwap20)
 
     buy = sell = 0
     if ema10 is not None and price >= ema10: buy += 1
@@ -720,21 +759,29 @@ def analyze(market, quote, history):
         if buy_power >= sell_power: buy += 1
         else: sell += 1
 
+    if ema50 is not None and ema200 is not None:
+        if ema50 >= ema200: buy += 1
+        else: sell += 1
+    if long_state == "🟢 طويل المدى": buy += 1
+    elif long_state == "🔴 طويل المدى": sell += 1
+    if short_state == "🟢 قصير المدى": buy += 1
+    elif short_state == "🔴 قصير المدى": sell += 1
+
     total = max(1, buy + sell)
     buy_score = round(buy / total * 100)
     sell_score = round(sell / total * 100)
 
     # Two-stage scanner: early setup first, confirmed signal second.
-    if buy_score >= SIGNAL_SCORE_MIN and buy_score > sell_score:
+    if buy_score >= SIGNAL_SCORE_MIN and buy_score > sell_score and short_state == "🟢 قصير المدى":
         signal, strength, mode = "BUY", buy_score, "CONFIRMED"
         trend = "صاعد قوي"
-    elif sell_score >= SIGNAL_SCORE_MIN and sell_score > buy_score:
+    elif sell_score >= SIGNAL_SCORE_MIN and sell_score > buy_score and short_state == "🔴 قصير المدى":
         signal, strength, mode = "SELL", sell_score, "CONFIRMED"
         trend = "هابط قوي"
-    elif buy_score >= EARLY_SCORE_MIN and buy_score > sell_score:
+    elif buy_score >= EARLY_SCORE_MIN and buy_score > sell_score and short_state in ("🟢 قصير المدى", "🟡 قصير المدى"):
         signal, strength, mode = "EARLY_BUY", buy_score, "EARLY"
         trend = "صاعد مبكر"
-    elif sell_score >= EARLY_SCORE_MIN and sell_score > buy_score:
+    elif sell_score >= EARLY_SCORE_MIN and sell_score > buy_score and short_state in ("🔴 قصير المدى", "🟡 قصير المدى"):
         signal, strength, mode = "EARLY_SELL", sell_score, "EARLY"
         trend = "هابط مبكر"
     else:
