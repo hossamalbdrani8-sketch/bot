@@ -3,4 +3,3 @@ aiohttp>=3.9,<4
 Pillow>=10.0,<12
 arabic-reshaper>=3.0,<4
 python-bidi>=0.4.2,<1
- 
