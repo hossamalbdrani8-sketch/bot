@@ -1,4 +1,6 @@
 
+import io
+from PIL import Image, ImageDraw, ImageFont
 import os
 import asyncio
 import logging
