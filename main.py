@@ -1,1272 +1,567 @@
 
 import os
-import json
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
-from html import escape
 
 import aiohttp
 
-# =========================================================
-# AI PRO MAX V9.0 — SMART MONEY DASHBOARD
-# US | TASI | CRYPTO | TP1-TP8 | AUTO TRACKING
-# =========================================================
+# =====================================================
+# AI PRO MAX V10 — SMART MONEY
+# US + TASI + CRYPTO | PUBLIC DATA
+# =====================================================
 
-TD_KEY = os.getenv("TWELVE_DATA_API_KEY") or os.getenv("TWELVEDATA_API_KEY")
-SAHMK_KEY = os.getenv("SAHMK_API_KEY")
+BOT_NAME = "AI PRO MAX 💀🚀"
+TZ = ZoneInfo("Asia/Riyadh")
 
-US_TOKEN = os.getenv("US_TOKEN")
-TASI_TOKEN = os.getenv("TASI_TOKEN")
-CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN")
+US_TOKEN = os.getenv("US_TOKEN", "")
+TASI_TOKEN = os.getenv("TASI_TOKEN", "")
+CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN", "")
 
-CHAT_ID = os.getenv("CHAT_ID")
-US_CHAT_ID = os.getenv("US_CHAT_ID") or CHAT_ID
-TASI_CHAT_ID = os.getenv("TASI_CHAT_ID") or CHAT_ID
-CRYPTO_CHAT_ID = os.getenv("CRYPTO_CHAT_ID") or CHAT_ID
+MAIN_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
+CHAT_ID = os.getenv("CHAT_ID", "")
 
-TD_BASE = "https://api.twelvedata.com"
-SAHMK_BASE = "https://api.sahmk.sa/api/v1"
+US_CHAT = os.getenv("US_CHAT_ID", CHAT_ID)
+TASI_CHAT = os.getenv("TASI_CHAT_ID", CHAT_ID)
+CRYPTO_CHAT = os.getenv("CRYPTO_CHAT_ID", CHAT_ID)
 
 SCAN_SECONDS = int(os.getenv("SCAN_SECONDS", "300"))
-TRACK_SECONDS = int(os.getenv("TRACK_SECONDS", "60"))
+MAX_US = int(os.getenv("MAX_US", "150"))
+MAX_CRYPTO = int(os.getenv("MAX_CRYPTO", "80"))
+MAX_RESULTS = int(os.getenv("MAX_RESULTS", "10"))
 
-US_BATCH_SIZE = int(os.getenv("US_BATCH_SIZE", "20"))
-CRYPTO_BATCH_SIZE = int(os.getenv("CRYPTO_BATCH_SIZE", "20"))
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("AIPROMAX")
 
-MIN_US_PRICE = 0.15
-MAX_RESULTS = int(os.getenv("MAX_RESULTS", "15"))
-MAX_TRACKED = int(os.getenv("MAX_TRACKED", "100"))
+BASE_YAHOO = "https://query1.finance.yahoo.com"
+BASE_BINANCE = "https://api.binance.com"
 
-SIGNAL_COOLDOWN = 1800
-STATE_FILE = "ai_pro_max_state.json"
-
-TIMEZONE = ZoneInfo("Asia/Riyadh")
-
-US_EXCHANGES = {
-    "NASDAQ", "NYSE", "NYSE AMERICAN",
-    "NYSEAMERICAN", "AMEX"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json"
 }
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-
-log = logging.getLogger("AI_PRO_MAX_V9")
-
-universe = {"US": [], "CRYPTO": []}
-positions = {"US": 0, "CRYPTO": 0}
-
-sent = {}
-signals = {}
+last_signals = {}
+semaphore = asyncio.Semaphore(12)
 
 
-# =========================================================
-# GENERAL
-# =========================================================
-
-def now_time():
-    return datetime.now(TIMEZONE)
-
-
-def number(value, default=0.0):
-    try:
-        result = float(value)
-        return result if result == result else default
-    except (ValueError, TypeError):
-        return default
+def now():
+    return datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def fmt(value):
-    if value is None:
-        return "N/A"
-    return f"{value:,.4f}" if abs(value) < 1 else f"{value:,.2f}"
+    return f"{value:,.4f}" if value < 10 else f"{value:,.2f}"
 
 
-def chunks(items, size):
-    for i in range(0, len(items), size):
-        yield items[i:i + size]
+def ema(values, period):
+    if not values:
+        return 0
+    k = 2 / (period + 1)
+    result = values[0]
+    for x in values[1:]:
+        result = x * k + result * (1 - k)
+    return result
 
 
-def load_state():
-    global signals, sent
-
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        signals = data.get("signals", {})
-        sent = data.get("sent", {})
-
-        log.info("Saved signals restored: %s", len(signals))
-
-    except FileNotFoundError:
-        log.info("Starting with empty signal history")
-
-    except Exception:
-        log.exception("Could not load saved state")
+def rsi(values, period=14):
+    if len(values) < period + 1:
+        return 50
+    gains = []
+    losses = []
+    for i in range(-period, 0):
+        change = values[i] - values[i - 1]
+        gains.append(max(change, 0))
+        losses.append(max(-change, 0))
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    if avg_loss == 0:
+        return 100
+    return 100 - (100 / (1 + avg_gain / avg_loss))
 
 
-def save_state():
-    temp = STATE_FILE + ".tmp"
+def analyze(rows):
+    if len(rows) < 25:
+        return None
 
-    try:
-        with open(temp, "w", encoding="utf-8") as f:
-            json.dump(
-                {"signals": signals, "sent": sent},
-                f,
-                ensure_ascii=False,
-                indent=2
-            )
+    closes = [float(x["close"]) for x in rows]
+    highs = [float(x["high"]) for x in rows]
+    lows = [float(x["low"]) for x in rows]
+    volumes = [float(x["volume"]) for x in rows]
 
-        os.replace(temp, STATE_FILE)
+    price = closes[-1]
+    volume = volumes[-1]
+    avg_volume = sum(volumes[-21:-1]) / 20
+    volume_ratio = volume / max(avg_volume, 1)
 
-    except Exception:
-        log.exception("State save failed")
+    e10 = ema(closes[-80:], 10)
+    e14 = ema(closes[-80:], 14)
+    e25 = ema(closes[-80:], 25)
+    e50 = ema(closes[-100:], 50)
 
+    vwap_num = sum(
+        ((highs[i] + lows[i] + closes[i]) / 3) * volumes[i]
+        for i in range(len(rows))
+    )
+    vwap_den = sum(volumes)
+    vwap = vwap_num / max(vwap_den, 1)
 
-def get_json_data_list(data):
-    if not isinstance(data, dict):
-        return []
+    demand = min(lows[-30:])
+    supply = max(highs[-30:])
 
-    values = data.get("data", [])
+    strength = 0
+    if price > e10:
+        strength += 10
+    if price > e14:
+        strength += 10
+    if price > e25:
+        strength += 10
+    if price > e50:
+        strength += 10
+    if price > vwap:
+        strength += 15
+    if volume_ratio >= 1.5:
+        strength += 20
+    if volume_ratio >= 2:
+        strength += 10
+    if rsi(closes) >= 50:
+        strength += 10
+    if closes[-1] > closes[-2]:
+        strength += 5
 
-    if isinstance(values, dict):
-        values = (
-            values.get("results")
-            or values.get("items")
-            or values.get("candles")
-            or []
+    strength = min(strength, 100)
+
+    return {
+        "price": price,
+        "volume": volume,
+        "volume_ratio": volume_ratio,
+        "vwap": vwap,
+        "ema10": e10,
+        "ema14": e14,
+        "ema25": e25,
+        "ema50": e50,
+        "rsi": rsi(closes),
+        "demand": demand,
+        "supply": supply,
+        "score": strength,
+        "change": (
+            (closes[-1] - closes[-2]) /
+            max(closes[-2], 0.000001) * 100
         )
+    }
 
-    return values if isinstance(values, list) else []
 
-
-# =========================================================
-# API
-# =========================================================
-
-async def get_json(session, url, params=None, headers=None):
+async def get_json(session, url, params=None):
     try:
-        async with session.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=30)
-        ) as response:
-
-            data = await response.json(content_type=None)
-
-            if response.status != 200:
-                log.warning(
-                    "HTTP %s: %s",
-                    response.status,
-                    str(data)[:200]
-                )
-                return None
-
-            if isinstance(data, dict):
-                if data.get("status") == "error":
-                    log.warning("API: %s", str(data)[:200])
+        async with semaphore:
+            async with session.get(
+                url, params=params, headers=HEADERS,
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as response:
+                if response.status != 200:
                     return None
-
-                if data.get("code") == 429:
-                    log.warning("API rate limit")
-                    return None
-
-            return data
-
-    except Exception:
-        log.exception("API connection error")
+                return await response.json(content_type=None)
+    except Exception as e:
+        log.warning("DATA ERROR: %s", e)
         return None
 
 
-# =========================================================
-# TELEGRAM
-# =========================================================
-
-async def telegram_send(session, token, chat_id, message):
-    if not token or not chat_id:
+async def telegram(session, token, chat, message):
+    if not token or not chat:
+        log.warning("Telegram token or chat missing")
         return False
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-
     try:
         async with session.post(
             url,
             json={
-                "chat_id": chat_id,
+                "chat_id": chat,
                 "text": message,
-                "parse_mode": "HTML",
                 "disable_web_page_preview": True
             },
-            timeout=aiohttp.ClientTimeout(total=25)
+            timeout=15
         ) as response:
-
-            result = await response.json(content_type=None)
-
-            if response.status == 200 and result.get("ok"):
-                return True
-
-            log.error("Telegram error: %s", str(result)[:300])
-
+            return response.status == 200
     except Exception:
-        log.exception("Telegram delivery error")
-
-    return False
+        return False
 
 
-def bot_details(market):
-    if market == "US":
-        return US_TOKEN, US_CHAT_ID
+# ---------------- US STOCK UNIVERSE ----------------
 
-    if market == "TASI":
-        return TASI_TOKEN, TASI_CHAT_ID
+async def get_us_symbols(session):
+    symbols = []
 
-    return CRYPTO_TOKEN, CRYPTO_CHAT_ID
+    for exchange in ("nasdaq", "nyse", "amex"):
+        data = await get_json(
+            session,
+            f"https://api.nasdaq.com/api/screener/stocks",
+            {
+                "tableonly": "true",
+                "limit": "5000",
+                "exchange": exchange
+            }
+        )
+
+        if not data:
+            continue
+
+        try:
+            rows = data["data"]["table"]["rows"]
+            for row in rows:
+                symbol = row.get("symbol", "").strip()
+                if (
+                    symbol
+                    and symbol.isascii()
+                    and symbol.replace(".", "").replace("-", "").isalnum()
+                    and len(symbol) <= 6
+                    and "^" not in symbol
+                ):
+                    symbols.append(symbol)
+        except Exception:
+            continue
+
+    return list(dict.fromkeys(symbols))
 
 
-async def send_market(session, market, message):
-    token, chat = bot_details(market)
-    return await telegram_send(session, token, chat, message)
+async def yahoo_chart(session, symbol):
+    url = f"{BASE_YAHOO}/v8/finance/chart/{symbol}"
+    data = await get_json(
+        session, url,
+        {"range": "5d", "interval": "5m"}
+    )
+
+    try:
+        result = data["chart"]["result"][0]
+        quote = result["indicators"]["quote"][0]
+        rows = []
+
+        for i in range(len(result["timestamp"])):
+            close = quote["close"][i]
+            high = quote["high"][i]
+            low = quote["low"][i]
+            volume = quote["volume"][i]
+
+            if None in (close, high, low, volume):
+                continue
+
+            rows.append({
+                "close": close,
+                "high": high,
+                "low": low,
+                "volume": volume
+            })
+
+        return rows
+    except Exception:
+        return None
 
 
-async def startup(session):
-    bots = [
-        ("US", "🇺🇸 الماسح الأمريكي"),
-        ("TASI", "🇸🇦 الماسح السعودي"),
-        ("CRYPTO", "🪙 ماسح العملات الرقمية")
+# ---------------- SAUDI MARKET ----------------
+
+async def get_tasi_symbols(session):
+    # Yahoo public screener: Saudi active stocks.
+    data = await get_json(
+        session,
+        f"{BASE_YAHOO}/v1/finance/screener/predefined/saved",
+        {
+            "scrIds": "most_actives",
+            "count": "250",
+            "region": "SA",
+            "formatted": "false"
+        }
+    )
+
+    try:
+        quotes = data["finance"]["result"][0]["quotes"]
+        return list(dict.fromkeys(
+            q["symbol"] for q in quotes
+            if q.get("symbol", "").endswith(".SR")
+        ))
+    except Exception:
+        return []
+
+
+# ---------------- CRYPTO MARKET ----------------
+
+async def get_crypto_symbols(session):
+    data = await get_json(
+        session, f"{BASE_BINANCE}/api/v3/ticker/24hr"
+    )
+    if not isinstance(data, list):
+        return []
+
+    coins = [
+        x for x in data
+        if x.get("symbol", "").endswith("USDT")
+        and not any(
+            tag in x["symbol"]
+            for tag in ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT")
+        )
     ]
 
-    for market, name in bots:
-        token, chat = bot_details(market)
-
-        if token and chat:
-            await send_market(
-                session,
-                market,
-                (
-                    "💀🚀 <b>AI PRO MAX V9.0</b>\n"
-                    "━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🟢 <b>{name}</b>\n"
-                    "تم تشغيل النظام بنجاح\n"
-                    "📡 الماسح الفني جاهز\n"
-                    "🎯 متابعة الأهداف TP1-TP8\n"
-                    "💾 حفظ واستعادة الإشارات\n"
-                    f"🕒 <code>{now_time():%Y-%m-%d %H:%M:%S}</code>"
-                )
-            )
-
-
-# =========================================================
-# TECHNICAL INDICATORS
-# =========================================================
-
-def ema(values, period):
-    if len(values) < period:
-        return None
-
-    result = sum(values[:period]) / period
-    alpha = 2 / (period + 1)
-
-    for value in values[period:]:
-        result = value * alpha + result * (1 - alpha)
-
-    return result
-
-
-def calculate_vwap(rows):
-    total_value = 0
-    total_volume = 0
-
-    for row in rows:
-        volume = number(row.get("volume"))
-
-        if volume <= 0:
-            continue
-
-        typical = (
-            row["high"] + row["low"] + row["close"]
-        ) / 3
-
-        total_value += typical * volume
-        total_volume += volume
-
-    return total_value / total_volume if total_volume else None
-
-
-def normalize_candles(data):
-    if not isinstance(data, dict):
-        return []
-
-    values = data.get("values", [])
-
-    if not isinstance(values, list):
-        return []
-
-    rows = []
-
-    for item in reversed(values):
-        close = number(item.get("close"))
-
-        if close <= 0:
-            continue
-
-        rows.append({
-            "open": number(item.get("open")),
-            "high": number(item.get("high")),
-            "low": number(item.get("low")),
-            "close": close,
-            "volume": number(item.get("volume"))
-        })
-
-    return rows
-
-
-def analyze(rows):
-    if len(rows) < 50:
-        return None
-
-    closes = [r["close"] for r in rows]
-    price = closes[-1]
-    previous = closes[-2]
-
-    if price <= 0:
-        return None
-
-    averages = {
-        10: ema(closes, 10),
-        14: ema(closes, 14),
-        25: ema(closes, 25),
-        50: ema(closes, 50)
-    }
-
-    if any(v is None for v in averages.values()):
-        return None
-
-    volumes = [r["volume"] for r in rows]
-
-    avg_volume = (
-        sum(volumes[-21:-1]) / 20
-        if len(volumes) >= 21 else 0
+    coins.sort(
+        key=lambda x: float(x.get("quoteVolume", 0)),
+        reverse=True
     )
 
-    current_volume = volumes[-1]
+    return [x["symbol"] for x in coins[:MAX_CRYPTO]]
 
-    activity = (
-        current_volume / avg_volume
-        if avg_volume > 0 else 0
+
+async def crypto_chart(session, symbol):
+    data = await get_json(
+        session,
+        f"{BASE_BINANCE}/api/v3/klines",
+        {"symbol": symbol, "interval": "5m", "limit": "100"}
     )
 
-    change = (
-        (price - previous) / previous * 100
-        if previous > 0 else 0
+    if not isinstance(data, list):
+        return None
+
+    return [
+        {
+            "close": float(x[4]),
+            "high": float(x[2]),
+            "low": float(x[3]),
+            "volume": float(x[5])
+        }
+        for x in data
+    ]
+
+
+async def crypto_depth(session, symbol):
+    data = await get_json(
+        session,
+        f"{BASE_BINANCE}/api/v3/depth",
+        {"symbol": symbol, "limit": "20"}
     )
+
+    if not data:
+        return None
+
+    bids = sum(float(x[0]) * float(x[1]) for x in data["bids"])
+    asks = sum(float(x[0]) * float(x[1]) for x in data["asks"])
 
     return {
-        "price": price,
-        "change": change,
-        "volume": current_volume,
-        "liquidity": price * current_volume,
-        "activity": activity,
-        "vwap": calculate_vwap(rows),
-        "ema": averages,
-        "rising": (
-            averages[10] > averages[14] >
-            averages[25] > averages[50]
-        ),
-        "high": max(r["high"] for r in rows[-20:]),
-        "low": min(r["low"] for r in rows[-20:])
+        "bids": bids,
+        "asks": asks,
+        "imbalance": (
+            bids / max(asks, 0.000001)
+        )
     }
 
 
-# =========================================================
-# SIGNAL TARGETS TP1 - TP8
-# =========================================================
+# ---------------- SIGNAL ENGINE ----------------
 
-def create_signal(market, item, result, currency):
-    entry = result["price"]
+def make_signal(market, symbol, a, depth=None):
+    score = a["score"]
+    price = a["price"]
 
-    recent_range = result["high"] - result["low"]
+    if score < 55:
+        return None
 
-    risk = max(
-        entry * 0.015,
-        recent_range * 0.35
-    )
+    if a["volume_ratio"] < 1.2:
+        return None
 
-    targets = [
-        round(entry + risk * i, 8)
-        for i in range(1, 9)
-    ]
+    if depth and depth["imbalance"] > 1.3:
+        score = min(score + 5, 100)
 
-    stop = round(entry - risk, 8)
+    if price > a["supply"]:
+        state = "🚀 اختراق مقاومة"
+    elif price >= a["demand"] * 1.01:
+        state = "🟢 قريب من منطقة الطلب"
+    else:
+        state = "⏳ مراقبة"
+
+    stop = a["demand"] * 0.985
+    target1 = price + (price - stop) * 1.5
+    target2 = price + (price - stop) * 2.5
+    target3 = price + (price - stop) * 4
 
     return {
         "market": market,
-        "symbol": item["symbol"],
-        "name": item["name"],
-        "currency": currency,
-        "entry": entry,
-        "price": entry,
-        "change": result["change"],
-        "volume": result["volume"],
-        "liquidity": result["liquidity"],
-        "activity": result["activity"],
-        "vwap": result["vwap"],
-        "ema": result["ema"],
-        "rising": result["rising"],
-        "high": result["high"],
-        "low": result["low"],
-        "stop": stop,
-        "targets": targets,
-        "hits": [False] * 8,
-        "stop_hit": False,
-        "created": now_time().isoformat(),
-        "updated": now_time().isoformat()
-    }
-
-
-# =========================================================
-# PROFESSIONAL DASHBOARD
-# =========================================================
-
-def build_message(signal):
-    e = signal["ema"]
-
-    change = signal["change"]
-    activity = signal["activity"]
-    vwap = signal["vwap"]
-
-    market_names = {
-        "US": "🇺🇸 السوق الأمريكي",
-        "TASI": "🇸🇦 السوق السعودي",
-        "CRYPTO": "🪙 العملات الرقمية"
-    }
-
-    direction = (
-        "🟢 اتجاه صاعد"
-        if signal["rising"]
-        else "🟡 اتجاه غير مكتمل"
-    )
-
-    vwap_state = (
-        "🟢 أعلى VWAP"
-        if vwap is not None and signal["price"] > vwap
-        else "🔴 أسفل VWAP"
-        if vwap is not None
-        else "⚪ غير متاح"
-    )
-
-    if activity >= 3:
-        activity_state = "🔥 نشاط استثنائي"
-    elif activity >= 2:
-        activity_state = "🟢 نشاط مرتفع"
-    elif activity >= 1:
-        activity_state = "🟡 نشاط طبيعي"
-    else:
-        activity_state = "⚪ نشاط منخفض"
-
-    bar = "🟩" * min(10, max(0, int(activity * 2)))
-    bar += "⬛" * (10 - min(10, max(0, int(activity * 2))))
-
-    ema_state = (
-        "🟢 ترتيب EMA صاعد"
-        if e[10] > e[14] > e[25] > e[50]
-        else "🟡 ترتيب EMA غير مكتمل"
-    )
-
-    target_lines = []
-
-    for i, target in enumerate(signal["targets"]):
-        check = "✅" if signal["hits"][i] else "⬜"
-
-        target_lines.append(
-            f"{check} TP{i+1}: <b>{fmt(target)}</b>"
-        )
-
-    hit_count = sum(signal["hits"])
-
-    return (
-        "💀 <b>AI PRO MAX V9.0</b> 🚀\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "       <b>SMART MONEY DASHBOARD</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        f"🌍 <b>{market_names[signal['market']]}</b>\n"
-        f"📌 <b>{escape(str(signal['symbol']))}</b>\n"
-        f"🏢 {escape(str(signal['name']))}\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "💰 <b>السعر والأداء</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-
-        f"💵 الدخول: <b>{fmt(signal['entry'])} {signal['currency']}</b>\n"
-        f"📍 السعر الحالي: <b>{fmt(signal['price'])}</b>\n"
-        f"📈 التغير: <b>{change:+.2f}%</b>\n"
-        f"📊 حجم التداول: <b>{signal['volume']:,.0f}</b>\n"
-        f"💸 قيمة التداول: <b>{signal['liquidity']:,.2f}</b>\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "⚡ <b>السيولة والنشاط</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-
-        f"🔥 النشاط: <b>x{activity:.2f}</b>\n"
-        f"{bar}\n"
-        f"{activity_state}\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "📡 <b>VWAP</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-
-        f"القيمة: <b>{fmt(vwap)}</b>\n"
-        f"{vwap_state}\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "📈 <b>المتوسطات EMA</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-
-        f"EMA 10: <b>{fmt(e[10])}</b>\n"
-        f"EMA 14: <b>{fmt(e[14])}</b>\n"
-        f"EMA 25: <b>{fmt(e[25])}</b>\n"
-        f"EMA 50: <b>{fmt(e[50])}</b>\n"
-        f"{ema_state}\n"
-        f"{direction}\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "🎯 <b>الأهداف السعرية</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-
-        + "\n".join(target_lines) + "\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "🛡 <b>إدارة المخاطر</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-
-        f"🔴 وقف الخسارة: <b>{fmt(signal['stop'])}</b>\n"
-        f"🔺 المقاومة: <b>{fmt(signal['high'])}</b>\n"
-        f"🟢 الدعم: <b>{fmt(signal['low'])}</b>\n\n"
-
-        f"🏆 الأهداف المحققة: <b>{hit_count}/8</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "🤖 <b>AI PRO MAX AUTO TRACKER</b>\n"
-        f"🕒 <code>{now_time():%Y-%m-%d %H:%M:%S}</code>\n"
-        "⚠️ تحليل آلي وليس توصية استثمارية."
-    )
-
-
-# =========================================================
-# SEND NEW SIGNAL
-# =========================================================
-
-async def publish_signal(session, market, item, result, currency):
-    key = market + ":" + item["symbol"]
-
-    now = now_time().timestamp()
-    last_sent = number(sent.get(key, 0))
-
-    if now - last_sent < SIGNAL_COOLDOWN:
-        return
-
-    if key in signals:
-        old = signals[key]
-
-        # Do not replace an active signal before it finishes
-        if not old.get("stop_hit") and not all(old.get("hits", [])):
-            return
-
-    signal = create_signal(market, item, result, currency)
-
-    signals[key] = signal
-    sent[key] = now
-
-    save_state()
-
-    message = build_message(signal)
-
-    if not await send_market(session, market, message):
-        log.warning("Signal delivery failed: %s", key)
-
-
-# =========================================================
-# PRICE TRACKING
-# =========================================================
-
-async def get_td_price(session, symbol):
-    data = await get_json(
-        session,
-        f"{TD_BASE}/price",
-        params={
-            "symbol": symbol,
-            "apikey": TD_KEY
-        }
-    )
-
-    if not isinstance(data, dict):
-        return None
-
-    price = number(data.get("price"))
-
-    return price if price > 0 else None
-
-
-async def get_saudi_price(session, symbol):
-    today = now_time().date()
-
-    data = await get_json(
-        session,
-        f"{SAHMK_BASE}/historical/{symbol}/",
-        params={
-            "interval": "5min",
-            "from": today.isoformat(),
-            "to": today.isoformat(),
-            "limit": 5,
-            "offset": 0
-        },
-        headers={"X-API-Key": SAHMK_KEY}
-    )
-
-    values = get_json_data_list(data)
-
-    if not values:
-        return None
-
-    values.sort(
-        key=lambda x: str(x.get("datetime", x.get("date", "")))
-    )
-
-    price = number(values[-1].get("close"))
-
-    return price if price > 0 else None
-
-
-async def fetch_signal_price(session, signal):
-    market = signal["market"]
-    symbol = signal["symbol"]
-
-    if market in ("US", "CRYPTO"):
-        return await get_td_price(session, symbol)
-
-    if market == "TASI":
-        return await get_saudi_price(session, symbol)
-
-    return None
-
-
-async def track_one_signal(session, key, signal):
-    if signal.get("stop_hit"):
-        return
-
-    if all(signal.get("hits", [])):
-        return
-
-    price = await fetch_signal_price(session, signal)
-
-    if price is None or price <= 0:
-        return
-
-    old_hits = list(signal["hits"])
-    old_stop = signal.get("stop_hit", False)
-
-    signal["price"] = price
-    signal["updated"] = now_time().isoformat()
-
-    for i, target in enumerate(signal["targets"]):
-        if price >= target:
-            signal["hits"][i] = True
-
-    if price <= signal["stop"]:
-        signal["stop_hit"] = True
-
-    changed = (
-        old_hits != signal["hits"]
-        or old_stop != signal["stop_hit"]
-    )
-
-    if not changed:
-        return
-
-    save_state()
-
-    hit_count = sum(signal["hits"])
-
-    if signal["stop_hit"]:
-        status = (
-            "🔴 <b>تم الوصول إلى وقف الخسارة</b>\n"
-            "تم إيقاف متابعة هذه الإشارة."
-        )
-
-    elif hit_count == 8:
-        status = (
-            "🏆 <b>اكتملت جميع الأهداف TP1-TP8</b>\n"
-            "🎉 تم تحقيق الأهداف الثمانية."
-        )
-
-    else:
-        status = (
-            f"🎯 <b>تم تحقيق هدف جديد!</b>\n"
-            f"🏆 الأهداف المحققة: {hit_count}/8"
-        )
-
-    message = (
-        "🚨 <b>AI PRO MAX — تحديث الإشارة</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"📌 <b>{escape(str(signal['symbol']))}</b>\n"
-        f"💰 السعر الحالي: <b>{fmt(price)}</b>\n"
-        f"{status}\n\n"
-        + build_message(signal)
-    )
-
-    await send_market(session, signal["market"], message)
-
-    log.info(
-        "Signal updated %s | price %s | hits %s",
-        key, price, hit_count
-    )
-
-
-async def tracker_loop(session):
-    semaphore = asyncio.Semaphore(3)
-
-    while True:
-        try:
-            active = [
-                (key, signal)
-                for key, signal in list(signals.items())
-                if not signal.get("stop_hit")
-                and not all(signal.get("hits", []))
-            ]
-
-            async def worker(key, signal):
-                async with semaphore:
-                    try:
-                        await track_one_signal(session, key, signal)
-                    except Exception:
-                        log.exception("Tracker failed: %s", key)
-
-            await asyncio.gather(
-                *(worker(key, signal) for key, signal in active)
-            )
-
-            await asyncio.sleep(TRACK_SECONDS)
-
-        except Exception:
-            log.exception("Tracker loop error")
-            await asyncio.sleep(30)
-
-
-# =========================================================
-# US MARKET — DISCOVERY
-# =========================================================
-
-async def load_us_universe(session):
-    data = await get_json(
-        session,
-        f"{TD_BASE}/stocks",
-        params={
-            "country": "United States",
-            "format": "JSON",
-            "apikey": TD_KEY
-        }
-    )
-
-    items = data.get("data", []) if isinstance(data, dict) else data
-
-    if not isinstance(items, list):
-        return
-
-    selected = {}
-
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-
-        symbol = str(item.get("symbol", "")).strip().upper()
-        exchange = str(item.get("exchange", "")).strip().upper()
-        name = str(item.get("name", symbol))
-
-        if not symbol or exchange not in US_EXCHANGES:
-            continue
-
-        if item.get("country") not in (None, "", "United States"):
-            continue
-
-        if item.get("type") and item["type"] not in (
-            "Common Stock", "American Depositary Receipt"
-        ):
-            continue
-
-        selected[symbol] = {
-            "symbol": symbol,
-            "name": name
-        }
-
-    universe["US"] = list(selected.values())
-
-    log.info("US symbols loaded: %s", len(universe["US"]))
-
-
-async def scan_us_symbol(session, item):
-    data = await get_json(
-        session,
-        f"{TD_BASE}/time_series",
-        params={
-            "symbol": item["symbol"],
-            "interval": "5min",
-            "outputsize": 100,
-            "prepost": "true",
-            "apikey": TD_KEY
-        }
-    )
-
-    rows = normalize_candles(data)
-
-    result = analyze(rows)
-
-    if not result or result["price"] < MIN_US_PRICE:
-        return None
-
-    return {
-        "symbol": item["symbol"],
-        "name": item["name"],
-        "result": result
-    }
-
-
-async def us_loop(session):
-    if not US_TOKEN or not US_CHAT_ID or not TD_KEY:
-        log.error("US settings incomplete")
-        return
-
-    await load_us_universe(session)
-
-    while not universe["US"]:
-        await asyncio.sleep(60)
-        await load_us_universe(session)
-
-    while True:
-        try:
-            items = universe["US"]
-
-            start = positions["US"]
-
-            batch = items[start:start + US_BATCH_SIZE]
-
-            if len(batch) < US_BATCH_SIZE:
-                batch += items[:US_BATCH_SIZE - len(batch)]
-
-            positions["US"] = (
-                start + US_BATCH_SIZE
-            ) % len(items)
-
-            semaphore = asyncio.Semaphore(3)
-
-            async def worker(item):
-                async with semaphore:
-                    try:
-                        return await scan_us_symbol(session, item)
-                    except Exception:
-                        log.exception(
-                            "US scan failed: %s",
-                            item["symbol"]
-                        )
-                        return None
-
-            results = await asyncio.gather(
-                *(worker(item) for item in batch)
-            )
-
-            results = [x for x in results if x]
-
-            results.sort(
-                key=lambda x: x["result"]["change"],
-                reverse=True
-            )
-
-            for item in results[:MAX_RESULTS]:
-                await publish_signal(
-                    session, "US", item["symbol"] and {
-                        "symbol": item["symbol"],
-                        "name": item["name"]
-                    },
-                    item["result"], "USD"
-                )
-
-            log.info(
-                "US scanned %s | signals %s",
-                len(batch), len(results)
-            )
-
-            await asyncio.sleep(SCAN_SECONDS)
-
-        except Exception:
-            log.exception("US loop error")
-            await asyncio.sleep(60)
-
-
-# =========================================================
-# CRYPTO MARKET — 24/7
-# =========================================================
-
-async def load_crypto_universe(session):
-    data = await get_json(
-        session,
-        f"{TD_BASE}/cryptocurrencies",
-        params={"apikey": TD_KEY}
-    )
-
-    items = data.get("data", []) if isinstance(data, dict) else data
-
-    if not isinstance(items, list):
-        return
-
-    selected = {}
-
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-
-        symbol = str(item.get("symbol", "")).strip().upper()
-
-        if "/" not in symbol:
-            continue
-
-        base, quote = symbol.split("/", 1)
-
-        if quote not in ("USD", "USDT") or not base:
-            continue
-
-        selected[symbol] = {
-            "symbol": symbol,
-            "name": item.get("currency_base", base)
-        }
-
-    universe["CRYPTO"] = list(selected.values())
-
-    log.info("Crypto pairs loaded: %s", len(universe["CRYPTO"]))
-
-
-async def scan_crypto_symbol(session, item):
-    data = await get_json(
-        session,
-        f"{TD_BASE}/time_series",
-        params={
-            "symbol": item["symbol"],
-            "interval": "5min",
-            "outputsize": 100,
-            "apikey": TD_KEY
-        }
-    )
-
-    rows = normalize_candles(data)
-    result = analyze(rows)
-
-    if not result:
-        return None
-
-    return {
-        "symbol": item["symbol"],
-        "name": item["name"],
-        "result": result
-    }
-
-
-async def crypto_loop(session):
-    if not CRYPTO_TOKEN or not CRYPTO_CHAT_ID or not TD_KEY:
-        log.error("Crypto settings incomplete")
-        return
-
-    await load_crypto_universe(session)
-
-    while not universe["CRYPTO"]:
-        await asyncio.sleep(60)
-        await load_crypto_universe(session)
-
-    while True:
-        try:
-            items = universe["CRYPTO"]
-
-            start = positions["CRYPTO"]
-
-            batch = items[start:start + CRYPTO_BATCH_SIZE]
-
-            if len(batch) < CRYPTO_BATCH_SIZE:
-                batch += items[:CRYPTO_BATCH_SIZE - len(batch)]
-
-            positions["CRYPTO"] = (
-                start + CRYPTO_BATCH_SIZE
-            ) % len(items)
-
-            semaphore = asyncio.Semaphore(3)
-
-            async def worker(item):
-                async with semaphore:
-                    try:
-                        return await scan_crypto_symbol(session, item)
-                    except Exception:
-                        log.exception(
-                            "Crypto scan failed: %s",
-                            item["symbol"]
-                        )
-                        return None
-
-            results = await asyncio.gather(
-                *(worker(item) for item in batch)
-            )
-
-            results = [x for x in results if x]
-
-            results.sort(
-                key=lambda x: x["result"]["change"],
-                reverse=True
-            )
-
-            for item in results[:MAX_RESULTS]:
-                await publish_signal(
-                    session,
-                    "CRYPTO",
-                    {
-                        "symbol": item["symbol"],
-                        "name": item["name"]
-                    },
-                    item["result"],
-                    "USD"
-                )
-
-            log.info(
-                "CRYPTO scanned %s | signals %s",
-                len(batch), len(results)
-            )
-
-            await asyncio.sleep(SCAN_SECONDS)
-
-        except Exception:
-            log.exception("Crypto loop error")
-            await asyncio.sleep(60)
-
-
-# =========================================================
-# SAUDI MARKET — SAHMK
-# =========================================================
-
-def saudi_market_active():
-    now = now_time()
-
-    if now.weekday() not in (6, 0, 1, 2, 3):
-        return False
-
-    return (
-        now.hour > 10 or (now.hour == 10 and now.minute >= 0)
-    ) and (
-        now.hour < 15
-    )
-
-
-async def sahmk_get(session, endpoint, params=None):
-    return await get_json(
-        session,
-        f"{SAHMK_BASE}/{endpoint}/",
-        params=params or {},
-        headers={"X-API-Key": SAHMK_KEY}
-    )
-
-
-async def scan_saudi_symbol(session, item):
-    symbol = str(item.get("symbol", "")).strip()
-
-    if not symbol:
-        return None
-
-    today = now_time().date()
-    start = today - timedelta(days=180)
-
-    data = await sahmk_get(
-        session,
-        f"historical/{symbol}",
-        {
-            "interval": "5min",
-            "from": start.isoformat(),
-            "to": today.isoformat(),
-            "limit": 500,
-            "offset": 0
-        }
-    )
-
-    values = get_json_data_list(data)
-
-    rows = []
-
-    for x in values:
-        rows.append({
-            "open": number(x.get("open")),
-            "high": number(x.get("high")),
-            "low": number(x.get("low")),
-            "close": number(x.get("close")),
-            "volume": number(x.get("volume"))
-        })
-
-    result = analyze(rows)
-
-    if not result:
-        return None
-
-    return {
         "symbol": symbol,
-        "name": item.get("name", symbol),
-        "result": result
+        "score": score,
+        "state": state,
+        "price": price,
+        "demand": a["demand"],
+        "supply": a["supply"],
+        "vwap": a["vwap"],
+        "volume": a["volume"],
+        "ratio": a["volume_ratio"],
+        "rsi": a["rsi"],
+        "change": a["change"],
+        "stop": stop,
+        "tp1": target1,
+        "tp2": target2,
+        "tp3": target3,
+        "depth": depth
     }
 
 
-async def saudi_loop(session):
-    if not TASI_TOKEN or not TASI_CHAT_ID or not SAHMK_KEY:
-        log.error("TASI settings incomplete")
-        return
+def render_signal(s):
+    depth_text = ""
+    if s["depth"]:
+        d = s["depth"]
+        depth_text = (
+            f"\n🟢 طلبات دفتر الأوامر: ${d['bids']:,.0f}"
+            f"\n🔴 عروض دفتر الأوامر: ${d['asks']:,.0f}"
+            f"\n⚖️ نسبة الطلب/العرض: {d['imbalance']:.2f}"
+        )
 
-    while True:
-        try:
-            if not saudi_market_active():
-                await asyncio.sleep(60)
-                continue
-
-            gainers, volume, value = await asyncio.gather(
-                sahmk_get(
-                    session, "market/gainers",
-                    {"limit": 50, "index": "TASI"}
-                ),
-                sahmk_get(
-                    session, "market/volume",
-                    {"limit": 50, "index": "TASI"}
-                ),
-                sahmk_get(
-                    session, "market/value",
-                    {"limit": 50, "index": "TASI"}
-                )
-            )
-
-            selected = {}
-
-            for data, key_name in (
-                (gainers, "gainers"),
-                (volume, "volume"),
-                (value, "value")
-            ):
-                if not isinstance(data, dict):
-                    continue
-
-                values = data.get(
-                    key_name,
-                    data.get("data", [])
-                )
-
-                if isinstance(values, dict):
-                    values = values.get("results", [])
-
-                if not isinstance(values, list):
-                    continue
-
-                for item in values:
-                    if isinstance(item, dict):
-                        symbol = str(
-                            item.get("symbol", "")
-                        ).strip()
-
-                        if symbol:
-                            selected[symbol] = item
-
-            semaphore = asyncio.Semaphore(3)
-
-            async def worker(item):
-                async with semaphore:
-                    try:
-                        return await scan_saudi_symbol(
-                            session, item
-                        )
-                    except Exception:
-                        log.exception(
-                            "Saudi scan failed: %s",
-                            item.get("symbol")
-                        )
-                        return None
-
-            results = await asyncio.gather(
-                *(worker(item) for item in selected.values())
-            )
-
-            results = [x for x in results if x]
-
-            results.sort(
-                key=lambda x: x["result"]["change"],
-                reverse=True
-            )
-
-            for item in results[:MAX_RESULTS]:
-                await publish_signal(
-                    session,
-                    "TASI",
-                    {
-                        "symbol": item["symbol"],
-                        "name": item["name"]
-                    },
-                    item["result"],
-                    "SAR"
-                )
-
-            log.info(
-                "TASI scanned %s | results %s",
-                len(selected), len(results)
-            )
-
-            await asyncio.sleep(SCAN_SECONDS)
-
-        except Exception:
-            log.exception("TASI loop error")
-            await asyncio.sleep(60)
-
-
-# =========================================================
-# MAIN — INDEPENDENT WORKERS
-# =========================================================
-
-async def main():
-    load_state()
-
-    connector = aiohttp.TCPConnector(
-        limit=20,
-        ttl_dns_cache=300
+    return (
+        f"💀 AI PRO MAX — SMART MONEY\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🏦 السوق: {s['market']}\n"
+        f"📌 الرمز: {s['symbol']}\n"
+        f"💵 السعر: {fmt(s['price'])}\n"
+        f"📈 التغير: {s['change']:+.2f}%\n"
+        f"⭐ قوة الإشارة: {s['score']}/100\n"
+        f"📊 الحالة: {s['state']}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"💰 حجم التداول: {s['volume']:,.0f}\n"
+        f"🔥 الفوليوم مقارنة بالمتوسط: {s['ratio']:.2f}x\n"
+        f"📍 VWAP: {fmt(s['vwap'])}\n"
+        f"📉 RSI: {s['rsi']:.1f}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🟢 الطلب: {fmt(s['demand'])}\n"
+        f"🔴 العرض: {fmt(s['supply'])}\n"
+        f"🛑 وقف الخسارة: {fmt(s['stop'])}\n"
+        f"🎯 الهدف 1: {fmt(s['tp1'])}\n"
+        f"🎯 الهدف 2: {fmt(s['tp2'])}\n"
+        f"🎯 الهدف 3: {fmt(s['tp3'])}\n"
+        f"{depth_text}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🕒 {now()}\n"
+        f"⚠️ تحليل آلي وليس توصية شراء أو بيع"
     )
 
-    timeout = aiohttp.ClientTimeout(total=40)
+
+async def scan_one(session, market, symbol):
+    if market == "CRYPTO":
+        rows = await crypto_chart(session, symbol)
+        depth = await crypto_depth(session, symbol)
+    else:
+        yahoo_symbol = symbol if market == "US" else symbol
+        rows = await yahoo_chart(session, yahoo_symbol)
+        depth = None
+
+    if not rows:
+        return None
+
+    analysis = analyze(rows)
+    if not analysis:
+        return None
+
+    return make_signal(market, symbol, analysis, depth)
+
+
+async def scan_market(session, market, symbols, token, chat):
+    results = []
+
+    async def worker(symbol):
+        try:
+            result = await scan_one(session, market, symbol)
+            if result:
+                results.append(result)
+        except Exception as e:
+            log.debug("%s %s: %s", market, symbol, e)
+
+    await asyncio.gather(*(worker(s) for s in symbols))
+
+    results.sort(
+        key=lambda x: (x["score"], x["ratio"]),
+        reverse=True
+    )
+
+    sent = 0
+    for item in results:
+        key = f"{market}:{item['symbol']}"
+        old = last_signals.get(key)
+
+        if old and old >= item["score"]:
+            continue
+
+        if item["score"] < 65:
+            continue
+
+        ok = await telegram(
+            session, token, chat, render_signal(item)
+        )
+
+        if ok:
+            last_signals[key] = item["score"]
+            sent += 1
+
+        if sent >= MAX_RESULTS:
+            break
+
+    log.info("%s: scanned %s, sent %s",
+             market, len(symbols), sent)
+
+
+async def run():
+    connector = aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)
 
     async with aiohttp.ClientSession(
-        connector=connector,
-        timeout=timeout
+        connector=connector, headers=HEADERS
     ) as session:
 
-        await startup(session)
+        # Welcome message
+        for token, chat in (
+            (US_TOKEN or MAIN_TOKEN, US_CHAT),
+            (TASI_TOKEN or MAIN_TOKEN, TASI_CHAT),
+            (CRYPTO_TOKEN or MAIN_TOKEN, CRYPTO_CHAT)
+        ):
+            if token and chat:
+                await telegram(
+                    session, token, chat,
+                    f"🚀 {BOT_NAME}\n"
+                    "تم تشغيل محرك SMART MONEY\n"
+                    "جاري تجهيز بيانات الأسواق."
+                )
 
-        tasks = [
-            asyncio.create_task(us_loop(session)),
-            asyncio.create_task(saudi_loop(session)),
-            asyncio.create_task(crypto_loop(session)),
-            asyncio.create_task(tracker_loop(session))
-        ]
+        while True:
+            try:
+                log.info("Starting market scan")
 
-        log.info(
-            "AI PRO MAX V9.0 — ALL SYSTEMS STARTED"
-        )
+                us_symbols, tasi_symbols, crypto_symbols = (
+                    await asyncio.gather(
+                        get_us_symbols(session),
+                        get_tasi_symbols(session),
+                        get_crypto_symbols(session)
+                    )
+                )
 
-        await asyncio.gather(*tasks)
+                us_symbols = us_symbols[:MAX_US]
+
+                log.info(
+                    "US=%s TASI=%s CRYPTO=%s",
+                    len(us_symbols),
+                    len(tasi_symbols),
+                    len(crypto_symbols)
+                )
+
+                await asyncio.gather(
+                    scan_market(
+                        session, "US", us_symbols,
+                        US_TOKEN or MAIN_TOKEN, US_CHAT
+                    ),
+                    scan_market(
+                        session, "TASI", tasi_symbols,
+                        TASI_TOKEN or MAIN_TOKEN, TASI_CHAT
+                    ),
+                    scan_market(
+                        session, "CRYPTO", crypto_symbols,
+                        CRYPTO_TOKEN or MAIN_TOKEN, CRYPTO_CHAT
+                    )
+                )
+
+            except Exception:
+                log.exception("Main scanner error")
+
+            await asyncio.sleep(SCAN_SECONDS)
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-
-    except KeyboardInterrupt:
-        save_state()
-        log.warning("AI PRO MAX stopped manually")
-
-    except Exception:
-        save_state()
-        log.exception("Fatal system error")
+    asyncio.run(run())
