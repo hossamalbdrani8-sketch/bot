@@ -10,6 +10,7 @@ import aiohttp
 # =====================================================
 # AI PRO MAX V10 — SMART MONEY
 # US + TASI + CRYPTO | PUBLIC DATA
+# TELEGRAM DIAGNOSTICS FIX
 # =====================================================
 
 BOT_NAME = "AI PRO MAX 💀🚀"
@@ -31,7 +32,11 @@ MAX_US = int(os.getenv("MAX_US", "150"))
 MAX_CRYPTO = int(os.getenv("MAX_CRYPTO", "80"))
 MAX_RESULTS = int(os.getenv("MAX_RESULTS", "10"))
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+
 log = logging.getLogger("AIPROMAX")
 
 BASE_YAHOO = "https://query1.finance.yahoo.com"
@@ -57,26 +62,34 @@ def fmt(value):
 def ema(values, period):
     if not values:
         return 0
+
     k = 2 / (period + 1)
     result = values[0]
+
     for x in values[1:]:
         result = x * k + result * (1 - k)
+
     return result
 
 
 def rsi(values, period=14):
     if len(values) < period + 1:
         return 50
+
     gains = []
     losses = []
+
     for i in range(-period, 0):
         change = values[i] - values[i - 1]
         gains.append(max(change, 0))
         losses.append(max(-change, 0))
+
     avg_gain = sum(gains) / period
     avg_loss = sum(losses) / period
+
     if avg_loss == 0:
         return 100
+
     return 100 - (100 / (1 + avg_gain / avg_loss))
 
 
@@ -91,6 +104,7 @@ def analyze(rows):
 
     price = closes[-1]
     volume = volumes[-1]
+
     avg_volume = sum(volumes[-21:-1]) / 20
     volume_ratio = volume / max(avg_volume, 1)
 
@@ -103,6 +117,7 @@ def analyze(rows):
         ((highs[i] + lows[i] + closes[i]) / 3) * volumes[i]
         for i in range(len(rows))
     )
+
     vwap_den = sum(volumes)
     vwap = vwap_num / max(vwap_den, 1)
 
@@ -110,6 +125,7 @@ def analyze(rows):
     supply = max(highs[-30:])
 
     strength = 0
+
     if price > e10:
         strength += 10
     if price > e14:
@@ -155,23 +171,41 @@ async def get_json(session, url, params=None):
     try:
         async with semaphore:
             async with session.get(
-                url, params=params, headers=HEADERS,
+                url,
+                params=params,
+                headers=HEADERS,
                 timeout=aiohttp.ClientTimeout(total=15)
             ) as response:
+
                 if response.status != 200:
+                    log.warning(
+                        "DATA HTTP ERROR | %s | %s",
+                        response.status, url
+                    )
                     return None
+
                 return await response.json(content_type=None)
+
     except Exception as e:
         log.warning("DATA ERROR: %s", e)
         return None
 
 
+# =====================================================
+# TELEGRAM — FIXED WITH ERROR DIAGNOSTICS
+# =====================================================
+
 async def telegram(session, token, chat, message):
+
     if not token or not chat:
-        log.warning("Telegram token or chat missing")
+        log.error(
+            "TELEGRAM CONFIG ERROR | token=%s | chat=%s",
+            bool(token), bool(chat)
+        )
         return False
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
+
     try:
         async with session.post(
             url,
@@ -180,22 +214,45 @@ async def telegram(session, token, chat, message):
                 "text": message,
                 "disable_web_page_preview": True
             },
-            timeout=15
+            timeout=aiohttp.ClientTimeout(total=20)
         ) as response:
-            return response.status == 200
+
+            body = await response.text()
+
+            try:
+                result = await response.json(content_type=None)
+            except Exception:
+                result = {}
+
+            if response.status == 200 and result.get("ok"):
+                log.info("TELEGRAM SEND SUCCESS")
+                return True
+
+            log.error(
+                "TELEGRAM SEND FAILED | HTTP=%s | RESPONSE=%s",
+                response.status,
+                body[:1000]
+            )
+
+            return False
+
     except Exception:
+        log.exception("TELEGRAM CONNECTION ERROR")
         return False
 
 
-# ---------------- US STOCK UNIVERSE ----------------
+# =====================================================
+# US STOCK UNIVERSE
+# =====================================================
 
 async def get_us_symbols(session):
     symbols = []
 
     for exchange in ("nasdaq", "nyse", "amex"):
+
         data = await get_json(
             session,
-            f"https://api.nasdaq.com/api/screener/stocks",
+            "https://api.nasdaq.com/api/screener/stocks",
             {
                 "tableonly": "true",
                 "limit": "5000",
@@ -208,8 +265,10 @@ async def get_us_symbols(session):
 
         try:
             rows = data["data"]["table"]["rows"]
+
             for row in rows:
                 symbol = row.get("symbol", "").strip()
+
                 if (
                     symbol
                     and symbol.isascii()
@@ -218,25 +277,34 @@ async def get_us_symbols(session):
                     and "^" not in symbol
                 ):
                     symbols.append(symbol)
-        except Exception:
-            continue
 
-    return list(dict.fromkeys(symbols))
+        except Exception:
+            log.exception("US SYMBOL PARSE ERROR")
+
+    result = list(dict.fromkeys(symbols))
+
+    log.info("US SYMBOLS FOUND: %s", len(result))
+
+    return result
 
 
 async def yahoo_chart(session, symbol):
     url = f"{BASE_YAHOO}/v8/finance/chart/{symbol}"
+
     data = await get_json(
-        session, url,
+        session,
+        url,
         {"range": "5d", "interval": "5m"}
     )
 
     try:
         result = data["chart"]["result"][0]
         quote = result["indicators"]["quote"][0]
+
         rows = []
 
         for i in range(len(result["timestamp"])):
+
             close = quote["close"][i]
             high = quote["high"][i]
             low = quote["low"][i]
@@ -253,14 +321,17 @@ async def yahoo_chart(session, symbol):
             })
 
         return rows
+
     except Exception:
         return None
 
 
-# ---------------- SAUDI MARKET ----------------
+# =====================================================
+# SAUDI MARKET
+# =====================================================
 
 async def get_tasi_symbols(session):
-    # Yahoo public screener: Saudi active stocks.
+
     data = await get_json(
         session,
         f"{BASE_YAHOO}/v1/finance/screener/predefined/saved",
@@ -274,20 +345,33 @@ async def get_tasi_symbols(session):
 
     try:
         quotes = data["finance"]["result"][0]["quotes"]
-        return list(dict.fromkeys(
-            q["symbol"] for q in quotes
+
+        symbols = list(dict.fromkeys(
+            q["symbol"]
+            for q in quotes
             if q.get("symbol", "").endswith(".SR")
         ))
+
+        log.info("TASI SYMBOLS FOUND: %s", len(symbols))
+
+        return symbols
+
     except Exception:
+        log.exception("TASI SYMBOL ERROR")
         return []
 
 
-# ---------------- CRYPTO MARKET ----------------
+# =====================================================
+# CRYPTO MARKET
+# =====================================================
 
 async def get_crypto_symbols(session):
+
     data = await get_json(
-        session, f"{BASE_BINANCE}/api/v3/ticker/24hr"
+        session,
+        f"{BASE_BINANCE}/api/v3/ticker/24hr"
     )
+
     if not isinstance(data, list):
         return []
 
@@ -296,7 +380,12 @@ async def get_crypto_symbols(session):
         if x.get("symbol", "").endswith("USDT")
         and not any(
             tag in x["symbol"]
-            for tag in ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT")
+            for tag in (
+                "UPUSDT",
+                "DOWNUSDT",
+                "BULLUSDT",
+                "BEARUSDT"
+            )
         )
     ]
 
@@ -305,14 +394,23 @@ async def get_crypto_symbols(session):
         reverse=True
     )
 
-    return [x["symbol"] for x in coins[:MAX_CRYPTO]]
+    symbols = [x["symbol"] for x in coins[:MAX_CRYPTO]]
+
+    log.info("CRYPTO SYMBOLS FOUND: %s", len(symbols))
+
+    return symbols
 
 
 async def crypto_chart(session, symbol):
+
     data = await get_json(
         session,
         f"{BASE_BINANCE}/api/v3/klines",
-        {"symbol": symbol, "interval": "5m", "limit": "100"}
+        {
+            "symbol": symbol,
+            "interval": "5m",
+            "limit": "100"
+        }
     )
 
     if not isinstance(data, list):
@@ -330,30 +428,42 @@ async def crypto_chart(session, symbol):
 
 
 async def crypto_depth(session, symbol):
+
     data = await get_json(
         session,
         f"{BASE_BINANCE}/api/v3/depth",
-        {"symbol": symbol, "limit": "20"}
+        {
+            "symbol": symbol,
+            "limit": "20"
+        }
     )
 
     if not data:
         return None
 
-    bids = sum(float(x[0]) * float(x[1]) for x in data["bids"])
-    asks = sum(float(x[0]) * float(x[1]) for x in data["asks"])
+    bids = sum(
+        float(x[0]) * float(x[1])
+        for x in data["bids"]
+    )
+
+    asks = sum(
+        float(x[0]) * float(x[1])
+        for x in data["asks"]
+    )
 
     return {
         "bids": bids,
         "asks": asks,
-        "imbalance": (
-            bids / max(asks, 0.000001)
-        )
+        "imbalance": bids / max(asks, 0.000001)
     }
 
 
-# ---------------- SIGNAL ENGINE ----------------
+# =====================================================
+# SIGNAL ENGINE
+# =====================================================
 
 def make_signal(market, symbol, a, depth=None):
+
     score = a["score"]
     price = a["price"]
 
@@ -368,12 +478,15 @@ def make_signal(market, symbol, a, depth=None):
 
     if price > a["supply"]:
         state = "🚀 اختراق مقاومة"
+
     elif price >= a["demand"] * 1.01:
         state = "🟢 قريب من منطقة الطلب"
+
     else:
         state = "⏳ مراقبة"
 
     stop = a["demand"] * 0.985
+
     target1 = price + (price - stop) * 1.5
     target2 = price + (price - stop) * 2.5
     target3 = price + (price - stop) * 4
@@ -400,9 +513,12 @@ def make_signal(market, symbol, a, depth=None):
 
 
 def render_signal(s):
+
     depth_text = ""
+
     if s["depth"]:
         d = s["depth"]
+
         depth_text = (
             f"\n🟢 طلبات دفتر الأوامر: ${d['bids']:,.0f}"
             f"\n🔴 عروض دفتر الأوامر: ${d['asks']:,.0f}"
@@ -437,37 +553,55 @@ def render_signal(s):
     )
 
 
+# =====================================================
+# SCAN ONE SYMBOL
+# =====================================================
+
 async def scan_one(session, market, symbol):
+
     if market == "CRYPTO":
         rows = await crypto_chart(session, symbol)
         depth = await crypto_depth(session, symbol)
+
     else:
-        yahoo_symbol = symbol if market == "US" else symbol
-        rows = await yahoo_chart(session, yahoo_symbol)
+        rows = await yahoo_chart(session, symbol)
         depth = None
 
     if not rows:
         return None
 
     analysis = analyze(rows)
+
     if not analysis:
         return None
 
     return make_signal(market, symbol, analysis, depth)
 
 
+# =====================================================
+# SCAN MARKET
+# =====================================================
+
 async def scan_market(session, market, symbols, token, chat):
+
     results = []
 
     async def worker(symbol):
         try:
             result = await scan_one(session, market, symbol)
+
             if result:
                 results.append(result)
-        except Exception as e:
-            log.debug("%s %s: %s", market, symbol, e)
 
-    await asyncio.gather(*(worker(s) for s in symbols))
+        except Exception:
+            log.exception(
+                "%s SCAN ERROR: %s",
+                market, symbol
+            )
+
+    await asyncio.gather(
+        *(worker(s) for s in symbols)
+    )
 
     results.sort(
         key=lambda x: (x["score"], x["ratio"]),
@@ -475,18 +609,23 @@ async def scan_market(session, market, symbols, token, chat):
     )
 
     sent = 0
+
     for item in results:
+
         key = f"{market}:{item['symbol']}"
         old = last_signals.get(key)
 
-        if old and old >= item["score"]:
+        if old is not None and old >= item["score"]:
             continue
 
         if item["score"] < 65:
             continue
 
         ok = await telegram(
-            session, token, chat, render_signal(item)
+            session,
+            token,
+            chat,
+            render_signal(item)
         )
 
         if ok:
@@ -496,34 +635,71 @@ async def scan_market(session, market, symbols, token, chat):
         if sent >= MAX_RESULTS:
             break
 
-    log.info("%s: scanned %s, sent %s",
-             market, len(symbols), sent)
+    log.info(
+        "%s: scanned=%s results=%s sent=%s",
+        market,
+        len(symbols),
+        len(results),
+        sent
+    )
 
+
+# =====================================================
+# MAIN ENGINE — 24/7
+# =====================================================
 
 async def run():
-    connector = aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)
+
+    connector = aiohttp.TCPConnector(
+        limit=30,
+        ttl_dns_cache=300
+    )
 
     async with aiohttp.ClientSession(
-        connector=connector, headers=HEADERS
+        connector=connector,
+        headers=HEADERS
     ) as session:
 
-        # Welcome message
-        for token, chat in (
-            (US_TOKEN or MAIN_TOKEN, US_CHAT),
-            (TASI_TOKEN or MAIN_TOKEN, TASI_CHAT),
-            (CRYPTO_TOKEN or MAIN_TOKEN, CRYPTO_CHAT)
-        ):
-            if token and chat:
-                await telegram(
-                    session, token, chat,
-                    f"🚀 {BOT_NAME}\n"
-                    "تم تشغيل محرك SMART MONEY\n"
-                    "جاري تجهيز بيانات الأسواق."
-                )
+        log.info("AI PRO MAX STARTING")
 
+        # Independent welcome messages
+        welcome_bots = [
+            ("US", US_TOKEN or MAIN_TOKEN, US_CHAT),
+            ("TASI", TASI_TOKEN or MAIN_TOKEN, TASI_CHAT),
+            ("CRYPTO", CRYPTO_TOKEN or MAIN_TOKEN, CRYPTO_CHAT)
+        ]
+
+        for market, token, chat in welcome_bots:
+
+            message = (
+                f"💀 {BOT_NAME}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"✅ تم تشغيل محرك {market}\n"
+                f"📡 جاري تجهيز بيانات السوق\n"
+                f"🕒 {now()}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🚀 AI PRO MAX SMART MONEY"
+            )
+
+            success = await telegram(
+                session,
+                token,
+                chat,
+                message
+            )
+
+            log.info(
+                "%s WELCOME: %s",
+                market,
+                "SUCCESS" if success else "FAILED"
+            )
+
+        # Continuous scanning
         while True:
+
             try:
-                log.info("Starting market scan")
+
+                log.info("STARTING MARKET SCAN")
 
                 us_symbols, tasi_symbols, crypto_symbols = (
                     await asyncio.gather(
@@ -536,29 +712,46 @@ async def run():
                 us_symbols = us_symbols[:MAX_US]
 
                 log.info(
-                    "US=%s TASI=%s CRYPTO=%s",
+                    "MARKET STATUS | US=%s | TASI=%s | CRYPTO=%s",
                     len(us_symbols),
                     len(tasi_symbols),
                     len(crypto_symbols)
                 )
 
                 await asyncio.gather(
+
                     scan_market(
-                        session, "US", us_symbols,
-                        US_TOKEN or MAIN_TOKEN, US_CHAT
+                        session,
+                        "US",
+                        us_symbols,
+                        US_TOKEN or MAIN_TOKEN,
+                        US_CHAT
                     ),
+
                     scan_market(
-                        session, "TASI", tasi_symbols,
-                        TASI_TOKEN or MAIN_TOKEN, TASI_CHAT
+                        session,
+                        "TASI",
+                        tasi_symbols,
+                        TASI_TOKEN or MAIN_TOKEN,
+                        TASI_CHAT
                     ),
+
                     scan_market(
-                        session, "CRYPTO", crypto_symbols,
-                        CRYPTO_TOKEN or MAIN_TOKEN, CRYPTO_CHAT
+                        session,
+                        "CRYPTO",
+                        crypto_symbols,
+                        CRYPTO_TOKEN or MAIN_TOKEN,
+                        CRYPTO_CHAT
                     )
                 )
 
             except Exception:
-                log.exception("Main scanner error")
+                log.exception("MAIN SCANNER ERROR")
+
+            log.info(
+                "NEXT SCAN IN %s SECONDS",
+                SCAN_SECONDS
+            )
 
             await asyncio.sleep(SCAN_SECONDS)
 
