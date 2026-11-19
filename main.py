@@ -142,6 +142,59 @@ def save_state(market, symbol, tf, data):
     con.commit()
     con.close()
 
+def sync_symbol_rename(market, new_symbol, new_name):
+    """يحدّث السجلات والأهداف إذا تغيّر اسم السهم/الرمز لنفس الشركة في السوق"""
+    if not new_name:
+        return
+
+    con = db()
+    rows = con.execute(
+        "SELECT symbol, timeframe, data FROM states WHERE market=?",
+        (market,)
+    ).fetchall()
+
+    for old_sym, tf, raw_data in rows:
+        if old_sym == new_symbol:
+            continue
+        try:
+            st = json.loads(raw_data) if raw_data else {}
+        except Exception:
+            st = {}
+
+        if st.get("name") and st.get("name") == new_name:
+            # نقل الحالة والأهداف إلى الرمز الجديد وتحديثها
+            con.execute("""
+                INSERT INTO states VALUES(?,?,?,?,?)
+                ON CONFLICT(market,symbol,timeframe)
+                DO UPDATE SET data=excluded.data,updated=excluded.updated
+            """, (market, new_symbol, tf, raw_data, time.time()))
+
+            old_targets = con.execute("""
+                SELECT target_no, target_price, hit, created
+                FROM targets
+                WHERE market=? AND symbol=? AND timeframe=?
+            """, (market, old_sym, tf)).fetchall()
+
+            for t_no, t_price, hit, created in old_targets:
+                con.execute("""
+                    INSERT INTO targets VALUES(?,?,?,?,?,?,?)
+                    ON CONFLICT(market,symbol,timeframe,target_no)
+                    DO UPDATE SET target_price=excluded.target_price, hit=excluded.hit
+                """, (market, new_symbol, tf, t_no, t_price, hit, created))
+
+            con.execute(
+                "DELETE FROM states WHERE market=? AND symbol=? AND timeframe=?",
+                (market, old_sym, tf)
+            )
+            con.execute(
+                "DELETE FROM targets WHERE market=? AND symbol=? AND timeframe=?",
+                (market, old_sym, tf)
+            )
+            log.info("Symbol renamed/updated in %s: %s -> %s (%s)", market, old_sym, new_symbol, new_name)
+
+    con.commit()
+    con.close()
+
 def get_cursor(market):
     con = db()
     row = con.execute(
@@ -194,6 +247,7 @@ def load_font(size):
         "/usr/local/share/fonts/NotoNaskhArabic-Bold.ttf",
         "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"
     ]
@@ -400,20 +454,22 @@ def create_dashboard(market, item, tf, result, events, hits):
         anchor="ra"
     )
 
+    acc_text = "موجود" if result["accumulation"] else "غير ظاهر"
+
     metrics = [
-        ("الفوليوم", f"{result['volume']:,.0f}", white),
-        ("نشاط الفوليوم", f"{result['volume_ratio']:.2f}x", green if result["volume_ratio"] >= 1.5 else white),
-        ("RSI", f"{result['rsi']:.2f}" if result["rsi"] is not None else "--", white),
-        ("VWAP", f"{result['vwap']:.4f}" if result["vwap"] is not None else "--", white),
-        ("قوة المشترين", f"{result['buyer_proxy']:.1f}%", green if result["buyer_proxy"] >= 50 else red),
-        ("التجميع", "موجود" if result["accumulation"] else "غير ظاهر", green if result["accumulation"] else muted)
+        ("الفوليوم", f"{result['volume']:,.0f}", white, False),
+        ("نشاط الفوليوم", f"{result['volume_ratio']:.2f}x", green if result["volume_ratio"] >= 1.5 else white, False),
+        ("RSI", f"{result['rsi']:.2f}" if result["rsi"] is not None else "--", white, False),
+        ("VWAP", f"{result['vwap']:.4f}" if result["vwap"] is not None else "--", white, False),
+        ("قوة المشترين", f"{result['buyer_proxy']:.1f}%", green if result["buyer_proxy"] >= 50 else red, False),
+        ("التجميع", acc_text, green if result["accumulation"] else muted, True)
     ]
 
     col_widths = 730
     col_gap = 30
     start_x_right = WIDTH - 95
 
-    for idx, (label, val_str, val_color) in enumerate(metrics):
+    for idx, (label, val_str, val_color, is_arabic_val) in enumerate(metrics):
         row = idx // 3
         col = idx % 3
 
@@ -439,13 +495,23 @@ def create_dashboard(market, item, tf, result, events, hits):
             anchor="ra"
         )
 
-        draw.text(
-            ((box_x1 + box_x2) // 2, box_y1 + 150),
-            str(val_str),
-            font=data_font,
-            fill=val_color,
-            anchor="mm"
-        )
+        if is_arabic_val:
+            draw_rtl(
+                draw,
+                ((box_x1 + box_x2) // 2, box_y1 + 150),
+                str(val_str),
+                data_font,
+                val_color,
+                anchor="mm"
+            )
+        else:
+            draw.text(
+                ((box_x1 + box_x2) // 2, box_y1 + 150),
+                str(val_str),
+                font=data_font,
+                fill=val_color,
+                anchor="mm"
+            )
 
     # =====================================================
     # 4) الدعم والمقاومة والمتوسطات EMA (y: 1455 -> 1825)
@@ -540,7 +606,7 @@ def create_dashboard(market, item, tf, result, events, hits):
             row_fill = green_soft if hit else navy_card
             row_outline = green_border if hit else navy_border
             text_color = green if hit else white
-            status_mark = "[✓]" if hit else "[○]"
+            status_mark = "✓" if hit else "•"
 
             draw.rounded_rectangle(
                 (x1, y1, x2, y2),
@@ -779,7 +845,7 @@ async def get_sa_symbols(session):
             if not data:
                 break
 
-            rows = data.get("results", [])
+            rows = data.get("results", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
             if not rows:
                 break
 
@@ -794,7 +860,7 @@ async def get_sa_symbols(session):
                     continue
                 if status and status != "active":
                     continue
-                if security_type != "equity":
+                if security_type and security_type != "equity":
                     continue
 
                 seen.add(symbol)
@@ -805,7 +871,7 @@ async def get_sa_symbols(session):
 
             offset += len(rows)
 
-            total = int(data.get("total", 0) or 0)
+            total = int(data.get("total", 0) or 0) if isinstance(data, dict) else 0
             if len(rows) < 500 or (total and offset >= total):
                 break
 
@@ -909,6 +975,8 @@ async def sa_bars(session, symbol, interval):
     if not data:
         return []
 
+    rows = data.get("data", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+
     return [{
         "open": float(x["open"]),
         "high": float(x["high"]),
@@ -916,7 +984,7 @@ async def sa_bars(session, symbol, interval):
         "close": float(x["close"]),
         "volume": float(x["volume"]),
         "time": x.get("date")
-    } for x in data.get("data", [])
+    } for x in rows
         if all(k in x for k in ("open", "high", "low", "close", "volume"))]
 
 async def crypto_bars(session, symbol, interval):
@@ -1131,7 +1199,8 @@ def update_targets(market, symbol, tf, high):
 # SIGNAL ENGINE
 # =========================================================
 
-def signal_events(market, symbol, tf, result):
+def signal_events(market, symbol, tf, result, item_name=""):
+    sync_symbol_rename(market, symbol, item_name)
     old = get_state(market, symbol, tf)
 
     price = result["price"]
@@ -1144,8 +1213,12 @@ def signal_events(market, symbol, tf, result):
             "rsi": current_rsi,
             "ema": {},
             "volume_ratio": 0,
-            "accumulation": False
+            "accumulation": False,
+            "name": item_name
         }
+
+    if item_name and old.get("name") and old.get("name") != item_name:
+        events.append("تحديث اسم/بيانات السهم")
 
     old_ema = old.get("ema", {})
 
@@ -1193,10 +1266,6 @@ def signal_events(market, symbol, tf, result):
     ):
         events.append("كسر VWAP للأسفل")
 
-    # Breakout confirmation against the previous candles only.
-    # This avoids comparing the price to a resistance containing itself.
-    # The current candle is excluded from the previous-range calculation.
-
     save_state(market, symbol, tf, {
         "price": price,
         "rsi": current_rsi,
@@ -1205,7 +1274,8 @@ def signal_events(market, symbol, tf, result):
             for k, v in result["ema"].items()
         },
         "volume_ratio": result["volume_ratio"],
-        "accumulation": result["accumulation"]
+        "accumulation": result["accumulation"],
+        "name": item_name
     })
 
     return events
@@ -1287,7 +1357,7 @@ async def scan_one(session, market, item):
             )
 
             events = signal_events(
-                market, symbol, tf, result
+                market, symbol, tf, result, item.get("name", symbol)
             )
 
             if events or hits:
