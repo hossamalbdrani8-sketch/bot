@@ -1,4 +1,3 @@
-
 import os
 import io
 import json
@@ -20,7 +19,6 @@ try:
 except ImportError:
     def rtl(text):
         return str(text)
-
 
 # =========================================================
 # AI PRO MAX V12 — ULTRA HD TRADING TERMINAL
@@ -61,15 +59,14 @@ SIFTING_API = "https://api.sifting.io"
 TWELVE_API = "https://api.twelvedata.com"
 BINANCE_API = "https://api.binance.com"
 
-WIDTH = 1600
-HEIGHT = 1900
+WIDTH = 2400
+HEIGHT = 3000
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 log = logging.getLogger("AIPROMAX")
-
 
 # =========================================================
 # DATABASE
@@ -113,7 +110,6 @@ def db():
     con.commit()
     return con
 
-
 def get_state(market, symbol, tf):
     con = db()
     row = con.execute(
@@ -130,7 +126,6 @@ def get_state(market, symbol, tf):
     except Exception:
         return {}
 
-
 def save_state(market, symbol, tf, data):
     con = db()
     con.execute("""
@@ -141,7 +136,6 @@ def save_state(market, symbol, tf, data):
     con.commit()
     con.close()
 
-
 def get_cursor(market):
     con = db()
     row = con.execute(
@@ -149,7 +143,6 @@ def get_cursor(market):
     ).fetchone()
     con.close()
     return row[0] if row else 0
-
 
 def set_cursor(market, position):
     con = db()
@@ -161,18 +154,22 @@ def set_cursor(market, position):
     con.commit()
     con.close()
 
-
 # =========================================================
 # FONT AND IMAGE DESIGN
 # =========================================================
 
 def load_font(size):
+    script_dir = os.path.dirname(os.path.abspath(__file__))
     paths = [
+        os.path.join(script_dir, "NotoNaskhArabic-Bold.ttf"),
+        "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Bold.ttf",
+        "/usr/share/fonts/opentype/noto/NotoNaskhArabic-Bold.ttf",
+        "/usr/local/share/fonts/NotoNaskhArabic-Bold.ttf",
         "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"
     ]
 
     for path in paths:
@@ -184,7 +181,6 @@ def load_font(size):
 
     return ImageFont.load_default()
 
-
 def draw_rtl(draw, xy, text, font, fill, anchor="ra"):
     draw.text(
         xy,
@@ -193,7 +189,6 @@ def draw_rtl(draw, xy, text, font, fill, anchor="ra"):
         fill=fill,
         anchor=anchor
     )
-
 
 def money(value, market):
     currency = "SAR" if market == "TASI" else (
@@ -209,7 +204,6 @@ def money(value, market):
 
     return f"{value:,.{decimals}f} {currency}"
 
-
 def get_targets(market, symbol, tf):
     con = db()
     rows = con.execute("""
@@ -221,26 +215,42 @@ def get_targets(market, symbol, tf):
     con.close()
     return rows
 
-
 def create_dashboard(market, item, tf, result, events, hits):
-    image = Image.new("RGB", (WIDTH, HEIGHT), "#07111f")
+    # خلفية كحلية احترافية بدقة 2400 × 3000 بكسل
+    image = Image.new("RGB", (WIDTH, HEIGHT), "#06101E")
     draw = ImageDraw.Draw(image)
 
-    title_font = load_font(64)
-    big_font = load_font(80)
-    price_font = load_font(68)
-    section_font = load_font(43)
-    normal_font = load_font(36)
-    small_font = load_font(30)
-    target_font = load_font(31)
+    # خطوط مطابقة للمواصفات المطلوبة
+    price_font = load_font(125)
+    symbol_font = load_font(85)
+    section_font = load_font(70)
+    data_font = load_font(58)
+    target_font = load_font(52)
 
-    white = "#F3F7FF"
-    green = "#21D483"
-    red = "#FF5268"
-    yellow = "#FFD166"
-    muted = "#9CAFC5"
-    panel = "#101F33"
-    line = "#263C55"
+    title_font = load_font(82)
+    badge_font = load_font(46)
+    footer_font = load_font(44)
+
+    is_up = result["change"] > 0
+    is_down = result["change"] < 0
+
+    white = "#F5F8FF"
+    green = "#16DB7E"
+    green_soft = "#0E2E24"
+    green_border = "#1FC977"
+    red = "#FF475E"
+    red_soft = "#33111B"
+    red_border = "#F2465D"
+    navy_header = "#0E223D"
+    navy_panel = "#0C1A2E"
+    navy_card = "#11233D"
+    navy_border = "#233F63"
+    muted = "#9BB2CE"
+    gold = "#F7C948"
+
+    accent_main = green if is_up else (red if is_down else gold)
+    accent_bg = green_soft if is_up else (red_soft if is_down else "#2A2411")
+    accent_border = green_border if is_up else (red_border if is_down else gold)
 
     market_name = {
         "US": "السوق الأمريكي",
@@ -253,210 +263,310 @@ def create_dashboard(market, item, tf, result, events, hits):
     )
 
     price = result["price"]
-    direction = (
-        "صاعد" if result["change"] > 0
-        else "هابط" if result["change"] < 0
-        else "مستقر"
-    )
-    direction_color = green if result["change"] > 0 else (
-        red if result["change"] < 0 else yellow
-    )
+    direction = "صاعد" if is_up else ("هابط" if is_down else "مستقر")
 
-    def panel_box(x1, y1, x2, y2):
+    def panel_box(x1, y1, x2, y2, fill=navy_panel, outline=navy_border, width=3):
         draw.rounded_rectangle(
             (x1, y1, x2, y2),
-            radius=25,
-            fill=panel,
-            outline=line,
-            width=2
+            radius=32,
+            fill=fill,
+            outline=outline,
+            width=width
         )
 
-    # HEADER
-    draw.rounded_rectangle(
-        (35, 30, WIDTH - 35, 165),
-        radius=28,
-        fill="#142943",
-        outline="#315475",
-        width=3
-    )
+    # =====================================================
+    # 1) شريط العنوان العلوي (y: 40 -> 220)
+    # =====================================================
+    panel_box(55, 40, WIDTH - 55, 220, fill=navy_header, outline=accent_border, width=4)
 
     draw.text(
-        (WIDTH // 2, 83),
+        (WIDTH - 105, 130),
         "AI PRO MAX",
         font=title_font,
         fill=white,
-        anchor="mm"
-    )
-
-    draw.text(
-        (WIDTH // 2, 135),
-        VERSION,
-        font=small_font,
-        fill=green,
-        anchor="mm"
-    )
-
-    # SYMBOL AND MARKET
-    panel_box(35, 190, WIDTH - 35, 480)
-
-    symbol = item["symbol"]
-    name = item.get("name", symbol)
-
-    draw_rtl(
-        draw, (WIDTH - 75, 245),
-        f"{name}  |  {symbol}",
-        section_font, white
+        anchor="rm"
     )
 
     draw_rtl(
-        draw, (WIDTH - 75, 310),
-        market_name + "  |  الفاصل " + tf,
-        normal_font, muted
+        draw,
+        (105, 130),
+        f"{VERSION}  |  {market_name}  |  {tf}",
+        badge_font,
+        accent_main,
+        anchor="lm"
     )
 
+    # =====================================================
+    # 2) بطاقة السهم والسعر الرئيسي (y: 250 -> 820)
+    # =====================================================
+    panel_box(55, 250, WIDTH - 55, 820, fill=navy_panel, outline=accent_border, width=4)
+
+    symbol = str(item["symbol"])
+    name = str(item.get("name", symbol))
+
+    # اسم السهم بخط 85
+    draw_rtl(
+        draw,
+        (WIDTH - 105, 330),
+        f"{name} ({symbol})",
+        symbol_font,
+        white,
+        anchor="ra"
+    )
+
+    # شارة الحالة (صعود أخضر / هبوط أحمر)
+    draw.rounded_rectangle(
+        (105, 315, 435, 425),
+        radius=22,
+        fill=accent_bg,
+        outline=accent_border,
+        width=3
+    )
+    draw_rtl(
+        draw,
+        (270, 370),
+        f"{direction}  {result['change']:+.2f}%",
+        data_font,
+        accent_main,
+        anchor="mm"
+    )
+
+    # السعر الرئيسي بخط 125 كبير وواضح
+    price_text = f"{price:,.4f} {currency}" if price >= 1 else f"{price:,.6f} {currency}"
     draw.text(
-        (WIDTH // 2, 405),
-        f"{price:,.6f} {currency}",
+        (WIDTH // 2, 560),
+        price_text,
         font=price_font,
-        fill=green if result["change"] >= 0 else red,
+        fill=accent_main,
         anchor="mm"
     )
 
+    # معلومات السوق والفاصل الزمني والتغير بخط 58
     draw_rtl(
-        draw, (WIDTH - 75, 455),
-        f"التغير: {result['change']:+.2f}%  |  الحالة: {direction}",
-        normal_font, direction_color
+        draw,
+        (WIDTH - 105, 705),
+        f"السوق: {market_name}   •   الفاصل: {tf}",
+        data_font,
+        muted,
+        anchor="ra"
+    )
+    draw_rtl(
+        draw,
+        (105, 705),
+        f"التغير: {result['change']:+.2f}%   •   الحالة: {direction}",
+        data_font,
+        accent_main,
+        anchor="la"
     )
 
-    # MARKET DATA
-    panel_box(35, 505, WIDTH - 35, 890)
+    # =====================================================
+    # 3) بيانات السيولة والمؤشرات (y: 850 -> 1475)
+    # =====================================================
+    panel_box(55, 850, WIDTH - 55, 1475, fill=navy_panel, outline=navy_border, width=3)
 
+    # عنوان القسم بخط 70
     draw_rtl(
-        draw, (WIDTH - 75, 565),
-        "مؤشرات السوق والسيولة",
-        section_font, yellow
+        draw,
+        (WIDTH - 105, 880),
+        "بيانات السيولة والمؤشرات الفنية",
+        section_font,
+        gold,
+        anchor="ra"
     )
-
-    left_x = 760
-    right_x = WIDTH - 75
 
     metrics = [
-        ("الفوليوم", f"{result['volume']:,.0f}"),
-        ("نشاط الفوليوم", f"{result['volume_ratio']:.2f}x"),
-        ("RSI", f"{result['rsi']:.2f}" if result["rsi"] is not None else "--"),
-        ("VWAP", f"{result['vwap']:.6f}" if result["vwap"] else "--"),
-        ("قوة المشترين التقديرية", f"{result['buyer_proxy']:.1f}%"),
-        ("التجميع المحتمل", "موجود" if result["accumulation"] else "غير ظاهر")
+        ("الفوليوم", f"{result['volume']:,.0f}", white),
+        ("نشاط الفوليوم", f"{result['volume_ratio']:.2f}x", green if result["volume_ratio"] >= 1.5 else white),
+        ("RSI (14)", f"{result['rsi']:.2f}" if result["rsi"] is not None else "--", white),
+        ("VWAP", f"{result['vwap']:.4f}" if result["vwap"] is not None else "--", white),
+        ("قوة المشترين", f"{result['buyer_proxy']:.1f}%", green if result["buyer_proxy"] >= 50 else red),
+        ("التجميع", "موجود" if result["accumulation"] else "غير ظاهر", green if result["accumulation"] else muted)
     ]
 
-    for i, (label, value) in enumerate(metrics):
-        y = 640 + i * 39
-        draw_rtl(draw, (right_x, y), label, small_font, muted)
-        draw.text(
-            (left_x, y),
-            str(value),
-            font=small_font,
-            fill=white,
-            anchor="la"
+    # توزيع 6 مؤشرات في صفين × 3 أعمدة لتجنب التزاحم وضمان وضوح خط 58
+    col_widths = 720
+    col_gap = 35
+    start_x_right = WIDTH - 105
+
+    for idx, (label, val_str, val_color) in enumerate(metrics):
+        row = idx // 3
+        col = idx % 3
+
+        box_x2 = start_x_right - col * (col_widths + col_gap)
+        box_x1 = box_x2 - col_widths
+        box_y1 = 980 + row * 235
+        box_y2 = box_y1 + 205
+
+        draw.rounded_rectangle(
+            (box_x1, box_y1, box_x2, box_y2),
+            radius=22,
+            fill=navy_card,
+            outline=navy_border,
+            width=2
         )
 
-    # SUPPORT / RESISTANCE
-    panel_box(35, 915, WIDTH - 35, 1095)
+        draw_rtl(
+            draw,
+            (box_x2 - 26, box_y1 + 22),
+            label,
+            data_font,
+            muted,
+            anchor="ra"
+        )
+
+        draw.text(
+            ((box_x1 + box_x2) // 2, box_y1 + 148),
+            str(val_str),
+            font=data_font,
+            fill=val_color,
+            anchor="mm"
+        )
+
+    # =====================================================
+    # 4) الدعم والمقاومة و EMA (y: 1505 -> 1855)
+    # =====================================================
+    panel_box(55, 1505, WIDTH - 55, 1855, fill=navy_panel, outline=navy_border, width=3)
 
     draw_rtl(
-        draw, (WIDTH - 75, 970),
-        "مناطق السعر المهمة",
-        section_font, yellow
+        draw,
+        (WIDTH - 105, 1532),
+        "الدعم والمقاومة والمتوسطات EMA",
+        section_font,
+        gold,
+        anchor="ra"
     )
 
+    # بطاقة المقاومة (أحمر) وبطاقة الدعم (أخضر) بخط 58
+    draw.rounded_rectangle(
+        (1240, 1625, WIDTH - 105, 1730),
+        radius=20,
+        fill=red_soft,
+        outline=red_border,
+        width=2
+    )
     draw_rtl(
-        draw, (WIDTH - 75, 1040),
-        f"المقاومة: {result['resistance']:.6f}",
-        normal_font, red
+        draw,
+        (WIDTH - 135, 1677),
+        f"المقاومة: {result['resistance']:.4f}",
+        data_font,
+        red,
+        anchor="rm"
     )
 
+    draw.rounded_rectangle(
+        (105, 1625, 1200, 1730),
+        radius=20,
+        fill=green_soft,
+        outline=green_border,
+        width=2
+    )
     draw_rtl(
-        draw, (760, 1040),
-        f"الدعم: {result['support']:.6f}",
-        normal_font, green
+        draw,
+        (1170, 1677),
+        f"الدعم: {result['support']:.4f}",
+        data_font,
+        green,
+        anchor="rm"
     )
 
-    # EMA
-    panel_box(35, 1120, WIDTH - 35, 1320)
+    # قيم EMA بخط 58
+    ema_items = []
+    for p, v in result["ema"].items():
+        if v is not None:
+            ema_color = green if price >= v else red
+            ema_items.append(f"EMA{p}: {v:.4f}")
 
-    draw_rtl(
-        draw, (WIDTH - 75, 1170),
-        "المتوسطات المتحركة EMA",
-        section_font, yellow
-    )
-
-    ema_values = result["ema"]
-    ema_line = "   |   ".join(
-        f"{p}: {v:.4f}" for p, v in ema_values.items()
-        if v is not None
-    )
-
+    ema_summary = "   |   ".join(ema_items) if ema_items else "EMA: --"
     draw.text(
-        (WIDTH // 2, 1260),
-        ema_line if ema_line else "--",
-        font=normal_font,
+        (WIDTH // 2, 1795),
+        ema_summary,
+        font=data_font,
         fill=white,
         anchor="mm"
     )
 
-    # TARGETS
-    panel_box(35, 1345, WIDTH - 35, 1770)
+    # =====================================================
+    # 5) الأهداف العشرون 1 - 20 (y: 1885 -> 2845)
+    # توزيع عمودين × 10 صفوف بخط 52 بدون تداخل أو اختفاء
+    # =====================================================
+    panel_box(55, 1885, WIDTH - 55, 2845, fill=navy_panel, outline=navy_border, width=3)
 
     draw_rtl(
-        draw, (WIDTH - 75, 1400),
-        "الأهداف السعرية 1 - 20",
-        section_font, yellow
+        draw,
+        (WIDTH - 105, 1912),
+        "الأهداف السعرية (1 - 20)",
+        section_font,
+        gold,
+        anchor="ra"
     )
 
     targets = get_targets(market, symbol, tf)
 
     if targets:
-        for i, (number, target_price, hit) in enumerate(targets):
-            col = i // 10
-            row = i % 10
+        col_w = 1110
+        col_gap_t = 70
+        row_h = 78
+        base_y = 2015
 
-            x = WIDTH - 90 - col * 760
-            y = 1470 + row * 29
+        for idx, (number, target_price, hit) in enumerate(targets[:20]):
+            col = idx // 10      # العمود 0 يمين (الأهداف 1-10)، العمود 1 يسار (الأهداف 11-20)
+            row = idx % 10       # الصف 0 إلى 9
 
-            color = green if hit else muted
-            status = "✓" if hit else "○"
+            x2 = (WIDTH - 105) - col * (col_w + col_gap_t)
+            x1 = x2 - col_w
+            y1 = base_y + row * row_h
+            y2 = y1 + 66
+
+            row_fill = green_soft if hit else navy_card
+            row_outline = green_border if hit else navy_border
+            text_color = green if hit else white
+            status_mark = "[✓]" if hit else "[○]"
+
+            draw.rounded_rectangle(
+                (x1, y1, x2, y2),
+                radius=16,
+                fill=row_fill,
+                outline=row_outline,
+                width=2
+            )
 
             draw_rtl(
                 draw,
-                (x, y),
-                f"{status} هدف {number}: {money(target_price, market)}",
+                (x2 - 24, y1 + 33),
+                f"{status_mark} هدف {number:02d}: {money(target_price, market)}",
                 target_font,
-                color
+                text_color,
+                anchor="rm"
             )
     else:
         draw_rtl(
-            draw, (WIDTH - 75, 1510),
-            "تنتظر اكتمال بيانات ATR",
-            normal_font, muted
+            draw,
+            (WIDTH - 105, 2120),
+            "تنتظر اكتمال بيانات ATR لحساب الأهداف 1 إلى 20",
+            data_font,
+            muted,
+            anchor="ra"
         )
 
-    # FOOTER
-    draw.line((50, 1790, WIDTH - 50, 1790), fill=line, width=3)
+    # =====================================================
+    # 6) التذييل السفلي (y: 2875 -> 2965)
+    # =====================================================
+    draw.line((70, 2875, WIDTH - 70, 2875), fill=navy_border, width=3)
 
     draw.text(
-        (WIDTH // 2, 1830),
-        "AI PRO MAX  |  LIVE MARKET SCANNER  |  24/7",
-        font=small_font,
-        fill=green,
-        anchor="mm"
+        (WIDTH - 105, 2920),
+        "AI PRO MAX  |  24/7 LIVE SCANNER",
+        font=footer_font,
+        fill=accent_main,
+        anchor="rm"
     )
 
     draw.text(
-        (WIDTH // 2, 1870),
+        (105, 2920),
         datetime.now().strftime("%Y-%m-%d  %H:%M:%S"),
-        font=small_font,
+        font=footer_font,
         fill=muted,
-        anchor="mm"
+        anchor="lm"
     )
 
     output = io.BytesIO()
@@ -465,7 +575,6 @@ def create_dashboard(market, item, tf, result, events, hits):
     output.name = f"{symbol}_{tf}.png"
 
     return output
-
 
 # =========================================================
 # HTTP
@@ -502,7 +611,6 @@ async def get_json(session, url, headers=None, params=None, retries=3):
 
     return None
 
-
 async def telegram_text(session, token, chat, message):
     if not token or not chat:
         log.error("Telegram token/chat missing")
@@ -533,7 +641,6 @@ async def telegram_text(session, token, chat, message):
             return False
 
     return True
-
 
 async def telegram_photo(session, token, chat, photo, caption):
     if not token or not chat:
@@ -572,14 +679,12 @@ async def telegram_photo(session, token, chat, photo, caption):
         log.exception("Photo send error: %s", exc)
         return False
 
-
 def bot_details(market):
     if market == "US":
         return US_BOT, US_CHAT
     if market == "TASI":
         return TASI_BOT, TASI_CHAT
     return CRYPTO_BOT, CRYPTO_CHAT
-
 
 # =========================================================
 # SYMBOL UNIVERSES
@@ -626,7 +731,6 @@ async def get_us_symbols(session):
 
     log.info("US symbols: %s", len(symbols))
     return symbols
-
 
 async def get_sa_symbols(session):
     if not SAHMK_KEY:
@@ -688,7 +792,6 @@ async def get_sa_symbols(session):
     log.info("Saudi symbols: %s", len(symbols))
     return symbols
 
-
 async def get_crypto_symbols(session):
     data = await get_json(
         session,
@@ -718,7 +821,6 @@ async def get_crypto_symbols(session):
 
     log.info("Crypto symbols: %s", len(symbols))
     return symbols
-
 
 # =========================================================
 # MARKET DATA
@@ -759,7 +861,6 @@ async def us_bars(session, symbol, interval):
     } for x in data.get("data", [])
         if all(k in x for k in ("o", "h", "l", "c", "v"))]
 
-
 async def sa_bars(session, symbol, interval):
     if not SAHMK_KEY:
         return []
@@ -798,7 +899,6 @@ async def sa_bars(session, symbol, interval):
     } for x in data.get("data", [])
         if all(k in x for k in ("open", "high", "low", "close", "volume"))]
 
-
 async def crypto_bars(session, symbol, interval):
     data = await get_json(
         session,
@@ -822,7 +922,6 @@ async def crypto_bars(session, symbol, interval):
         "time": x[0]
     } for x in data]
 
-
 # =========================================================
 # TECHNICAL ANALYSIS
 # =========================================================
@@ -838,7 +937,6 @@ def ema(values, period):
         result = alpha * value + (1 - alpha) * result
 
     return result
-
 
 def rsi(values, period=14):
     if len(values) < period + 1:
@@ -865,7 +963,6 @@ def rsi(values, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-
 def atr(bars, period=14):
     if len(bars) < period + 1:
         return None
@@ -884,7 +981,6 @@ def atr(bars, period=14):
 
     return sum(trs[-period:]) / min(period, len(trs))
 
-
 def vwap(bars):
     recent = bars[-30:]
     total_volume = sum(x["volume"] for x in recent)
@@ -898,7 +994,6 @@ def vwap(bars):
     )
 
     return total / total_volume
-
 
 def analyze(bars):
     if len(bars) < 30:
@@ -955,7 +1050,6 @@ def analyze(bars):
         "buyer_proxy": buyer_proxy
     }
 
-
 # =========================================================
 # TARGETS 1-20
 # =========================================================
@@ -989,7 +1083,6 @@ def create_targets(market, symbol, tf, price, current_atr):
     con.commit()
     con.close()
 
-
 def update_targets(market, symbol, tf, high):
     con = db()
 
@@ -1013,7 +1106,6 @@ def update_targets(market, symbol, tf, high):
     con.commit()
     con.close()
     return hits
-
 
 # =========================================================
 # SIGNAL ENGINE
@@ -1098,7 +1190,6 @@ def signal_events(market, symbol, tf, result):
 
     return events
 
-
 # =========================================================
 # SEND DASHBOARD
 # =========================================================
@@ -1137,7 +1228,6 @@ async def send_dashboard(session, market, item, tf, result, events, hits):
             f"السعر: {result['price']:.6f}\n"
             f"التغير: {result['change']:+.2f}%"
         )
-
 
 # =========================================================
 # SCAN ONE SYMBOL
@@ -1192,7 +1282,6 @@ async def scan_one(session, market, item):
             )
 
     return messages
-
 
 # =========================================================
 # MARKET PROCESSING
@@ -1254,7 +1343,6 @@ async def process_market(session, market, symbols):
         "%s scanned %s/%s | reports=%s | sent=%s",
         market, end, len(symbols), len(reports), sent
     )
-
 
 # =========================================================
 # MAIN LOOP 24/7
@@ -1355,7 +1443,6 @@ async def main():
             except Exception:
                 log.exception("MAIN LOOP ERROR")
                 await asyncio.sleep(15)
-
 
 if __name__ == "__main__":
     try:
