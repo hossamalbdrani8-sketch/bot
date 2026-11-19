@@ -1,760 +1,1030 @@
 
 import os
+import json
+import time
+import math
 import asyncio
 import logging
-from datetime import datetime
-from zoneinfo import ZoneInfo
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import aiohttp
 
-# =====================================================
-# AI PRO MAX V10 — SMART MONEY
-# US + TASI + CRYPTO | PUBLIC DATA
-# TELEGRAM DIAGNOSTICS FIX
-# =====================================================
+# =========================================================
+# AI PRO MAX V11 — 24/7 FULL MARKET SCANNER
+# US + TASI/NOMU + BINANCE SPOT
+# =========================================================
 
-BOT_NAME = "AI PRO MAX 💀🚀"
-TZ = ZoneInfo("Asia/Riyadh")
+APP = "AI PRO MAX 💀🚀"
+SCAN_SECONDS = int(os.getenv("SCAN_SECONDS", "300"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "20"))
+WORKERS = int(os.getenv("WORKERS", "4"))
+DB_PATH = os.getenv("DB_PATH", "/data/ai_pro_max.db")
+
+US_MIN_PRICE = 0.12
+TIMEFRAMES = ["5m", "15m", "1h", "1d"]
 
 US_TOKEN = os.getenv("US_TOKEN", "")
-TASI_TOKEN = os.getenv("TASI_TOKEN", "")
-CRYPTO_TOKEN = os.getenv("CRYPTO_TOKEN", "")
+SIFTING_KEY = os.getenv("SIFTING_API_KEY", "")
+SAHMK_KEY = os.getenv("SAHMK_API_KEY", "") or os.getenv("TASI_TOKEN", "")
+TWELVE_KEY = os.getenv("TWELVEDATA_API_KEY", "")
 
-MAIN_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-CHAT_ID = os.getenv("CHAT_ID", "")
+US_BOT = os.getenv("US_TOKEN", "")
+TASI_BOT = os.getenv("TASI_TOKEN", "")
+CRYPTO_BOT = os.getenv("CRYPTO_TOKEN", "")
 
-US_CHAT = os.getenv("US_CHAT_ID", CHAT_ID)
-TASI_CHAT = os.getenv("TASI_CHAT_ID", CHAT_ID)
-CRYPTO_CHAT = os.getenv("CRYPTO_CHAT_ID", CHAT_ID)
+GENERAL_CHAT = os.getenv("CHAT_ID", "")
+US_CHAT = os.getenv("US_CHAT_ID", "") or GENERAL_CHAT
+TASI_CHAT = os.getenv("TASI_CHAT_ID", "") or GENERAL_CHAT
+CRYPTO_CHAT = os.getenv("CRYPTO_CHAT_ID", "") or GENERAL_CHAT
 
-SCAN_SECONDS = int(os.getenv("SCAN_SECONDS", "300"))
-MAX_US = int(os.getenv("MAX_US", "150"))
-MAX_CRYPTO = int(os.getenv("MAX_CRYPTO", "80"))
-MAX_RESULTS = int(os.getenv("MAX_RESULTS", "10"))
+TELEGRAM_API = "https://api.telegram.org"
+SAHMK_API = "https://api.sahmk.sa/api/v1"
+SIFTING_API = "https://api.sifting.io"
+TWELVE_API = "https://api.twelvedata.com"
+BINANCE_API = "https://api.binance.com"
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
-
 log = logging.getLogger("AIPROMAX")
 
-BASE_YAHOO = "https://query1.finance.yahoo.com"
-BASE_BINANCE = "https://api.binance.com"
+# ---------------------------------------------------------
+# DATABASE — persistent signals and target confirmations
+# ---------------------------------------------------------
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0",
-    "Accept": "application/json"
-}
+def db():
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
+    con = sqlite3.connect(DB_PATH)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS states (
+            market TEXT,
+            symbol TEXT,
+            timeframe TEXT,
+            data TEXT,
+            updated REAL,
+            PRIMARY KEY (market, symbol, timeframe)
+        )
+    """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS targets (
+            market TEXT,
+            symbol TEXT,
+            timeframe TEXT,
+            target_no INTEGER,
+            target_price REAL,
+            hit INTEGER DEFAULT 0,
+            created REAL,
+            PRIMARY KEY (market, symbol, timeframe, target_no)
+        )
+    """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS cursors (
+            market TEXT PRIMARY KEY,
+            position INTEGER DEFAULT 0
+        )
+    """)
+    con.commit()
+    return con
 
-last_signals = {}
-semaphore = asyncio.Semaphore(12)
+
+def get_state(market, symbol, tf):
+    con = db()
+    row = con.execute(
+        "SELECT data FROM states WHERE market=? AND symbol=? AND timeframe=?",
+        (market, symbol, tf)
+    ).fetchone()
+    con.close()
+    if not row:
+        return {}
+    try:
+        return json.loads(row[0])
+    except Exception:
+        return {}
 
 
-def now():
-    return datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+def save_state(market, symbol, tf, data):
+    con = db()
+    con.execute("""
+        INSERT INTO states VALUES(?,?,?,?,?)
+        ON CONFLICT(market,symbol,timeframe)
+        DO UPDATE SET data=excluded.data, updated=excluded.updated
+    """, (market, symbol, tf, json.dumps(data), time.time()))
+    con.commit()
+    con.close()
 
 
-def fmt(value):
-    return f"{value:,.4f}" if value < 10 else f"{value:,.2f}"
+def get_cursor(market):
+    con = db()
+    row = con.execute(
+        "SELECT position FROM cursors WHERE market=?", (market,)
+    ).fetchone()
+    con.close()
+    return row[0] if row else 0
 
+
+def set_cursor(market, position):
+    con = db()
+    con.execute("""
+        INSERT INTO cursors VALUES(?,?)
+        ON CONFLICT(market) DO UPDATE SET position=excluded.position
+    """, (market, position))
+    con.commit()
+    con.close()
+
+
+# ---------------------------------------------------------
+# HTTP
+# ---------------------------------------------------------
+
+async def get_json(session, url, headers=None, params=None, retries=3):
+    for attempt in range(retries):
+        try:
+            async with session.get(
+                url, headers=headers, params=params,
+                timeout=aiohttp.ClientTimeout(total=25)
+            ) as response:
+                body = await response.text()
+
+                if response.status == 429:
+                    await asyncio.sleep(3 * (attempt + 1))
+                    continue
+
+                if response.status >= 500:
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
+
+                if response.status >= 400:
+                    log.warning("HTTP %s | %s | %s",
+                                response.status, url, body[:250])
+                    return None
+
+                try:
+                    return json.loads(body)
+                except Exception:
+                    log.warning("Invalid JSON from %s", url)
+                    return None
+
+        except Exception as exc:
+            log.warning("HTTP error: %s", exc)
+            await asyncio.sleep(2 * (attempt + 1))
+
+    return None
+
+
+async def telegram(session, token, chat, message):
+    if not token or not chat:
+        log.error("Telegram credentials missing: token/chat")
+        return False
+
+    url = f"{TELEGRAM_API}/bot{token}/sendMessage"
+
+    # Telegram message maximum is 4096 characters.
+    chunks = []
+    while message:
+        chunks.append(message[:3900])
+        message = message[3900:]
+
+    ok = True
+    for chunk in chunks:
+        try:
+            async with session.post(
+                url,
+                json={
+                    "chat_id": chat,
+                    "text": chunk,
+                    "disable_web_page_preview": True
+                },
+                timeout=aiohttp.ClientTimeout(total=20)
+            ) as response:
+                result = await response.json(content_type=None)
+                if response.status != 200 or not result.get("ok"):
+                    log.error("Telegram failed: %s", result)
+                    ok = False
+                else:
+                    log.info("Telegram SEND SUCCESS")
+        except Exception as exc:
+            log.exception("Telegram exception: %s", exc)
+            ok = False
+
+    return ok
+
+
+async def send_market(session, market, message):
+    if market == "US":
+        return await telegram(session, US_BOT, US_CHAT, message)
+    if market == "TASI":
+        return await telegram(session, TASI_BOT, TASI_CHAT, message)
+    return await telegram(session, CRYPTO_BOT, CRYPTO_CHAT, message)
+
+
+# ---------------------------------------------------------
+# SYMBOL UNIVERSES
+# ---------------------------------------------------------
+
+async def get_us_symbols(session):
+    """
+    Twelve Data symbol directory.
+    Only US exchanges; OTC and other venues excluded.
+    """
+    if not TWELVE_KEY:
+        log.error("TWELVEDATA_API_KEY is missing")
+        return []
+
+    data = await get_json(
+        session,
+        f"{TWELVE_API}/stocks",
+        params={"apikey": TWELVE_KEY, "format": "JSON"}
+    )
+
+    if not data:
+        return []
+
+    rows = data if isinstance(data, list) else data.get("data", [])
+    allowed = {"NASDAQ", "NYSE", "NYSE AMERICAN", "NYSE ARCA"}
+
+    symbols = []
+    seen = set()
+
+    for item in rows:
+        symbol = str(item.get("symbol", "")).strip().upper()
+        exchange = str(item.get("exchange", "")).strip().upper()
+        country = str(item.get("country", "")).strip().lower()
+        currency = str(item.get("currency", "")).strip().upper()
+
+        if not symbol or symbol in seen:
+            continue
+        if country not in ("united states", "usa", "us"):
+            continue
+        if currency != "USD":
+            continue
+        if exchange not in allowed:
+            continue
+
+        seen.add(symbol)
+        symbols.append({
+            "symbol": symbol,
+            "name": item.get("name", symbol),
+            "exchange": exchange
+        })
+
+    log.info("US universe loaded: %s symbols", len(symbols))
+    return symbols
+
+
+async def get_sa_symbols(session):
+    """
+    Complete Saudi listed company directory:
+    TASI + NOMU, equities only.
+    """
+    if not SAHMK_KEY:
+        log.error("SAHMK_API_KEY / TASI_TOKEN missing")
+        return []
+
+    headers = {"X-API-Key": SAHMK_KEY}
+    symbols = []
+    seen = set()
+
+    for market in ("TASI", "NOMU"):
+        offset = 0
+        while True:
+            data = await get_json(
+                session,
+                f"{SAHMK_API}/companies/",
+                headers=headers,
+                params={
+                    "market": market,
+                    "limit": 500,
+                    "offset": offset
+                }
+            )
+
+            if not data:
+                break
+
+            rows = data.get("results", [])
+            if not rows:
+                break
+
+            for item in rows:
+                symbol = str(item.get("symbol", "")).strip()
+                status = str(item.get("status", "")).lower()
+                security_type = str(
+                    item.get("security_type", "")
+                ).lower()
+
+                if not symbol or symbol in seen:
+                    continue
+                if status and status != "active":
+                    continue
+                if security_type != "equity":
+                    continue
+
+                seen.add(symbol)
+                symbols.append({
+                    "symbol": symbol,
+                    "name": item.get("name_ar") or item.get("name_en") or symbol,
+                    "market": market
+                })
+
+            offset += len(rows)
+            total = int(data.get("total", 0) or 0)
+            if len(rows) < 500 or (total and offset >= total):
+                break
+
+    log.info("Saudi universe loaded: %s symbols", len(symbols))
+    return symbols
+
+
+async def get_crypto_symbols(session):
+    """
+    All Binance SPOT trading pairs quoted in USDT or USD.
+    """
+    data = await get_json(
+        session, f"{BINANCE_API}/api/v3/exchangeInfo"
+    )
+    if not data:
+        return []
+
+    symbols = []
+    for item in data.get("symbols", []):
+        if item.get("status") != "TRADING":
+            continue
+        if item.get("quoteAsset") not in ("USDT", "USD"):
+            continue
+
+        permissions = item.get("permissions", [])
+        if permissions and "SPOT" not in permissions:
+            continue
+
+        symbols.append({
+            "symbol": item.get("symbol"),
+            "base": item.get("baseAsset"),
+            "quote": item.get("quoteAsset")
+        })
+
+    log.info("Crypto SPOT universe loaded: %s pairs", len(symbols))
+    return symbols
+
+
+# ---------------------------------------------------------
+# MARKET DATA
+# ---------------------------------------------------------
+
+async def us_bars(session, symbol, interval):
+    if not SIFTING_KEY:
+        return []
+
+    end = datetime.now(timezone.utc)
+    days = 5 if interval in ("5m", "15m") else 40
+
+    params = {
+        "start": (end - timedelta(days=days)).strftime("%Y-%m-%d"),
+        "end": end.strftime("%Y-%m-%d"),
+        "interval": interval,
+        "limit": 500
+    }
+    headers = {
+        "X-API-Key": SIFTING_KEY,
+        "Accept-Encoding": "gzip"
+    }
+
+    data = await get_json(
+        session,
+        f"{SIFTING_API}/v1/hist/stocks/{symbol}/bars",
+        headers=headers,
+        params=params
+    )
+
+    if not data:
+        return []
+
+    bars = data.get("data", [])
+    return [{
+        "open": float(x["o"]),
+        "high": float(x["h"]),
+        "low": float(x["l"]),
+        "close": float(x["c"]),
+        "volume": float(x["v"]),
+        "time": x.get("t")
+    } for x in bars if all(k in x for k in ("o", "h", "l", "c", "v"))]
+
+
+async def sa_bars(session, symbol, interval):
+    if not SAHMK_KEY:
+        return []
+
+    headers = {"X-API-Key": SAHMK_KEY}
+    interval_map = {
+        "5m": "5min",
+        "15m": "15min",
+        "1h": "60min",
+        "1d": "1d"
+    }
+
+    # Saudi API plan determines which intervals are available.
+    api_interval = interval_map[interval]
+    days = 30 if interval != "1d" else 180
+
+    params = {
+        "interval": api_interval,
+        "from": (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d"),
+        "to": datetime.now().strftime("%Y-%m-%d"),
+        "limit": 500
+    }
+
+    data = await get_json(
+        session,
+        f"{SAHMK_API}/historical/{symbol}/",
+        headers=headers,
+        params=params
+    )
+
+    if not data:
+        return []
+
+    rows = data.get("data", [])
+    return [{
+        "open": float(x["open"]),
+        "high": float(x["high"]),
+        "low": float(x["low"]),
+        "close": float(x["close"]),
+        "volume": float(x["volume"]),
+        "time": x.get("date")
+    } for x in rows if all(k in x for k in
+                           ("open", "high", "low", "close", "volume"))]
+
+
+async def crypto_bars(session, symbol, interval):
+    data = await get_json(
+        session,
+        f"{BINANCE_API}/api/v3/klines",
+        params={
+            "symbol": symbol,
+            "interval": interval,
+            "limit": 200
+        }
+    )
+
+    if not data or not isinstance(data, list):
+        return []
+
+    return [{
+        "open": float(x[1]),
+        "high": float(x[2]),
+        "low": float(x[3]),
+        "close": float(x[4]),
+        "volume": float(x[5]),
+        "time": x[0]
+    } for x in data]
+
+
+# ---------------------------------------------------------
+# TECHNICAL ANALYSIS
+# ---------------------------------------------------------
 
 def ema(values, period):
-    if not values:
-        return 0
-
-    k = 2 / (period + 1)
-    result = values[0]
-
-    for x in values[1:]:
-        result = x * k + result * (1 - k)
-
+    if len(values) < period:
+        return None
+    alpha = 2 / (period + 1)
+    result = sum(values[:period]) / period
+    for value in values[period:]:
+        result = alpha * value + (1 - alpha) * result
     return result
 
 
 def rsi(values, period=14):
     if len(values) < period + 1:
-        return 50
+        return None
 
-    gains = []
-    losses = []
+    gains, losses = [], []
+    for i in range(1, len(values)):
+        diff = values[i] - values[i - 1]
+        gains.append(max(diff, 0))
+        losses.append(max(-diff, 0))
 
-    for i in range(-period, 0):
-        change = values[i] - values[i - 1]
-        gains.append(max(change, 0))
-        losses.append(max(-change, 0))
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
 
-    avg_gain = sum(gains) / period
-    avg_loss = sum(losses) / period
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
 
     if avg_loss == 0:
-        return 100
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
 
-    return 100 - (100 / (1 + avg_gain / avg_loss))
 
-
-def analyze(rows):
-    if len(rows) < 25:
+def atr(bars, period=14):
+    if len(bars) < period + 1:
         return None
 
-    closes = [float(x["close"]) for x in rows]
-    highs = [float(x["high"]) for x in rows]
-    lows = [float(x["low"]) for x in rows]
-    volumes = [float(x["volume"]) for x in rows]
+    trs = []
+    for i in range(1, len(bars)):
+        current = bars[i]
+        previous = bars[i - 1]
+        tr = max(
+            current["high"] - current["low"],
+            abs(current["high"] - previous["close"]),
+            abs(current["low"] - previous["close"])
+        )
+        trs.append(tr)
+
+    return sum(trs[-period:]) / min(period, len(trs))
+
+
+def vwap(bars):
+    recent = bars[-30:]
+    total_volume = sum(x["volume"] for x in recent)
+    if total_volume <= 0:
+        return None
+
+    total = sum(
+        ((x["high"] + x["low"] + x["close"]) / 3) * x["volume"]
+        for x in recent
+    )
+    return total / total_volume
+
+
+def analyze(bars):
+    if len(bars) < 30:
+        return None
+
+    closes = [x["close"] for x in bars]
+    volumes = [x["volume"] for x in bars]
 
     price = closes[-1]
-    volume = volumes[-1]
+    previous = closes[-2]
+    current_rsi = rsi(closes)
+    current_atr = atr(bars)
+    current_vwap = vwap(bars)
+
+    emas = {
+        p: ema(closes, p) for p in (10, 14, 25, 50)
+    }
 
     avg_volume = sum(volumes[-21:-1]) / 20
-    volume_ratio = volume / max(avg_volume, 1)
+    volume_ratio = volumes[-1] / avg_volume if avg_volume > 0 else 0
 
-    e10 = ema(closes[-80:], 10)
-    e14 = ema(closes[-80:], 14)
-    e25 = ema(closes[-80:], 25)
-    e50 = ema(closes[-100:], 50)
+    support = min(x["low"] for x in bars[-30:])
+    resistance = max(x["high"] for x in bars[-30:])
 
-    vwap_num = sum(
-        ((highs[i] + lows[i] + closes[i]) / 3) * volumes[i]
-        for i in range(len(rows))
+    # Approximate accumulation: tight range + above-average volume.
+    recent_range = max(x["high"] for x in bars[-8:]) - min(
+        x["low"] for x in bars[-8:]
+    )
+    accumulation = (
+        current_atr is not None
+        and recent_range <= current_atr * 2.5
+        and volume_ratio >= 1.15
     )
 
-    vwap_den = sum(volumes)
-    vwap = vwap_num / max(vwap_den, 1)
-
-    demand = min(lows[-30:])
-    supply = max(highs[-30:])
-
-    strength = 0
-
-    if price > e10:
-        strength += 10
-    if price > e14:
-        strength += 10
-    if price > e25:
-        strength += 10
-    if price > e50:
-        strength += 10
-    if price > vwap:
-        strength += 15
-    if volume_ratio >= 1.5:
-        strength += 20
-    if volume_ratio >= 2:
-        strength += 10
-    if rsi(closes) >= 50:
-        strength += 10
-    if closes[-1] > closes[-2]:
-        strength += 5
-
-    strength = min(strength, 100)
+    # Buyer pressure proxy, not exchange order-flow.
+    candle_range = max(bars[-1]["high"] - bars[-1]["low"], 1e-9)
+    buyer_proxy = (
+        (bars[-1]["close"] - bars[-1]["low"]) / candle_range
+    ) * 100
 
     return {
         "price": price,
-        "volume": volume,
+        "previous": previous,
+        "change": ((price / previous) - 1) * 100 if previous else 0,
+        "rsi": current_rsi,
+        "atr": current_atr,
+        "vwap": current_vwap,
+        "ema": emas,
+        "volume": volumes[-1],
         "volume_ratio": volume_ratio,
-        "vwap": vwap,
-        "ema10": e10,
-        "ema14": e14,
-        "ema25": e25,
-        "ema50": e50,
-        "rsi": rsi(closes),
-        "demand": demand,
-        "supply": supply,
-        "score": strength,
-        "change": (
-            (closes[-1] - closes[-2]) /
-            max(closes[-2], 0.000001) * 100
-        )
+        "support": support,
+        "resistance": resistance,
+        "accumulation": accumulation,
+        "buyer_proxy": buyer_proxy
     }
 
 
-async def get_json(session, url, params=None):
-    try:
-        async with semaphore:
-            async with session.get(
-                url,
-                params=params,
-                headers=HEADERS,
-                timeout=aiohttp.ClientTimeout(total=15)
-            ) as response:
+# ---------------------------------------------------------
+# TARGETS 1–20 + PERSISTENT HIT CHECKS
+# ---------------------------------------------------------
 
-                if response.status != 200:
-                    log.warning(
-                        "DATA HTTP ERROR | %s | %s",
-                        response.status, url
-                    )
-                    return None
+def create_targets(market, symbol, tf, price, current_atr):
+    if not current_atr or current_atr <= 0:
+        return
 
-                return await response.json(content_type=None)
+    con = db()
+    existing = con.execute("""
+        SELECT COUNT(*) FROM targets
+        WHERE market=? AND symbol=? AND timeframe=?
+    """, (market, symbol, tf)).fetchone()[0]
 
-    except Exception as e:
-        log.warning("DATA ERROR: %s", e)
-        return None
+    if existing:
+        con.close()
+        return
 
-
-# =====================================================
-# TELEGRAM — FIXED WITH ERROR DIAGNOSTICS
-# =====================================================
-
-async def telegram(session, token, chat, message):
-
-    if not token or not chat:
-        log.error(
-            "TELEGRAM CONFIG ERROR | token=%s | chat=%s",
-            bool(token), bool(chat)
-        )
-        return False
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-
-    try:
-        async with session.post(
-            url,
-            json={
-                "chat_id": chat,
-                "text": message,
-                "disable_web_page_preview": True
-            },
-            timeout=aiohttp.ClientTimeout(total=20)
-        ) as response:
-
-            body = await response.text()
-
-            try:
-                result = await response.json(content_type=None)
-            except Exception:
-                result = {}
-
-            if response.status == 200 and result.get("ok"):
-                log.info("TELEGRAM SEND SUCCESS")
-                return True
-
-            log.error(
-                "TELEGRAM SEND FAILED | HTTP=%s | RESPONSE=%s",
-                response.status,
-                body[:1000]
-            )
-
-            return False
-
-    except Exception:
-        log.exception("TELEGRAM CONNECTION ERROR")
-        return False
-
-
-# =====================================================
-# US STOCK UNIVERSE
-# =====================================================
-
-async def get_us_symbols(session):
-    symbols = []
-
-    for exchange in ("nasdaq", "nyse", "amex"):
-
-        data = await get_json(
-            session,
-            "https://api.nasdaq.com/api/screener/stocks",
-            {
-                "tableonly": "true",
-                "limit": "5000",
-                "exchange": exchange
-            }
-        )
-
-        if not data:
-            continue
-
-        try:
-            rows = data["data"]["table"]["rows"]
-
-            for row in rows:
-                symbol = row.get("symbol", "").strip()
-
-                if (
-                    symbol
-                    and symbol.isascii()
-                    and symbol.replace(".", "").replace("-", "").isalnum()
-                    and len(symbol) <= 6
-                    and "^" not in symbol
-                ):
-                    symbols.append(symbol)
-
-        except Exception:
-            log.exception("US SYMBOL PARSE ERROR")
-
-    result = list(dict.fromkeys(symbols))
-
-    log.info("US SYMBOLS FOUND: %s", len(result))
-
-    return result
-
-
-async def yahoo_chart(session, symbol):
-    url = f"{BASE_YAHOO}/v8/finance/chart/{symbol}"
-
-    data = await get_json(
-        session,
-        url,
-        {"range": "5d", "interval": "5m"}
-    )
-
-    try:
-        result = data["chart"]["result"][0]
-        quote = result["indicators"]["quote"][0]
-
-        rows = []
-
-        for i in range(len(result["timestamp"])):
-
-            close = quote["close"][i]
-            high = quote["high"][i]
-            low = quote["low"][i]
-            volume = quote["volume"][i]
-
-            if None in (close, high, low, volume):
-                continue
-
-            rows.append({
-                "close": close,
-                "high": high,
-                "low": low,
-                "volume": volume
-            })
-
-        return rows
-
-    except Exception:
-        return None
-
-
-# =====================================================
-# SAUDI MARKET
-# =====================================================
-
-async def get_tasi_symbols(session):
-
-    data = await get_json(
-        session,
-        f"{BASE_YAHOO}/v1/finance/screener/predefined/saved",
-        {
-            "scrIds": "most_actives",
-            "count": "250",
-            "region": "SA",
-            "formatted": "false"
-        }
-    )
-
-    try:
-        quotes = data["finance"]["result"][0]["quotes"]
-
-        symbols = list(dict.fromkeys(
-            q["symbol"]
-            for q in quotes
-            if q.get("symbol", "").endswith(".SR")
+    for number in range(1, 21):
+        # ATR-based projections; not guaranteed price predictions.
+        target_price = price + (current_atr * 0.5 * number)
+        con.execute("""
+            INSERT OR IGNORE INTO targets
+            VALUES(?,?,?,?,?,?,?)
+        """, (
+            market, symbol, tf, number,
+            target_price, 0, time.time()
         ))
 
-        log.info("TASI SYMBOLS FOUND: %s", len(symbols))
-
-        return symbols
-
-    except Exception:
-        log.exception("TASI SYMBOL ERROR")
-        return []
+    con.commit()
+    con.close()
 
 
-# =====================================================
-# CRYPTO MARKET
-# =====================================================
+def update_targets(market, symbol, tf, high):
+    con = db()
+    rows = con.execute("""
+        SELECT target_no, target_price FROM targets
+        WHERE market=? AND symbol=? AND timeframe=? AND hit=0
+        ORDER BY target_no
+    """, (market, symbol, tf)).fetchall()
 
-async def get_crypto_symbols(session):
+    hits = []
+    for number, target_price in rows:
+        if high >= target_price:
+            con.execute("""
+                UPDATE targets SET hit=1
+                WHERE market=? AND symbol=? AND timeframe=? AND target_no=?
+            """, (market, symbol, tf, number))
+            hits.append((number, target_price))
 
-    data = await get_json(
-        session,
-        f"{BASE_BINANCE}/api/v3/ticker/24hr"
-    )
-
-    if not isinstance(data, list):
-        return []
-
-    coins = [
-        x for x in data
-        if x.get("symbol", "").endswith("USDT")
-        and not any(
-            tag in x["symbol"]
-            for tag in (
-                "UPUSDT",
-                "DOWNUSDT",
-                "BULLUSDT",
-                "BEARUSDT"
-            )
-        )
-    ]
-
-    coins.sort(
-        key=lambda x: float(x.get("quoteVolume", 0)),
-        reverse=True
-    )
-
-    symbols = [x["symbol"] for x in coins[:MAX_CRYPTO]]
-
-    log.info("CRYPTO SYMBOLS FOUND: %s", len(symbols))
-
-    return symbols
+    con.commit()
+    con.close()
+    return hits
 
 
-async def crypto_chart(session, symbol):
-
-    data = await get_json(
-        session,
-        f"{BASE_BINANCE}/api/v3/klines",
-        {
-            "symbol": symbol,
-            "interval": "5m",
-            "limit": "100"
-        }
-    )
-
-    if not isinstance(data, list):
-        return None
-
-    return [
-        {
-            "close": float(x[4]),
-            "high": float(x[2]),
-            "low": float(x[3]),
-            "volume": float(x[5])
-        }
-        for x in data
-    ]
-
-
-async def crypto_depth(session, symbol):
-
-    data = await get_json(
-        session,
-        f"{BASE_BINANCE}/api/v3/depth",
-        {
-            "symbol": symbol,
-            "limit": "20"
-        }
-    )
-
-    if not data:
-        return None
-
-    bids = sum(
-        float(x[0]) * float(x[1])
-        for x in data["bids"]
-    )
-
-    asks = sum(
-        float(x[0]) * float(x[1])
-        for x in data["asks"]
-    )
-
-    return {
-        "bids": bids,
-        "asks": asks,
-        "imbalance": bids / max(asks, 0.000001)
-    }
-
-
-# =====================================================
-# SIGNAL ENGINE
-# =====================================================
-
-def make_signal(market, symbol, a, depth=None):
-
-    score = a["score"]
-    price = a["price"]
-
-    if score < 55:
-        return None
-
-    if a["volume_ratio"] < 1.2:
-        return None
-
-    if depth and depth["imbalance"] > 1.3:
-        score = min(score + 5, 100)
-
-    if price > a["supply"]:
-        state = "🚀 اختراق مقاومة"
-
-    elif price >= a["demand"] * 1.01:
-        state = "🟢 قريب من منطقة الطلب"
-
-    else:
-        state = "⏳ مراقبة"
-
-    stop = a["demand"] * 0.985
-
-    target1 = price + (price - stop) * 1.5
-    target2 = price + (price - stop) * 2.5
-    target3 = price + (price - stop) * 4
-
-    return {
-        "market": market,
-        "symbol": symbol,
-        "score": score,
-        "state": state,
-        "price": price,
-        "demand": a["demand"],
-        "supply": a["supply"],
-        "vwap": a["vwap"],
-        "volume": a["volume"],
-        "ratio": a["volume_ratio"],
-        "rsi": a["rsi"],
-        "change": a["change"],
-        "stop": stop,
-        "tp1": target1,
-        "tp2": target2,
-        "tp3": target3,
-        "depth": depth
-    }
-
-
-def render_signal(s):
-
-    depth_text = ""
-
-    if s["depth"]:
-        d = s["depth"]
-
-        depth_text = (
-            f"\n🟢 طلبات دفتر الأوامر: ${d['bids']:,.0f}"
-            f"\n🔴 عروض دفتر الأوامر: ${d['asks']:,.0f}"
-            f"\n⚖️ نسبة الطلب/العرض: {d['imbalance']:.2f}"
-        )
-
-    return (
-        f"💀 AI PRO MAX — SMART MONEY\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"🏦 السوق: {s['market']}\n"
-        f"📌 الرمز: {s['symbol']}\n"
-        f"💵 السعر: {fmt(s['price'])}\n"
-        f"📈 التغير: {s['change']:+.2f}%\n"
-        f"⭐ قوة الإشارة: {s['score']}/100\n"
-        f"📊 الحالة: {s['state']}\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"💰 حجم التداول: {s['volume']:,.0f}\n"
-        f"🔥 الفوليوم مقارنة بالمتوسط: {s['ratio']:.2f}x\n"
-        f"📍 VWAP: {fmt(s['vwap'])}\n"
-        f"📉 RSI: {s['rsi']:.1f}\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"🟢 الطلب: {fmt(s['demand'])}\n"
-        f"🔴 العرض: {fmt(s['supply'])}\n"
-        f"🛑 وقف الخسارة: {fmt(s['stop'])}\n"
-        f"🎯 الهدف 1: {fmt(s['tp1'])}\n"
-        f"🎯 الهدف 2: {fmt(s['tp2'])}\n"
-        f"🎯 الهدف 3: {fmt(s['tp3'])}\n"
-        f"{depth_text}\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"🕒 {now()}\n"
-        f"⚠️ تحليل آلي وليس توصية شراء أو بيع"
-    )
-
-
-# =====================================================
-# SCAN ONE SYMBOL
-# =====================================================
-
-async def scan_one(session, market, symbol):
-
-    if market == "CRYPTO":
-        rows = await crypto_chart(session, symbol)
-        depth = await crypto_depth(session, symbol)
-
-    else:
-        rows = await yahoo_chart(session, symbol)
-        depth = None
+def target_text(market, symbol, tf):
+    con = db()
+    rows = con.execute("""
+        SELECT target_no, target_price, hit FROM targets
+        WHERE market=? AND symbol=? AND timeframe=?
+        ORDER BY target_no
+    """, (market, symbol, tf)).fetchall()
+    con.close()
 
     if not rows:
-        return None
+        return "الأهداف: تنتظر اكتمال بيانات ATR"
 
-    analysis = analyze(rows)
-
-    if not analysis:
-        return None
-
-    return make_signal(market, symbol, analysis, depth)
-
-
-# =====================================================
-# SCAN MARKET
-# =====================================================
-
-async def scan_market(session, market, symbols, token, chat):
-
-    results = []
-
-    async def worker(symbol):
-        try:
-            result = await scan_one(session, market, symbol)
-
-            if result:
-                results.append(result)
-
-        except Exception:
-            log.exception(
-                "%s SCAN ERROR: %s",
-                market, symbol
-            )
-
-    await asyncio.gather(
-        *(worker(s) for s in symbols)
+    return "🎯 الأهداف:\n" + "\n".join(
+        f"{'✅' if hit else '⬜'} هدف {n}: {price:.6f}"
+        for n, price, hit in rows
     )
 
-    results.sort(
-        key=lambda x: (x["score"], x["ratio"]),
-        reverse=True
-    )
 
-    sent = 0
+# ---------------------------------------------------------
+# SIGNAL ENGINE
+# ---------------------------------------------------------
 
-    for item in results:
+def signal_events(market, symbol, tf, result, bars):
+    if not result:
+        return []
 
-        key = f"{market}:{item['symbol']}"
-        old = last_signals.get(key)
+    old = get_state(market, symbol, tf)
+    price = result["price"]
+    current_rsi = result["rsi"]
+    events = []
 
-        if old is not None and old >= item["score"]:
+    if not old:
+        old = {
+            "price": price,
+            "rsi": current_rsi,
+            "ema": {},
+            "volume_ratio": 0,
+            "accumulation": False
+        }
+
+    old_ema = old.get("ema", {})
+
+    # EMA crossing alerts.
+    for period, value in result["ema"].items():
+        if value is None:
             continue
+        was_above = old_ema.get(str(period))
+        is_above = price >= value
 
-        if item["score"] < 65:
-            continue
+        if was_above is not None and was_above != is_above:
+            if is_above:
+                events.append(f"🟢 اختراق EMA{period} للأعلى: {value:.6f}")
+            else:
+                events.append(f"🔴 كسر EMA{period} للأسفل: {value:.6f}")
 
-        ok = await telegram(
-            session,
-            token,
-            chat,
-            render_signal(item)
+    # RSI zones.
+    if current_rsi is not None:
+        old_rsi = old.get("rsi")
+        if old_rsi is not None:
+            zones = (20, 40, 50, 60, 70, 80, 100)
+            for zone in zones:
+                if old_rsi < zone <= current_rsi:
+                    events.append(f"🟢 RSI صاعد واخترق منطقة {zone}")
+                elif old_rsi > zone >= current_rsi:
+                    events.append(f"🔴 RSI هابط وكسر منطقة {zone}")
+
+            if old_rsi >= 95 and current_rsi < old_rsi:
+                events.append("🔴 RSI بدأ يتراجع من منطقة التشبع الشرائي")
+
+    # Volume increase.
+    if result["volume_ratio"] >= 1.5 and old.get("volume_ratio", 0) < 1.5:
+        events.append(
+            f"💹 ارتفاع نشاط الفوليوم: {result['volume_ratio']:.2f}x"
         )
 
-        if ok:
-            last_signals[key] = item["score"]
-            sent += 1
+    # Accumulation / breakout.
+    if result["accumulation"] and not old.get("accumulation", False):
+        events.append(
+            f"🟡 احتمال تجميع سعري حول {price:.6f} — ليس تأكيدًا مؤسسيًا"
+        )
 
-        if sent >= MAX_RESULTS:
-            break
+    if price > result["resistance"]:
+        events.append("🚀 اختراق قمة النطاق السعري")
+
+    if result["vwap"] and old.get("price", price) < result["vwap"] <= price:
+        events.append("🟢 السعر اخترق VWAP للأعلى")
+    elif result["vwap"] and old.get("price", price) > result["vwap"] >= price:
+        events.append("🔴 السعر كسر VWAP للأسفل")
+
+    # Store state.
+    save_state(market, symbol, tf, {
+        "price": price,
+        "rsi": current_rsi,
+        "ema": {
+            str(k): (price >= v if v is not None else None)
+            for k, v in result["ema"].items()
+        },
+        "volume_ratio": result["volume_ratio"],
+        "accumulation": result["accumulation"]
+    })
+
+    return events
+
+
+def format_report(market, item, tf, result, events, target_hits):
+    symbol = item["symbol"]
+    name = item.get("name", symbol)
+    price = result["price"]
+    rsi_value = result["rsi"]
+    vwap_value = result["vwap"]
+
+    currency = "$" if market in ("US", "CRYPTO") else "⃁"
+
+    if result["change"] > 0:
+        direction = "🟢 صاعد"
+    elif result["change"] < 0:
+        direction = "🔴 هابط"
+    else:
+        direction = "🟡 مستقر"
+
+    if price < result["support"]:
+        warning = f"🔴 السلبية بالإغلاق تحت: {result['support']:.6f}"
+    elif price < result["resistance"]:
+        warning = "🟡 داخل النطاق السعري"
+    else:
+        warning = "🟢 فوق مقاومة النطاق"
+
+    lines = [
+        f"💀🚀 {APP}",
+        f"📊 السوق: {market}",
+        f"🏷️ {name} ({symbol})",
+        f"⏱️ الفاصل: {tf}",
+        f"💰 السعر: {currency}{price:.6f}",
+        f"📈 التغير: {result['change']:+.2f}%",
+        f"📊 الحالة: {direction}",
+        f"📦 الفوليوم: {result['volume']:,.0f}",
+        f"💹 نشاط الفوليوم: {result['volume_ratio']:.2f}x",
+        f"📍 VWAP: {vwap_value:.6f}" if vwap_value else "📍 VWAP: غير متاح",
+        f"🧭 RSI: {rsi_value:.2f}" if rsi_value is not None else "🧭 RSI: غير متاح",
+        f"🟢 قوة المشترين التقديرية: {result['buyer_proxy']:.1f}%",
+        "⚠️ قوة المشترين هنا تقدير من الشمعة وليست قراءة دفتر أوامر",
+        f"🟩 الدعم: {result['support']:.6f}",
+        f"🟥 المقاومة: {result['resistance']:.6f}",
+        warning,
+        f"🟡 التجميع المحتمل: {'موجود' if result['accumulation'] else 'غير ظاهر'}",
+        "",
+        "📐 المتوسطات:"
+    ]
+
+    for period, value in result["ema"].items():
+        if value is not None:
+            state = "فوقه 🟢" if price >= value else "تحته 🔴"
+            lines.append(f"EMA{period}: {value:.6f} — السعر {state}")
+
+    if events:
+        lines += ["", "🚨 التنبيهات الجديدة:"]
+        lines.extend(events)
+
+    if target_hits:
+        lines += ["", "🎯 تم تحقيق أهداف جديدة:"]
+        lines.extend(
+            f"✅ الهدف {n} تحقق عند {p:.6f}"
+            for n, p in target_hits
+        )
+
+    lines += ["", target_text(market, symbol, tf)]
+    lines += [
+        "",
+        "ℹ️ الأهداف مستويات حسابية مبنية على ATR وليست ضمانًا للوصول.",
+        "ℹ️ البيانات الفنية لا تمثل توصية شراء أو بيع."
+    ]
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------
+# SYMBOL SCANNING
+# ---------------------------------------------------------
+
+async def scan_one(session, market, item):
+    symbol = item["symbol"]
+    messages = []
+
+    for tf in TIMEFRAMES:
+        try:
+            if market == "US":
+                bars = await us_bars(session, symbol, tf)
+            elif market == "TASI":
+                bars = await sa_bars(session, symbol, tf)
+            else:
+                bars = await crypto_bars(session, symbol, tf)
+
+            if len(bars) < 30:
+                continue
+
+            result = analyze(bars)
+            if not result:
+                continue
+
+            # US minimum price filter.
+            if market == "US" and result["price"] < US_MIN_PRICE:
+                continue
+
+            create_targets(
+                market, symbol, tf,
+                result["price"], result["atr"]
+            )
+
+            hits = update_targets(
+                market, symbol, tf, bars[-1]["high"]
+            )
+
+            events = signal_events(
+                market, symbol, tf, result, bars
+            )
+
+            # First valid report, new event, or target hit.
+            old = get_state(market, symbol, tf)
+            if events or hits:
+                messages.append(
+                    format_report(market, item, tf, result, events, hits)
+                )
+
+        except Exception as exc:
+            log.exception("Scan error %s %s %s: %s",
+                          market, symbol, tf, exc)
+
+    return messages
+
+
+async def process_market(session, market, symbols):
+    if not symbols:
+        log.warning("%s universe empty", market)
+        return
+
+    start = get_cursor(market)
+    end = min(start + BATCH_SIZE, len(symbols))
+    batch = symbols[start:end]
+
+    if not batch:
+        start = 0
+        end = min(BATCH_SIZE, len(symbols))
+        batch = symbols[start:end]
+
+    semaphore = asyncio.Semaphore(WORKERS)
+
+    async def limited(item):
+        async with semaphore:
+            return await scan_one(session, market, item)
+
+    results = await asyncio.gather(
+        *(limited(item) for item in batch),
+        return_exceptions=True
+    )
+
+    reports = []
+    for result in results:
+        if isinstance(result, list):
+            reports.extend(result)
+        elif isinstance(result, Exception):
+            log.error("%s batch error: %s", market, result)
+
+    set_cursor(market, 0 if end >= len(symbols) else end)
+
+    # Batch messages to avoid Telegram flood.
+    if reports:
+        await send_market(
+            session, market,
+            f"💀🚀 AI PRO MAX — {market}\n"
+            f"📡 نتائج الدفعة: {len(reports)}\n\n" +
+            "\n\n━━━━━━━━━━━━━━━━\n\n".join(reports)
+        )
 
     log.info(
-        "%s: scanned=%s results=%s sent=%s",
-        market,
-        len(symbols),
-        len(results),
-        sent
+        "%s scanned %s/%s | reports=%s",
+        market, end, len(symbols), len(reports)
     )
 
 
-# =====================================================
-# MAIN ENGINE — 24/7
-# =====================================================
+# ---------------------------------------------------------
+# MAIN LOOP — 24/7
+# ---------------------------------------------------------
 
-async def run():
-
+async def main():
     connector = aiohttp.TCPConnector(
-        limit=30,
+        limit=WORKERS + 5,
         ttl_dns_cache=300
     )
 
-    async with aiohttp.ClientSession(
-        connector=connector,
-        headers=HEADERS
-    ) as session:
+    async with aiohttp.ClientSession(connector=connector) as session:
 
-        log.info("AI PRO MAX STARTING")
-
-        # Independent welcome messages
-        welcome_bots = [
-            ("US", US_TOKEN or MAIN_TOKEN, US_CHAT),
-            ("TASI", TASI_TOKEN or MAIN_TOKEN, TASI_CHAT),
-            ("CRYPTO", CRYPTO_TOKEN or MAIN_TOKEN, CRYPTO_CHAT)
-        ]
-
-        for market, token, chat in welcome_bots:
-
-            message = (
-                f"💀 {BOT_NAME}\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"✅ تم تشغيل محرك {market}\n"
-                f"📡 جاري تجهيز بيانات السوق\n"
-                f"🕒 {now()}\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"🚀 AI PRO MAX SMART MONEY"
-            )
-
-            success = await telegram(
+        # Welcome / health message.
+        for market in ("US", "TASI", "CRYPTO"):
+            await send_market(
                 session,
-                token,
-                chat,
-                message
-            )
-
-            log.info(
-                "%s WELCOME: %s",
                 market,
-                "SUCCESS" if success else "FAILED"
+                f"💀🚀 {APP}\n"
+                f"✅ تم تشغيل بوت {market}\n"
+                f"🟢 نظام الفحص المستمر يعمل\n"
+                f"⏱️ دورة الفحص: {SCAN_SECONDS} ثانية\n"
+                f"📡 الفحص على دفعات مع حفظ موضع التقدم\n"
+                f"🗃️ حفظ الأهداف والتنبيهات في قاعدة البيانات"
             )
 
-        # Continuous scanning
+        universes = {
+            "US": [],
+            "TASI": [],
+            "CRYPTO": []
+        }
+
+        last_refresh = 0
+
         while True:
-
             try:
+                # Refresh symbol directories every 6 hours.
+                if time.time() - last_refresh >= 21600:
+                    log.info("Refreshing all symbol universes")
 
-                log.info("STARTING MARKET SCAN")
-
-                us_symbols, tasi_symbols, crypto_symbols = (
-                    await asyncio.gather(
+                    us, sa, crypto = await asyncio.gather(
                         get_us_symbols(session),
-                        get_tasi_symbols(session),
+                        get_sa_symbols(session),
                         get_crypto_symbols(session)
                     )
+
+                    if us:
+                        universes["US"] = us
+                    if sa:
+                        universes["TASI"] = sa
+                    if crypto:
+                        universes["CRYPTO"] = crypto
+
+                    last_refresh = time.time()
+
+                    for market, symbols in universes.items():
+                        await send_market(
+                            session,
+                            market,
+                            f"📡 تحديث قائمة {market}\n"
+                            f"عدد الرموز المتاحة: {len(symbols):,}\n"
+                            f"🟢 نظام الفحص مستمر"
+                        )
+
+                # Each market is independent.
+                await process_market(
+                    session, "US", universes["US"]
+                )
+                await process_market(
+                    session, "TASI", universes["TASI"]
+                )
+                await process_market(
+                    session, "CRYPTO", universes["CRYPTO"]
                 )
 
-                us_symbols = us_symbols[:MAX_US]
+                log.info("NEXT SCAN IN %s SECONDS", SCAN_SECONDS)
+                await asyncio.sleep(SCAN_SECONDS)
 
-                log.info(
-                    "MARKET STATUS | US=%s | TASI=%s | CRYPTO=%s",
-                    len(us_symbols),
-                    len(tasi_symbols),
-                    len(crypto_symbols)
-                )
-
-                await asyncio.gather(
-
-                    scan_market(
-                        session,
-                        "US",
-                        us_symbols,
-                        US_TOKEN or MAIN_TOKEN,
-                        US_CHAT
-                    ),
-
-                    scan_market(
-                        session,
-                        "TASI",
-                        tasi_symbols,
-                        TASI_TOKEN or MAIN_TOKEN,
-                        TASI_CHAT
-                    ),
-
-                    scan_market(
-                        session,
-                        "CRYPTO",
-                        crypto_symbols,
-                        CRYPTO_TOKEN or MAIN_TOKEN,
-                        CRYPTO_CHAT
-                    )
-                )
-
+            except asyncio.CancelledError:
+                raise
             except Exception:
-                log.exception("MAIN SCANNER ERROR")
-
-            log.info(
-                "NEXT SCAN IN %s SECONDS",
-                SCAN_SECONDS
-            )
-
-            await asyncio.sleep(SCAN_SECONDS)
+                log.exception("MAIN LOOP ERROR")
+                await asyncio.sleep(15)
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        log.info("Bot stopped manually")
