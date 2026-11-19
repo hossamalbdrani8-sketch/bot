@@ -5,6 +5,7 @@ import time
 import asyncio
 import logging
 import sqlite3
+import urllib.request
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -61,6 +62,11 @@ BINANCE_API = "https://api.binance.com"
 
 WIDTH = 2400
 HEIGHT = 3000
+
+NOTO_BOLD_URL = (
+    "https://github.com/google/fonts/raw/main/ofl/"
+    "notonaskharabic/NotoNaskhArabic%5Bwght%5D.ttf"
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -158,22 +164,42 @@ def set_cursor(market, position):
 # FONT AND IMAGE DESIGN
 # =========================================================
 
+def ensure_noto_font():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    local_bold = os.path.join(script_dir, "NotoNaskhArabic-Bold.ttf")
+    cache_bold = "/tmp/NotoNaskhArabic-Bold.ttf"
+
+    for candidate in (local_bold, cache_bold):
+        if os.path.exists(candidate) and os.path.getsize(candidate) > 10000:
+            return candidate
+
+    try:
+        urllib.request.urlretrieve(NOTO_BOLD_URL, cache_bold)
+        if os.path.exists(cache_bold) and os.path.getsize(cache_bold) > 10000:
+            return cache_bold
+    except Exception as exc:
+        log.warning("Could not download Noto Naskh Arabic font: %s", exc)
+
+    return None
+
 def load_font(size):
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    downloaded = ensure_noto_font()
+
     paths = [
         os.path.join(script_dir, "NotoNaskhArabic-Bold.ttf"),
+        downloaded or "",
         "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Bold.ttf",
         "/usr/share/fonts/opentype/noto/NotoNaskhArabic-Bold.ttf",
         "/usr/local/share/fonts/NotoNaskhArabic-Bold.ttf",
         "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"
     ]
 
     for path in paths:
-        if os.path.exists(path):
+        if path and os.path.exists(path):
             try:
                 return ImageFont.truetype(path, size)
             except Exception:
@@ -220,36 +246,36 @@ def create_dashboard(market, item, tf, result, events, hits):
     image = Image.new("RGB", (WIDTH, HEIGHT), "#06101E")
     draw = ImageDraw.Draw(image)
 
-    # خطوط مطابقة للمواصفات المطلوبة
+    # أحجام الخطوط المطلوبة واضحة وكبيرة للقراءة في تليجرام
     price_font = load_font(125)
     symbol_font = load_font(85)
     section_font = load_font(70)
     data_font = load_font(58)
     target_font = load_font(52)
 
-    title_font = load_font(82)
-    badge_font = load_font(46)
-    footer_font = load_font(44)
+    title_font = load_font(85)
+    badge_font = load_font(58)
+    footer_font = load_font(52)
 
     is_up = result["change"] > 0
     is_down = result["change"] < 0
 
-    white = "#F5F8FF"
-    green = "#16DB7E"
-    green_soft = "#0E2E24"
-    green_border = "#1FC977"
-    red = "#FF475E"
-    red_soft = "#33111B"
-    red_border = "#F2465D"
-    navy_header = "#0E223D"
-    navy_panel = "#0C1A2E"
-    navy_card = "#11233D"
-    navy_border = "#233F63"
-    muted = "#9BB2CE"
-    gold = "#F7C948"
+    white = "#F7FAFF"
+    green = "#18E082"
+    green_soft = "#0E3126"
+    green_border = "#22D480"
+    red = "#FF4D64"
+    red_soft = "#36111C"
+    red_border = "#F54960"
+    navy_header = "#0E2340"
+    navy_panel = "#0C1A2F"
+    navy_card = "#122642"
+    navy_border = "#26456C"
+    muted = "#B2C6DE"
+    gold = "#FFD15C"
 
     accent_main = green if is_up else (red if is_down else gold)
-    accent_bg = green_soft if is_up else (red_soft if is_down else "#2A2411")
+    accent_bg = green_soft if is_up else (red_soft if is_down else "#2C2512")
     accent_border = green_border if is_up else (red_border if is_down else gold)
 
     market_name = {
@@ -275,12 +301,12 @@ def create_dashboard(market, item, tf, result, events, hits):
         )
 
     # =====================================================
-    # 1) شريط العنوان العلوي (y: 40 -> 220)
+    # 1) العنوان العلوي (y: 35 -> 215)
     # =====================================================
-    panel_box(55, 40, WIDTH - 55, 220, fill=navy_header, outline=accent_border, width=4)
+    panel_box(50, 35, WIDTH - 50, 215, fill=navy_header, outline=accent_border, width=4)
 
     draw.text(
-        (WIDTH - 105, 130),
+        (WIDTH - 95, 125),
         "AI PRO MAX",
         font=title_font,
         fill=white,
@@ -289,17 +315,17 @@ def create_dashboard(market, item, tf, result, events, hits):
 
     draw_rtl(
         draw,
-        (105, 130),
-        f"{VERSION}  |  {market_name}  |  {tf}",
+        (95, 125),
+        f"{market_name} | {tf}",
         badge_font,
         accent_main,
         anchor="lm"
     )
 
     # =====================================================
-    # 2) بطاقة السهم والسعر الرئيسي (y: 250 -> 820)
+    # 2) اسم السهم والسعر الرئيسي (y: 235 -> 795)
     # =====================================================
-    panel_box(55, 250, WIDTH - 55, 820, fill=navy_panel, outline=accent_border, width=4)
+    panel_box(50, 235, WIDTH - 50, 795, fill=navy_panel, outline=accent_border, width=4)
 
     symbol = str(item["symbol"])
     name = str(item.get("name", symbol))
@@ -307,16 +333,16 @@ def create_dashboard(market, item, tf, result, events, hits):
     # اسم السهم بخط 85
     draw_rtl(
         draw,
-        (WIDTH - 105, 330),
+        (WIDTH - 95, 315),
         f"{name} ({symbol})",
         symbol_font,
         white,
         anchor="ra"
     )
 
-    # شارة الحالة (صعود أخضر / هبوط أحمر)
+    # حالة الصعود/الهبوط بخط 58
     draw.rounded_rectangle(
-        (105, 315, 435, 425),
+        (95, 305, 535, 415),
         radius=22,
         fill=accent_bg,
         outline=accent_border,
@@ -324,27 +350,27 @@ def create_dashboard(market, item, tf, result, events, hits):
     )
     draw_rtl(
         draw,
-        (270, 370),
-        f"{direction}  {result['change']:+.2f}%",
+        (315, 360),
+        f"{direction} {result['change']:+.2f}%",
         data_font,
         accent_main,
         anchor="mm"
     )
 
-    # السعر الرئيسي بخط 125 كبير وواضح
+    # السعر الرئيسي بخط 125 واضح وكبير
     price_text = f"{price:,.4f} {currency}" if price >= 1 else f"{price:,.6f} {currency}"
     draw.text(
-        (WIDTH // 2, 560),
+        (WIDTH // 2, 545),
         price_text,
         font=price_font,
         fill=accent_main,
         anchor="mm"
     )
 
-    # معلومات السوق والفاصل الزمني والتغير بخط 58
+    # سطر معلومات مختصر بخط 58
     draw_rtl(
         draw,
-        (WIDTH - 105, 705),
+        (WIDTH - 95, 695),
         f"السوق: {market_name}   •   الفاصل: {tf}",
         data_font,
         muted,
@@ -352,7 +378,7 @@ def create_dashboard(market, item, tf, result, events, hits):
     )
     draw_rtl(
         draw,
-        (105, 705),
+        (95, 695),
         f"التغير: {result['change']:+.2f}%   •   الحالة: {direction}",
         data_font,
         accent_main,
@@ -360,15 +386,15 @@ def create_dashboard(market, item, tf, result, events, hits):
     )
 
     # =====================================================
-    # 3) بيانات السيولة والمؤشرات (y: 850 -> 1475)
+    # 3) بيانات السيولة والمؤشرات (y: 815 -> 1435)
     # =====================================================
-    panel_box(55, 850, WIDTH - 55, 1475, fill=navy_panel, outline=navy_border, width=3)
+    panel_box(50, 815, WIDTH - 50, 1435, fill=navy_panel, outline=navy_border, width=3)
 
     # عنوان القسم بخط 70
     draw_rtl(
         draw,
-        (WIDTH - 105, 880),
-        "بيانات السيولة والمؤشرات الفنية",
+        (WIDTH - 95, 845),
+        "بيانات السيولة والمؤشرات",
         section_font,
         gold,
         anchor="ra"
@@ -377,16 +403,15 @@ def create_dashboard(market, item, tf, result, events, hits):
     metrics = [
         ("الفوليوم", f"{result['volume']:,.0f}", white),
         ("نشاط الفوليوم", f"{result['volume_ratio']:.2f}x", green if result["volume_ratio"] >= 1.5 else white),
-        ("RSI (14)", f"{result['rsi']:.2f}" if result["rsi"] is not None else "--", white),
+        ("RSI", f"{result['rsi']:.2f}" if result["rsi"] is not None else "--", white),
         ("VWAP", f"{result['vwap']:.4f}" if result["vwap"] is not None else "--", white),
         ("قوة المشترين", f"{result['buyer_proxy']:.1f}%", green if result["buyer_proxy"] >= 50 else red),
         ("التجميع", "موجود" if result["accumulation"] else "غير ظاهر", green if result["accumulation"] else muted)
     ]
 
-    # توزيع 6 مؤشرات في صفين × 3 أعمدة لتجنب التزاحم وضمان وضوح خط 58
-    col_widths = 720
-    col_gap = 35
-    start_x_right = WIDTH - 105
+    col_widths = 730
+    col_gap = 30
+    start_x_right = WIDTH - 95
 
     for idx, (label, val_str, val_color) in enumerate(metrics):
         row = idx // 3
@@ -394,7 +419,7 @@ def create_dashboard(market, item, tf, result, events, hits):
 
         box_x2 = start_x_right - col * (col_widths + col_gap)
         box_x1 = box_x2 - col_widths
-        box_y1 = 980 + row * 235
+        box_y1 = 945 + row * 235
         box_y2 = box_y1 + 205
 
         draw.rounded_rectangle(
@@ -407,7 +432,7 @@ def create_dashboard(market, item, tf, result, events, hits):
 
         draw_rtl(
             draw,
-            (box_x2 - 26, box_y1 + 22),
+            (box_x2 - 24, box_y1 + 18),
             label,
             data_font,
             muted,
@@ -415,7 +440,7 @@ def create_dashboard(market, item, tf, result, events, hits):
         )
 
         draw.text(
-            ((box_x1 + box_x2) // 2, box_y1 + 148),
+            ((box_x1 + box_x2) // 2, box_y1 + 150),
             str(val_str),
             font=data_font,
             fill=val_color,
@@ -423,22 +448,21 @@ def create_dashboard(market, item, tf, result, events, hits):
         )
 
     # =====================================================
-    # 4) الدعم والمقاومة و EMA (y: 1505 -> 1855)
+    # 4) الدعم والمقاومة والمتوسطات EMA (y: 1455 -> 1825)
     # =====================================================
-    panel_box(55, 1505, WIDTH - 55, 1855, fill=navy_panel, outline=navy_border, width=3)
+    panel_box(50, 1455, WIDTH - 50, 1825, fill=navy_panel, outline=navy_border, width=3)
 
     draw_rtl(
         draw,
-        (WIDTH - 105, 1532),
-        "الدعم والمقاومة والمتوسطات EMA",
+        (WIDTH - 95, 1482),
+        "الدعم والمقاومة و EMA",
         section_font,
         gold,
         anchor="ra"
     )
 
-    # بطاقة المقاومة (أحمر) وبطاقة الدعم (أخضر) بخط 58
     draw.rounded_rectangle(
-        (1240, 1625, WIDTH - 105, 1730),
+        (1235, 1575, WIDTH - 95, 1685),
         radius=20,
         fill=red_soft,
         outline=red_border,
@@ -446,7 +470,7 @@ def create_dashboard(market, item, tf, result, events, hits):
     )
     draw_rtl(
         draw,
-        (WIDTH - 135, 1677),
+        (WIDTH - 125, 1630),
         f"المقاومة: {result['resistance']:.4f}",
         data_font,
         red,
@@ -454,7 +478,7 @@ def create_dashboard(market, item, tf, result, events, hits):
     )
 
     draw.rounded_rectangle(
-        (105, 1625, 1200, 1730),
+        (95, 1575, 1205, 1685),
         radius=20,
         fill=green_soft,
         outline=green_border,
@@ -462,23 +486,20 @@ def create_dashboard(market, item, tf, result, events, hits):
     )
     draw_rtl(
         draw,
-        (1170, 1677),
+        (1175, 1630),
         f"الدعم: {result['support']:.4f}",
         data_font,
         green,
         anchor="rm"
     )
 
-    # قيم EMA بخط 58
-    ema_items = []
-    for p, v in result["ema"].items():
-        if v is not None:
-            ema_color = green if price >= v else red
-            ema_items.append(f"EMA{p}: {v:.4f}")
-
-    ema_summary = "   |   ".join(ema_items) if ema_items else "EMA: --"
+    ema_items = [
+        f"EMA{p}: {v:.4f}" for p, v in result["ema"].items()
+        if v is not None
+    ]
+    ema_summary = "  |  ".join(ema_items) if ema_items else "EMA: --"
     draw.text(
-        (WIDTH // 2, 1795),
+        (WIDTH // 2, 1755),
         ema_summary,
         font=data_font,
         fill=white,
@@ -486,15 +507,14 @@ def create_dashboard(market, item, tf, result, events, hits):
     )
 
     # =====================================================
-    # 5) الأهداف العشرون 1 - 20 (y: 1885 -> 2845)
-    # توزيع عمودين × 10 صفوف بخط 52 بدون تداخل أو اختفاء
+    # 5) الأهداف العشرون 1 - 20 (y: 1845 -> 2855)
     # =====================================================
-    panel_box(55, 1885, WIDTH - 55, 2845, fill=navy_panel, outline=navy_border, width=3)
+    panel_box(50, 1845, WIDTH - 50, 2855, fill=navy_panel, outline=navy_border, width=3)
 
     draw_rtl(
         draw,
-        (WIDTH - 105, 1912),
-        "الأهداف السعرية (1 - 20)",
+        (WIDTH - 95, 1872),
+        "الأهداف العشرون (1 - 20)",
         section_font,
         gold,
         anchor="ra"
@@ -503,19 +523,19 @@ def create_dashboard(market, item, tf, result, events, hits):
     targets = get_targets(market, symbol, tf)
 
     if targets:
-        col_w = 1110
-        col_gap_t = 70
-        row_h = 78
-        base_y = 2015
+        col_w = 1120
+        col_gap_t = 60
+        row_h = 86
+        base_y = 1972
 
         for idx, (number, target_price, hit) in enumerate(targets[:20]):
-            col = idx // 10      # العمود 0 يمين (الأهداف 1-10)، العمود 1 يسار (الأهداف 11-20)
-            row = idx % 10       # الصف 0 إلى 9
+            col = idx // 10
+            row = idx % 10
 
-            x2 = (WIDTH - 105) - col * (col_w + col_gap_t)
+            x2 = (WIDTH - 95) - col * (col_w + col_gap_t)
             x1 = x2 - col_w
             y1 = base_y + row * row_h
-            y2 = y1 + 66
+            y2 = y1 + 74
 
             row_fill = green_soft if hit else navy_card
             row_outline = green_border if hit else navy_border
@@ -532,7 +552,7 @@ def create_dashboard(market, item, tf, result, events, hits):
 
             draw_rtl(
                 draw,
-                (x2 - 24, y1 + 33),
+                (x2 - 22, y1 + 37),
                 f"{status_mark} هدف {number:02d}: {money(target_price, market)}",
                 target_font,
                 text_color,
@@ -541,28 +561,28 @@ def create_dashboard(market, item, tf, result, events, hits):
     else:
         draw_rtl(
             draw,
-            (WIDTH - 105, 2120),
-            "تنتظر اكتمال بيانات ATR لحساب الأهداف 1 إلى 20",
+            (WIDTH - 95, 2080),
+            "تنتظر اكتمال بيانات ATR",
             data_font,
             muted,
             anchor="ra"
         )
 
     # =====================================================
-    # 6) التذييل السفلي (y: 2875 -> 2965)
+    # 6) التذييل السفلي (y: 2875 -> 2975)
     # =====================================================
-    draw.line((70, 2875, WIDTH - 70, 2875), fill=navy_border, width=3)
+    draw.line((65, 2875, WIDTH - 65, 2875), fill=navy_border, width=3)
 
     draw.text(
-        (WIDTH - 105, 2920),
-        "AI PRO MAX  |  24/7 LIVE SCANNER",
+        (WIDTH - 95, 2925),
+        "AI PRO MAX V12 ULTRA HD",
         font=footer_font,
         fill=accent_main,
         anchor="rm"
     )
 
     draw.text(
-        (105, 2920),
+        (95, 2925),
         datetime.now().strftime("%Y-%m-%d  %H:%M:%S"),
         font=footer_font,
         fill=muted,
