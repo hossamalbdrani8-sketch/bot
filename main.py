@@ -614,8 +614,8 @@ async def fetch_daily_list_mappings(session):
     except Exception:
         try:
             # Nasdaq Daily List files may be comma- or tab-delimited.
-            sample="\\n".join(body.splitlines()[:8])
-            dialect=csv.Sniffer().sniff(sample, delimiters=",\\t;|")
+            sample="\n".join(body.splitlines()[:8])
+            dialect=csv.Sniffer().sniff(sample, delimiters=",\t;|")
             rows=list(csv.DictReader(body.splitlines(), dialect=dialect))
         except Exception:
             log.exception("Could not parse Daily List mapping feed")
@@ -662,7 +662,6 @@ async def process_ticker_changes(session, current_us_symbols):
             continue
 
         company_id=mapping.get("company_id","")
-        old_item=None
         # If company IDs are supplied by both sides, require equality.
         new_id=str(current[new].get("company_id","") or "")
         if company_id and new_id and company_id not in (new_id, f"CIK{new_id}"):
